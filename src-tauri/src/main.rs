@@ -44,6 +44,7 @@ struct PendingClipboard {
 struct PendingRequests {
     current: u64,
     value: Option<PendingClipboard>,
+    reading_selection: bool,
 }
 
 impl PendingRequests {
@@ -53,7 +54,18 @@ impl PendingRequests {
         self.current
     }
 
+    fn begin_selection(&mut self) -> Option<u64> {
+        if self.reading_selection {
+            return None;
+        }
+        self.reading_selection = true;
+        Some(self.begin())
+    }
+
     fn deliver(&mut self, request: u64, value: PendingClipboard) -> bool {
+        if value.selection {
+            self.reading_selection = false;
+        }
         if request != self.current {
             return false;
         }
@@ -329,7 +341,15 @@ fn translate_clipboard(app: &tauri::AppHandle) {
 }
 
 fn translate_selection(app: &tauri::AppHandle) {
-    let Some(request) = begin_request(app) else {
+    // A repeated shortcut must not replace an in-flight Copy with a busy error
+    // and focus this window while the source app is still supplying its text.
+    let Some(request) = app
+        .state::<AppState>()
+        .pending
+        .lock()
+        .ok()
+        .and_then(|mut pending| pending.begin_selection())
+    else {
         return;
     };
     let app = app.clone();
@@ -616,6 +636,31 @@ mod tests {
         ));
         assert!(pending.value.is_none());
         assert!(pending.deliver(newer, text("new clipboard")));
+    }
+
+    #[test]
+    fn repeated_shortcuts_do_not_interrupt_selection_capture() {
+        let mut pending = PendingRequests::default();
+        let request = pending.begin_selection().unwrap();
+        assert!(pending.begin_selection().is_none());
+        assert!(pending.deliver(
+            request,
+            PendingClipboard {
+                selection: true,
+                ..text("selected PDF")
+            }
+        ));
+        let next = pending.begin_selection().unwrap();
+        let clipboard = pending.begin();
+        assert!(!pending.deliver(
+            next,
+            PendingClipboard {
+                selection: true,
+                ..text("superseded selection")
+            }
+        ));
+        assert!(pending.deliver(clipboard, text("clipboard")));
+        assert!(pending.begin_selection().is_some());
     }
 
     #[tokio::test]

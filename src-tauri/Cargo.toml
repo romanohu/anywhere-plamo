@@ -1,6 +1,6 @@
 [package]
 name = "anywhere-plamo"
-version = "0.1.1"
+version = "0.1.2"
 description = "A small, local translation app powered by PLaMo"
 edition = "2021"
 rust-version = "1.90"
@@ -30,6 +30,9 @@ wl-clipboard-rs = "0.9"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSPasteboard", "NSPasteboardItem"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSString", "NSData", "NSEnumerator"] }
 
 [profile.release]
 lto = "thin"

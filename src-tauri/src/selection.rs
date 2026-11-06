@@ -1,5 +1,9 @@
 //! Read the selection before bringing our window to the foreground.
-//! The regular copy/paste clipboard is never read or overwritten here.
+//! On macOS, inaccessible selections fall back to Copy with clipboard restoration.
+
+#[cfg(target_os = "macos")]
+#[path = "selection_copy.rs"]
+mod copy;
 
 const UNAVAILABLE: &str = "選択した文字を取得できませんでした。文章を選択して、もう一度ショートカットを押してください。対応しないアプリでは、コピーして「貼り付け」を使えます。";
 const TOO_LONG: &str = "一度に翻訳できるのは12,000文字までです。文章を短く分けてください。";
@@ -130,6 +134,7 @@ mod macos {
         fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> Boolean;
         fn AXUIElementCreateSystemWide() -> CFTypeRef;
         fn AXUIElementGetTypeID() -> CFTypeID;
+        fn AXUIElementGetPid(element: CFTypeRef, pid: *mut i32) -> i32;
         fn AXUIElementSetMessagingTimeout(element: CFTypeRef, timeout: f32) -> i32;
         fn AXUIElementCopyAttributeValue(
             element: CFTypeRef,
@@ -164,7 +169,10 @@ mod macos {
     fn selected_text(element: &CFType) -> Result<String, String> {
         if let Ok(value) = attribute(element, "AXSelectedText") {
             if let Some(text) = value.downcast::<CFString>() {
-                return Ok(text.to_string());
+                let text = text.to_string();
+                if !text.trim().is_empty() {
+                    return Ok(text);
+                }
             }
         }
 
@@ -191,6 +199,18 @@ mod macos {
             .ok_or_else(|| super::UNAVAILABLE.to_owned())
     }
 
+    fn focused_pid(system: &CFType) -> Result<i32, String> {
+        let app = attribute(system, "AXFocusedApplication")?;
+        if app.type_of() != unsafe { AXUIElementGetTypeID() } {
+            return Err(super::UNAVAILABLE.into());
+        }
+        let mut pid = 0;
+        if unsafe { AXUIElementGetPid(app.as_CFTypeRef(), &mut pid) } != 0 || pid <= 0 {
+            return Err(super::UNAVAILABLE.into());
+        }
+        Ok(pid)
+    }
+
     pub fn read() -> Result<String, String> {
         let options = CFDictionary::from_CFType_pairs(&[(
             CFString::new("AXTrustedCheckOptionPrompt"),
@@ -206,12 +226,20 @@ mod macos {
         }
         let system = unsafe { CFType::wrap_under_create_rule(system) };
         unsafe { AXUIElementSetMessagingTimeout(system.as_CFTypeRef(), 2.0) };
-        let focused = attribute(&system, "AXFocusedUIElement")?;
-        if focused.type_of() != unsafe { AXUIElementGetTypeID() } {
-            return Err(super::UNAVAILABLE.into());
+        let source_pid = focused_pid(&system)?;
+        if let Ok(focused) = attribute(&system, "AXFocusedUIElement") {
+            if focused.type_of() == unsafe { AXUIElementGetTypeID() } {
+                unsafe { AXUIElementSetMessagingTimeout(focused.as_CFTypeRef(), 2.0) };
+                if let Ok(text) = selected_text(&focused) {
+                    if !text.trim().is_empty() {
+                        return Ok(text);
+                    }
+                }
+            }
         }
-        unsafe { AXUIElementSetMessagingTimeout(focused.as_CFTypeRef(), 2.0) };
-        selected_text(&focused)
+        // PDF viewers may support Copy without exposing their selected text
+        // through accessibility. Keep the original app focused until it copies.
+        super::copy::read(source_pid, || focused_pid(&system) == Ok(source_pid))
     }
 }
 
