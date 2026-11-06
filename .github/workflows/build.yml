@@ -19,9 +19,9 @@ jobs:
           - os: ubuntu-24.04
             bundles: deb,appimage
           - os: macos-15
-            bundles: dmg
+            bundles: app,dmg
           - os: macos-15-intel
-            bundles: dmg
+            bundles: app,dmg
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
