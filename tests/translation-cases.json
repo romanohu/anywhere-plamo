@@ -1,0 +1,38 @@
+[
+  {
+    "id": "short",
+    "text": "The meeting starts at ten. Please bring the report.",
+    "target": "ja",
+    "review": "10時開始と、報告書を持参する依頼の両方が訳されること。"
+  },
+  {
+    "id": "paragraphs",
+    "text": "The library will reopen on Monday after three weeks of renovation. Visitors can borrow books as usual, but the reading room on the second floor will remain closed until Friday.\n\nBooks borrowed before the closure are not overdue. Please return them by November 20. If you cannot visit in person, you can extend the loan online.\n\nThe children's reading event will take place in the ground-floor meeting room. Registration is free, and each family may reserve up to four seats.",
+    "target": "ja",
+    "review": "3段落を省略せず、閉室期間、延滞扱いではない点、返却期限、無料・4席までの条件を保持すること。"
+  },
+  {
+    "id": "negation",
+    "text": "Do not disconnect the power until the update is complete. Closing the window does not cancel the update.",
+    "target": "ja",
+    "review": "電源を切ってはいけないことと、ウィンドウを閉じても更新は中止されないことを区別すること。"
+  },
+  {
+    "id": "numbers_names",
+    "text": "Aki Tanaka ordered 12 sensors from Northbridge Labs for 3,600 yen. Only 9 arrived, so 3 are still missing.",
+    "target": "ja",
+    "review": "人物・組織の対応、12個・3,600円・到着9個・不足3個を保持すること。"
+  },
+  {
+    "id": "list",
+    "text": "Before leaving:\n- Save the document.\n- Turn off the lights.\n- Leave the door unlocked for the cleaning staff.",
+    "target": "ja",
+    "review": "3項目が残り、最後が『施錠する』に逆転しないこと。"
+  },
+  {
+    "id": "ja_en",
+    "text": "お手数ですが、明日の午後3時までに見積書をご確認ください。修正が必要な場合は、承認せずに田中までご連絡ください。",
+    "target": "en",
+    "review": "依頼の丁寧さ、明日15時の期限、修正が必要なら承認しない条件と連絡先を保持すること。"
+  }
+]

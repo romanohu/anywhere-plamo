@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Anywhere Plamo</title>
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="app-header">
+        <a class="brand" href="#" aria-label="Anywhere Plamo">
+          <img src="/icon.svg" width="34" height="34" alt="" />
+          <span>Anywhere <strong>Plamo</strong></span>
+        </a>
+        <div class="header-actions">
+          <span class="local-status" id="model-status"><span class="status-dot"></span><span id="model-status-text">確認中</span></span>
+          <button class="icon-button" id="settings-button" title="設定と使い方" aria-label="設定と使い方">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <main>
+        <section class="intro">
+          <h1>いつもの文章を、すぐに翻訳。</h1>
+          <p>文章を選んで、ショートカット。翻訳はこの端末の中で。</p>
+        </section>
+
+        <section class="setup-banner" id="setup-banner" hidden aria-labelledby="setup-heading">
+          <div><strong id="setup-heading">はじめに、翻訳モデルを準備しましょう</strong><p>約570 MBのダウンロードで、オフラインでも使えます。</p></div>
+          <button class="button small" id="setup-open">準備する <span aria-hidden="true">→</span></button>
+        </section>
+
+        <div class="reading-actions" id="reading-actions" hidden>
+          <button class="text-button" id="toggle-original" aria-controls="source-panel" aria-expanded="false">原文を表示</button>
+          <button class="text-button" id="edit-source">編集画面へ</button>
+        </div>
+        <section class="translator" aria-label="テキスト翻訳">
+          <div class="text-panel source-panel" id="source-panel">
+            <div class="panel-header">
+              <label for="source">原文 <span class="muted">自動判定</span></label>
+              <button class="text-button" id="paste-button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5H6a2 2 0 0 0-2 2v13h16V7a2 2 0 0 0-2-2h-3"/><rect x="9" y="3" width="6" height="4" rx="1"/></svg>貼り付け</button>
+            </div>
+            <textarea id="source" placeholder="翻訳したい文章をここに。" maxlength="12000" spellcheck="false" aria-describedby="character-count input-limit"></textarea>
+            <div class="panel-footer"><span id="character-count">0 / 12,000</span><button class="text-button" id="clear-button" disabled>クリア</button></div>
+            <p class="input-limit" id="input-limit">最大12,000文字分（絵文字などは複数文字分）。長文は空行で段落に分けると順番に翻訳します。1段落が長すぎる場合は、さらに分けてください。</p>
+          </div>
+          <div class="text-panel result-panel">
+            <div class="panel-header">
+              <label class="target-label" for="target">訳文
+                <select id="target" aria-label="翻訳先の言語">
+                  <option value="ja">日本語</option><option value="en">English</option>
+                  <option value="ko">한국어</option><option value="zh-hans">简体中文</option>
+                  <option value="fr">Français</option><option value="de">Deutsch</option><option value="es">Español</option>
+                </select>
+              </label>
+              <button class="text-button" id="copy-button" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V3H3v13h5"/></svg><span id="copy-label">コピー</span></button>
+            </div>
+            <div class="result-content" id="result-content">
+              <div class="empty-result" id="empty-result"><svg viewBox="0 0 48 48" aria-hidden="true"><path d="M8 10h23v19H17l-9 8V10Z"/><path d="M31 19h9v23l-8-7h-9v-6"/><path d="M15 18h10M15 23h6"/></svg><p>ここに訳文が表示されます</p></div>
+              <p id="translation" dir="auto" hidden></p>
+            </div>
+            <div class="panel-footer"><span id="translation-status" role="status" aria-live="polite">翻訳する準備ができたら、ボタンを押してください</span></div>
+          </div>
+        </section>
+
+        <div class="message" id="message" role="alert" hidden></div>
+        <div class="translate-actions">
+          <span class="keyboard-hint"><kbd id="modifier-key">Ctrl</kbd> <span>+</span> <kbd>Enter</kbd> <span>で翻訳</span></span>
+          <button class="button primary" id="translate-button" disabled><span id="translate-label">翻訳する</span><span aria-hidden="true" id="translate-arrow">→</span></button>
+        </div>
+      </main>
+
+      <footer class="app-footer"><span class="privacy-note"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>原文・訳文を外部に送信しません</span><span>Built with PLaMo</span></footer>
+    </div>
+
+    <dialog id="settings-dialog" aria-labelledby="settings-title">
+      <div class="dialog-header"><h2 id="settings-title">設定と使い方</h2><button class="icon-button" id="settings-close" aria-label="閉じる"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
+      <section class="settings-section">
+        <h3>翻訳モデル</h3>
+        <div class="model-card"><div class="model-symbol" aria-hidden="true">P</div><div><strong>PLaMo 3 Translate</strong><p>0.8B · 約570 MB</p></div><span class="model-tag" id="model-tag">未準備</span></div>
+        <p class="setting-description">初回のみ、PFNの公式配布先からモデルを取得します。</p>
+        <p class="license-note">モデルには <button class="inline-link" id="license-link">PLaMo Community License</button> が適用されます。個人・非商用利用は無償です。商用利用には登録などの条件があります。</p>
+        <div id="download-section"><button class="button primary full-width" id="download-button">利用条件を確認してダウンロード</button></div>
+        <div id="download-progress" hidden><div class="progress-heading"><span id="download-label">ダウンロード中</span><span id="download-percent">0%</span></div><progress id="progress-bar" max="100" value="0"></progress><button class="text-button" id="download-cancel">中止</button></div>
+        <p id="download-message" class="setting-description" role="status" aria-live="polite"></p>
+        <label class="setting-toggle"><input type="checkbox" id="preload-model" checked aria-describedby="preload-description" />起動時にモデルを先読み</label>
+        <p class="setting-description" id="preload-description">最初の翻訳を速くするため、待機中もモデルをメモリに保持します。オフへの変更は次回起動から反映されます。</p>
+      </section>
+      <section class="settings-section"><h3>他のアプリから翻訳</h3><p class="setting-description" id="shortcut-description">文章を選択して、ショートカットを押すと翻訳します。</p><div class="shortcut-box" id="shortcut-display">Ctrl + Shift + J</div><p class="setting-description" id="shortcut-note">ウィンドウを閉じても常駐します。終了はトレイメニューから。</p></section>
+      <section class="settings-section about"><strong>Anywhere Plamo <span>0.1.0</span></strong><p>端末の中だけで動く、小さな翻訳アプリ。<br>原文・訳文の履歴は保存しません。</p><button class="text-button" id="quit-button">アプリを終了</button></section>
+    </dialog>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
