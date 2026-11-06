@@ -52,6 +52,8 @@ npm run tauri build
 
 「選択した文章の日英を自動切替」をオンにすると、日本語の選択文は英語、英語の選択文は日本語へ翻訳します。文字種による簡易判定で、判定できない文章は選択中の翻訳先を使います。
 
+「別ウィンドウで翻訳」をオンにすると、ショートカット翻訳を専用の小窓に表示します。翻訳後に外側をクリックすると閉じます。初期状態はオフです。
+
 「起動時にモデルを先読み」を有効にすると、初回の翻訳が速くなる代わりに待機中もメモリを使います。オフへの変更は次回起動から反映されます。アプリを終了するには、設定の「終了」を使います。
 
 ウィンドウを閉じてもメニューバー／トレイに常駐し、ショートカットを使えます（トレイを利用できる環境のみ）。画面を出さずに起動するには、Macでは`open -a "Anywhere Plamo" --args --background`、Linuxでは`anywhere-plamo --background`を使います。
@@ -69,7 +71,3 @@ anywhere-plamo --translate-selection
 ## ライセンス
 
 Built with PLaMo. アプリ: [MIT](LICENSE) · モデル: [PLaMo Community License](https://plamo.preferredai.jp/info/plamo-community-license-ja) · [第三者ライセンス](THIRD_PARTY_NOTICES.md)
-
-モデルの業務・商用利用（社内利用を含む）には、事前登録またはPFNとの別契約が必要です。
-
-開発では[tanakh/plamo-translate-desktop](https://github.com/tanakh/plamo-translate-desktop)を参考にしています。

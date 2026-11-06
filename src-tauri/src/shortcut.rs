@@ -79,6 +79,8 @@ pub fn label(shortcut: Shortcut) -> String {
 #[derive(Serialize, Deserialize)]
 struct Settings {
     shortcut: String,
+    #[serde(default, rename = "shortcutPopup")]
+    shortcut_popup: bool,
 }
 
 pub fn load(path: &Path) -> Shortcut {
@@ -89,13 +91,20 @@ pub fn load(path: &Path) -> Shortcut {
         .unwrap_or_else(default)
 }
 
+pub fn load_popup(path: &Path) -> bool {
+    fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Settings>(&bytes).ok())
+        .is_some_and(|settings| settings.shortcut_popup)
+}
+
 pub struct PendingSave {
     temporary: PathBuf,
     destination: PathBuf,
 }
 
 impl PendingSave {
-    pub fn new(path: &Path, shortcut: Shortcut) -> Result<Self, String> {
+    pub fn new(path: &Path, shortcut: Shortcut, shortcut_popup: bool) -> Result<Self, String> {
         let directory = path.parent().ok_or(SAVE_ERROR)?;
         fs::create_dir_all(directory).map_err(|_| SAVE_ERROR)?;
         let pending = Self {
@@ -104,6 +113,7 @@ impl PendingSave {
         };
         let bytes = serde_json::to_vec(&Settings {
             shortcut: label(shortcut),
+            shortcut_popup,
         })
         .map_err(|_| SAVE_ERROR)?;
         let mut file = OpenOptions::new()
@@ -204,15 +214,28 @@ mod tests {
         let path = directory.join("settings.json");
         assert_eq!(load(&path), default());
         let binding = parse("Ctrl+Alt+KeyT").unwrap();
-        let pending = PendingSave::new(&path, binding).unwrap();
+        assert!(!load_popup(&path));
+        let pending = PendingSave::new(&path, binding, true).unwrap();
         assert!(!path.exists());
         pending.commit().unwrap();
         assert_eq!(load(&path), binding);
-        drop(PendingSave::new(&path, default()).unwrap());
+        assert!(load_popup(&path));
+        drop(PendingSave::new(&path, default(), false).unwrap());
         assert_eq!(load(&path), binding);
+        assert!(load_popup(&path));
         assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
         fs::write(&path, r#"{"shortcut":"J"}"#).unwrap();
         assert_eq!(load(&path), default());
+        assert!(!load_popup(&path));
+        fs::write(&path, r#"{"shortcut":"Ctrl+Alt+KeyT"}"#).unwrap();
+        assert_eq!(load(&path), binding);
+        assert!(!load_popup(&path));
+        PendingSave::new(&path, default(), true)
+            .unwrap()
+            .commit()
+            .unwrap();
+        assert_eq!(load(&path), default());
+        assert!(load_popup(&path));
         fs::remove_dir_all(directory).unwrap();
     }
 

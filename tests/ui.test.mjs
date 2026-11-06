@@ -19,7 +19,7 @@ async function fixture(t, options = {}) {
   const errors = [];
   const console = new VirtualConsole();
   console.on('jsdomError', error => errors.push(error));
-  const dom = new JSDOM(html, { url: 'http://localhost/', runScripts: 'outside-only', virtualConsole: console });
+  const dom = new JSDOM(html, { url: `http://localhost/${options.popup ? '?popup' : ''}`, runScripts: 'outside-only', virtualConsole: console });
   const { window } = dom;
   if (options.preload !== undefined) window.localStorage.setItem('preload-model', String(options.preload));
   if (options.autoDirection !== undefined) window.localStorage.setItem('auto-direction', String(options.autoDirection));
@@ -35,11 +35,12 @@ async function fixture(t, options = {}) {
   const state = {
     modelReady: options.modelReady ?? true, runtimeAvailable: true,
     shortcutAvailable: true, wayland: false, resident: true,
-    shortcut: 'Ctrl+Shift+KeyJ', defaultShortcut: 'Ctrl+Shift+KeyJ', shortcutSupported: true,
+    shortcut: 'Ctrl+Shift+KeyJ', defaultShortcut: 'Ctrl+Shift+KeyJ', shortcutSupported: true, shortcutPopup: false,
     ...options.status,
   };
   let clipboard = options.clipboard ?? 'Hello, world.';
-  let pending = options.pending ?? null;
+  let request = 1;
+  let pending = options.pending ? { request, ...options.pending } : null;
   let rejectOperation;
   let finishOperation;
   let channel;
@@ -62,6 +63,10 @@ async function fixture(t, options = {}) {
             if (options.shortcutError) throw options.shortcutError;
             state.shortcut = args.shortcut;
             state.shortcutAvailable = true;
+            return { ...state };
+          case 'set_shortcut_popup':
+            if (options.popupError) throw options.popupError;
+            state.shortcutPopup = args.enabled;
             return { ...state };
           case 'prepare_engine':
             if (options.prepareError) throw options.prepareError;
@@ -93,7 +98,7 @@ async function fixture(t, options = {}) {
             if (options.cancelError) throw options.cancelError;
             if (options.holdCancellation) return new Promise(resolve => { finishCancellation = resolve; });
             rejectOperation?.('CANCELLED'); return;
-          case 'hide_window': case 'quit_app': case 'open_model_license': return;
+          case 'hide_window': case 'quit_app': case 'open_model_license': case 'finish_popup_request': return;
           default: throw new Error(`Unexpected command: ${command}`);
         }
       },
@@ -125,8 +130,8 @@ async function fixture(t, options = {}) {
     finishRecording() { finishRecording(); },
     shortcutPressed(shortcut) { listeners.get('shortcut-pressed')?.({ payload: shortcut }); },
     closeWindow() { listeners.get('window-hidden')?.({ payload: null }); },
-    request(text, selection = true) { pending = { text, selection }; listeners.get('clipboard-request')?.({ payload: null }); },
-    requestError(error) { pending = { text: null, error }; listeners.get('clipboard-request')?.({ payload: null }); },
+    request(text, selection = true) { pending = { text, selection, request: ++request }; listeners.get('clipboard-request')?.({ payload: null }); return request; },
+    requestError(error) { pending = { text: null, error, request: ++request }; listeners.get('clipboard-request')?.({ payload: null }); return request; },
   };
 }
 
@@ -135,6 +140,7 @@ test('browser preview clearly disables translation and model download', async t 
   f.input('Test');
   assert.equal(f.byId('setup-heading').textContent, '画面プレビュー');
   assert.equal(f.byId('shortcut-record').disabled, true);
+  assert.equal(f.byId('shortcut-popup').disabled, true);
   assert.equal(f.byId('translate-button').disabled, true);
   f.click('setup-open');
   assert.equal(f.byId('settings-dialog').open, true);
@@ -260,6 +266,147 @@ test('an unavailable shortcut can be retried without changing its keys', async t
   assert.equal(f.byId('shortcut-save').disabled, true);
 });
 
+test('separate shortcut windows are off by default and persist only after native settings succeed', async t => {
+  const f = await fixture(t);
+  assert.equal(f.byId('shortcut-popup').checked, false);
+  f.click('settings-button');
+  f.click('shortcut-popup');
+  await until(() => !f.byId('shortcut-popup').disabled);
+  assert.equal(f.state.shortcutPopup, true);
+  assert.equal(f.byId('shortcut-popup').checked, true);
+  assert.deepEqual(f.calls.filter(call => call.command === 'set_shortcut_popup').map(call => call.args.enabled), [true]);
+  f.click('shortcut-popup');
+  await until(() => !f.byId('shortcut-popup').disabled);
+  assert.equal(f.state.shortcutPopup, false);
+  f.state.shortcutPopup = true;
+  f.click('settings-close');
+  f.click('settings-button');
+  await until(() => f.byId('shortcut-popup').checked);
+});
+
+test('failed popup settings restore the saved option and report the error', async t => {
+  const f = await fixture(t, { popupError: '設定を保存できませんでした。', status: { shortcutPopup: true } });
+  assert.equal(f.byId('shortcut-popup').checked, true);
+  f.click('shortcut-popup');
+  await until(() => !f.byId('shortcut-popup').disabled);
+  assert.equal(f.byId('shortcut-popup').checked, true);
+  assert.equal(f.state.shortcutPopup, true);
+  assert.equal(f.byId('shortcut-message').textContent, '設定を保存できませんでした。');
+});
+
+test('a shortcut popup becomes dismissible only after its translation has finished', async t => {
+  const f = await fixture(t, { popup: true, holdTranslation: true, pending: { text: 'Popup selection', selection: true } });
+  await until(() => f.calls.some(call => call.command === 'translate'));
+  assert.equal(f.window.document.body.classList.contains('popup'), true);
+  assert.equal(f.byId('source-panel').hidden, true);
+  assert.equal(f.calls.some(call => call.command === 'prepare_engine'), false);
+  assert.equal(f.calls.some(call => call.command === 'finish_popup_request'), false);
+  f.send({ kind: 'token', text: '小窓の訳文' });
+  assert.equal(f.calls.some(call => call.command === 'finish_popup_request'), false);
+  f.finish({ truncated: false });
+  await until(() => f.calls.some(call => call.command === 'finish_popup_request'));
+  assert.equal(f.calls.find(call => call.command === 'finish_popup_request').args.request, 1);
+  assert.equal(f.byId('translation').textContent, '小窓の訳文');
+});
+
+test('a newer popup request waits for cancellation and its own result before becoming dismissible', async t => {
+  const f = await fixture(t, { popup: true, holdTranslation: true, holdCancellation: true, pending: { text: 'First', selection: true } });
+  await until(() => f.calls.some(call => call.command === 'translate'));
+  f.request('Second');
+  await until(() => f.calls.some(call => call.command === 'cancel_operation'));
+  const newest = f.request('Newest');
+  await until(() => f.calls.filter(call => call.command === 'take_pending_clipboard').length === 3);
+  f.fail('CANCELLED');
+  await until(() => f.byId('translation-status').textContent === '翻訳を中断しました');
+  assert.equal(f.calls.some(call => call.command === 'finish_popup_request'), false);
+  f.finishCancellation();
+  await until(() => f.calls.filter(call => call.command === 'translate').length === 2);
+  assert.equal(f.byId('source').value, 'Newest');
+  assert.equal(f.calls.some(call => call.command === 'finish_popup_request'), false);
+  f.finish({ truncated: false });
+  await until(() => f.calls.some(call => call.command === 'finish_popup_request'));
+  assert.deepEqual(f.calls.filter(call => call.command === 'finish_popup_request').map(call => call.args.request), [newest]);
+});
+
+test('hiding the popup discards a queued replacement without affecting its next use', async t => {
+  const f = await fixture(t, { popup: true, holdTranslation: true, holdCancellation: true, pending: { text: 'First', selection: true } });
+  await until(() => f.calls.some(call => call.command === 'translate'));
+  f.request('Queued before closing');
+  await until(() => f.calls.some(call => call.command === 'cancel_operation'));
+  f.closeWindow();
+  f.fail('CANCELLED');
+  f.finishCancellation();
+  await until(() => !f.byId('translate-button').disabled);
+  assert.equal(f.calls.filter(call => call.command === 'translate').length, 1);
+  assert.equal(f.calls.some(call => call.command === 'finish_popup_request'), false);
+  const request = f.request('Selection after reopening');
+  await until(() => f.calls.filter(call => call.command === 'translate').length === 2);
+  f.finish({ truncated: false });
+  await until(() => f.calls.some(call => call.command === 'finish_popup_request'));
+  assert.equal(f.calls.find(call => call.command === 'finish_popup_request').args.request, request);
+});
+
+test('hiding the popup invalidates a selection that is still being read', async t => {
+  const f = await fixture(t, { popup: true, holdPending: true, pending: { text: 'Already reading', selection: true } });
+  f.closeWindow();
+  f.finishPending();
+  await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(f.calls.some(call => call.command === 'translate'), false);
+  assert.equal(f.calls.some(call => call.command === 'finish_popup_request'), false);
+  assert.equal(f.byId('source').value, '');
+  f.request('After reopening');
+  f.finishPending();
+  await until(() => f.calls.some(call => call.command === 'finish_popup_request'));
+  assert.equal(f.byId('source').value, 'After reopening');
+});
+
+test('popup selection errors become dismissible after an older translation settles', async t => {
+  const f = await fixture(t, { popup: true, holdTranslation: true, pending: { text: 'First', selection: true } });
+  await until(() => f.calls.some(call => call.command === 'translate'));
+  const request = f.requestError('選択文字を取得できませんでした。');
+  await until(() => !f.byId('message').hidden);
+  assert.equal(f.calls.some(call => call.command === 'finish_popup_request'), false);
+  assert.equal(f.calls.some(call => call.command === 'cancel_operation'), false);
+  f.finish({ truncated: false });
+  await until(() => f.calls.some(call => call.command === 'finish_popup_request'));
+  assert.equal(f.calls.find(call => call.command === 'finish_popup_request').args.request, request);
+  assert.equal(f.byId('message').textContent, '選択文字を取得できませんでした。');
+});
+
+test('popup requests refresh shared language preferences and model readiness without duplicate preloading', async t => {
+  const f = await fixture(t, { popup: true, modelReady: false, target: 'fr' });
+  f.state.modelReady = true;
+  f.window.localStorage.setItem('target-language', 'de');
+  f.window.localStorage.setItem('auto-direction', 'true');
+  f.window.localStorage.setItem('preload-model', 'false');
+  f.request('日本語の文章');
+  await until(() => f.byId('translation-status').textContent.includes('翻訳完了'));
+  assert.equal(f.calls.filter(call => call.command === 'translate').at(-1).args.target, 'en');
+  assert.equal(f.byId('preload-model').checked, false);
+  assert.equal(f.byId('setup-banner').hidden, true);
+  assert.equal(f.calls.some(call => call.command === 'prepare_engine'), false);
+  f.window.localStorage.setItem('auto-direction', 'false');
+  f.request('Another selection');
+  await until(() => f.calls.filter(call => call.command === 'translate').length === 2);
+  assert.equal(f.calls.filter(call => call.command === 'translate').at(-1).args.target, 'de');
+  assert.equal(f.window.localStorage.getItem('target-language'), 'de');
+});
+
+test('main-window shortcut requests pick up preferences changed in the popup', async t => {
+  const f = await fixture(t, { target: 'fr' });
+  f.input('Keep this manual draft');
+  f.window.localStorage.setItem('target-language', 'de');
+  f.window.localStorage.setItem('auto-direction', 'true');
+  f.request('日本語の文章');
+  await until(() => f.byId('translation-status').textContent.includes('翻訳完了'));
+  assert.equal(f.calls.filter(call => call.command === 'translate').at(-1).args.target, 'en');
+  f.window.localStorage.setItem('auto-direction', 'false');
+  f.request('Another selection');
+  await until(() => f.calls.filter(call => call.command === 'translate').length === 2);
+  assert.equal(f.calls.filter(call => call.command === 'translate').at(-1).args.target, 'de');
+  assert.equal(f.calls.some(call => call.command === 'finish_popup_request'), false);
+});
+
 test('Wayland shows the OS command without offering unsupported shortcut registration', async t => {
   const f = await fixture(t, { status: { wayland: true, shortcutSupported: false, shortcutAvailable: false } });
   f.click('settings-button');
@@ -361,6 +508,8 @@ test('a pending shortcut request translates after startup status has loaded', as
   await until(() => f.calls.some(call => call.command === 'translate'));
   assert.equal(f.byId('source').value, 'From another application');
   assert.equal(f.byId('settings-dialog').open, false);
+  assert.equal(f.window.document.body.classList.contains('popup'), false);
+  assert.equal(f.calls.some(call => call.command === 'finish_popup_request'), false);
 });
 
 test('automatic direction is off by default and preserves the selected language', async t => {

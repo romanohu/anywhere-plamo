@@ -75,6 +75,8 @@
         <p class="setting-description" id="shortcut-message" role="status" aria-live="polite"></p>
         <p class="setting-description" id="shortcut-note"></p>
         <label class="setting-toggle"><input type="checkbox" id="auto-direction" />選択した文章の日英を自動切替</label>
+        <label class="setting-toggle"><input type="checkbox" id="shortcut-popup" aria-describedby="shortcut-popup-description" />別ウィンドウで翻訳</label>
+        <p class="setting-description" id="shortcut-popup-description">翻訳後、外側をクリックすると閉じます。</p>
       </section>
       <section class="settings-section">
         <h3>翻訳モデル</h3>
@@ -86,7 +88,7 @@
         <label class="setting-toggle" title="初回の翻訳を速くします"><input type="checkbox" id="preload-model" checked aria-describedby="preload-description" />起動時にモデルを先読み</label>
         <p class="setting-description" id="preload-description">待機中もメモリを使用。オフは次回起動から。</p>
       </section>
-      <section class="settings-section about"><span>Anywhere Plamo 0.1.3 · MIT</span><button class="text-button" id="quit-button">終了</button></section>
+      <section class="settings-section about"><span>Anywhere Plamo 0.1.4 · MIT</span><button class="text-button" id="quit-button">終了</button></section>
     </dialog>
     <script type="module" src="/src/main.ts"></script>
   </body>

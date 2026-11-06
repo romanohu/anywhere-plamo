@@ -19,6 +19,7 @@ const dialog = element<HTMLDialogElement>('settings-dialog');
 const downloadButton = element<HTMLButtonElement>('download-button');
 const preloadModel = element<HTMLInputElement>('preload-model');
 const autoDirection = element<HTMLInputElement>('auto-direction');
+const shortcutPopup = element<HTMLInputElement>('shortcut-popup');
 const statusText = element<HTMLSpanElement>('translation-status');
 const message = element<HTMLDivElement>('message');
 const shortcutRecord = element<HTMLButtonElement>('shortcut-record');
@@ -26,11 +27,13 @@ const shortcutSave = element<HTMLButtonElement>('shortcut-save');
 const shortcutReset = element<HTMLButtonElement>('shortcut-reset');
 const shortcutMessage = element('shortcut-message');
 const mac = /Mac/.test(navigator.platform);
-let status: AppStatus = { modelReady: false, runtimeAvailable: false, shortcutAvailable: false, shortcut: '', defaultShortcut: '', shortcutSupported: false, wayland: false, resident: false };
+const popup = new URLSearchParams(location.search).has('popup');
+let status: AppStatus = { modelReady: false, runtimeAvailable: false, shortcutAvailable: false, shortcut: '', defaultShortcut: '', shortcutSupported: false, shortcutPopup: false, wayland: false, resident: false };
 let shortcutDraft = '';
 let recordingShortcut = false;
 let startingShortcut = false;
 let savingShortcut = false;
+let savingPopup = false;
 let busy = false;
 let downloading = false;
 let cancelling = false;
@@ -45,14 +48,22 @@ let takePendingAgain = false;
 let selectionGeneration = 0;
 let pendingReadGeneration = 0;
 let preparationRequested = false;
-
-try {
-  const saved = localStorage.getItem('target-language');
-  if (saved && Array.from(target.options).some(option => option.value === saved)) target.value = saved;
-  preloadModel.checked = localStorage.getItem('preload-model') !== 'false';
-  autoDirection.checked = localStorage.getItem('auto-direction') === 'true';
-} catch { /* Preferences are optional when browser storage is unavailable. */ }
+let popupRequest: number | null = null;
+let popupTerminal = false;
 let manualTarget = target.value;
+
+function loadPreferences(): void {
+  try {
+    const saved = localStorage.getItem('target-language');
+    if (saved && Array.from(target.options).some(option => option.value === saved)) manualTarget = saved;
+    preloadModel.checked = localStorage.getItem('preload-model') !== 'false';
+    autoDirection.checked = localStorage.getItem('auto-direction') === 'true';
+  } catch { /* Preferences are optional when browser storage is unavailable. */ }
+}
+loadPreferences();
+target.value = manualTarget;
+document.body.classList.toggle('popup', popup);
+if (popup) document.title = 'Anywhere Plamo — 選択翻訳';
 
 element('modifier-key').textContent = mac ? '⌘' : 'Ctrl';
 
@@ -113,6 +124,8 @@ async function refreshStatus(): Promise<void> {
 }
 
 function renderShortcut(): void {
+  shortcutPopup.disabled = !isDesktop || savingPopup;
+  if (!savingPopup) shortcutPopup.checked = status.shortcutPopup;
   shortcutRecord.disabled = !status.shortcutSupported || savingShortcut;
   shortcutRecord.setAttribute('aria-pressed', String(recordingShortcut && !startingShortcut));
   element('shortcut-display').textContent = startingShortcut ? '準備中…' : recordingShortcut ? 'キーを押してください…'
@@ -133,11 +146,13 @@ function renderShortcut(): void {
 }
 
 function openSettings(): void {
+  loadPreferences();
   shortcutDraft = status.shortcut;
   stopShortcutRecording();
   shortcutMessage.textContent = status.shortcutSupported && !status.shortcutAvailable ? 'このキーを登録できませんでした。別のキーを設定してください。' : '';
   renderShortcut();
   dialog.showModal();
+  if (isDesktop) void refreshStatus().catch(showError);
 }
 
 function stopShortcutRecording(): void {
@@ -167,10 +182,16 @@ async function saveShortcut(value = shortcutDraft): Promise<void> {
 }
 
 function prepareEngine(): void {
-  if (preloadModel.checked && status.modelReady && status.runtimeAvailable && !preparationRequested) {
+  if (!popup && preloadModel.checked && status.modelReady && status.runtimeAvailable && !preparationRequested) {
     preparationRequested = true;
     void invoke('prepare_engine').catch(() => { /* Translation retries if background preparation fails. */ });
   }
+}
+
+function finishPopupRequest(): void {
+  if (!popup || !popupTerminal || popupRequest === null || busy || downloading || cancelling || pendingSelection || takingPending || cancelRequest) return;
+  popupTerminal = false;
+  void invoke('finish_popup_request', { request: popupRequest }).catch(showError);
 }
 
 function selectionTarget(text: string): 'ja' | 'en' | null {
@@ -193,7 +214,7 @@ function translatePendingSelection(): void {
 }
 
 async function cancel(clearPending = true): Promise<void> {
-  if (clearPending) { pendingSelection = null; selectionGeneration++; }
+  if (clearPending) { pendingSelection = null; selectionGeneration++; popupTerminal = true; }
   if (cancelRequest) return cancelRequest.catch(() => {});
   if (cancelling) return;
   cancelling = true;
@@ -208,6 +229,7 @@ async function cancel(clearPending = true): Promise<void> {
     if (!busy && !downloading) cancelling = false;
     updateControls();
     translatePendingSelection();
+    finishPopupRequest();
   }
 }
 
@@ -219,6 +241,8 @@ async function translate(): Promise<void> {
   busy = true;
   cancelling = false;
   const run = ++generation;
+  const request = popupRequest;
+  popupTerminal = false;
   const started = performance.now();
   let firstToken: number | null = null;
   let acceptingEvents = true;
@@ -258,6 +282,8 @@ async function translate(): Promise<void> {
     cancelling = cancelRequest !== null;
     updateControls();
     translatePendingSelection();
+    if (request === popupRequest) popupTerminal = true;
+    finishPopupRequest();
   }
 }
 
@@ -288,8 +314,16 @@ async function takePending(): Promise<void> {
   try {
     do {
       takePendingAgain = false;
-      const pending = await invoke<{ text: string | null; error: string | null; selection: boolean } | null>('take_pending_clipboard');
+      const pending = await invoke<{ text: string | null; error: string | null; selection: boolean; request: number } | null>('take_pending_clipboard');
+      if (pending) {
+        loadPreferences();
+        if (popup) await refreshStatus();
+      }
       if (readGeneration === selectionGeneration && pending) {
+        if (popup) {
+          popupRequest = pending.request;
+          popupTerminal = true;
+        }
         if (dialog.open && status.modelReady) dialog.close();
         pendingSelection = null;
         if (pending.error) showError(pending.error);
@@ -297,6 +331,7 @@ async function takePending(): Promise<void> {
           if (downloading) showError('モデルのダウンロード中です。完了後に、もう一度ショートカットを押してください。');
           else {
             pendingSelection = { text: pending.text, selection: pending.selection };
+            popupTerminal = false;
             if (busy) void cancel(false);
           }
         }
@@ -306,6 +341,7 @@ async function takePending(): Promise<void> {
   } finally {
     takingPending = false;
     translatePendingSelection();
+    finishPopupRequest();
   }
 }
 
@@ -341,6 +377,7 @@ async function download(): Promise<void> {
     element('download-progress').hidden = true;
     element('download-section').hidden = status.modelReady;
     updateControls();
+    finishPopupRequest();
   }
 }
 
@@ -410,6 +447,19 @@ dialog.addEventListener('focusin', event => {
 });
 shortcutSave.addEventListener('click', () => { void saveShortcut(); });
 shortcutReset.addEventListener('click', () => { void saveShortcut(status.defaultShortcut); });
+shortcutPopup.addEventListener('change', async () => {
+  savingPopup = true;
+  shortcutMessage.textContent = '';
+  renderShortcut();
+  try {
+    status = await invoke<AppStatus>('set_shortcut_popup', { enabled: shortcutPopup.checked });
+  } catch (error) {
+    shortcutMessage.textContent = String(error);
+  } finally {
+    savingPopup = false;
+    renderShortcut();
+  }
+});
 downloadButton.addEventListener('click', () => { void download(); });
 preloadModel.addEventListener('change', () => {
   try { localStorage.setItem('preload-model', String(preloadModel.checked)); } catch { /* Optional preference. */ }
@@ -465,6 +515,7 @@ document.addEventListener('keydown', event => {
 });
 
 async function init(): Promise<void> {
+  if (popup) setReadingMode(true);
   updateControls();
   renderShortcut();
   if (!isDesktop) {
@@ -477,7 +528,15 @@ async function init(): Promise<void> {
   }
   try {
     await onClipboardRequest(() => { if (initialized) void takePending().catch(showError); });
-    await onWindowHidden(() => { dialog.close(); });
+    await onWindowHidden(() => {
+      dialog.close();
+      if (popup) {
+        pendingSelection = null;
+        selectionGeneration++;
+        popupRequest = null;
+        popupTerminal = false;
+      }
+    });
     await onShortcutPressed(shortcut => {
       if (!recordingShortcut) return;
       shortcutDraft = shortcut;

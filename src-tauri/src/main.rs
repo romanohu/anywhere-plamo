@@ -35,42 +35,69 @@ pub enum ProgressEvent {
 
 #[derive(Clone, Serialize)]
 struct PendingClipboard {
+    request: u64,
     text: Option<String>,
     error: Option<String>,
     selection: bool,
 }
 
 #[derive(Default)]
-struct PendingRequests {
+struct WindowRequests {
     current: u64,
     value: Option<PendingClipboard>,
+    dismissible: bool,
+}
+
+#[derive(Default)]
+struct PendingRequests {
+    main: WindowRequests,
+    popup: WindowRequests,
     reading_selection: bool,
 }
 
 impl PendingRequests {
-    fn begin(&mut self) -> u64 {
-        self.current += 1;
-        self.value = None;
-        self.current
+    fn window(&mut self, label: &str) -> &mut WindowRequests {
+        if label == "popup" {
+            &mut self.popup
+        } else {
+            &mut self.main
+        }
     }
 
-    fn begin_selection(&mut self) -> Option<u64> {
-        if self.reading_selection {
+    fn begin(&mut self, label: &str, selection: bool) -> Option<u64> {
+        if selection && self.reading_selection {
             return None;
         }
-        self.reading_selection = true;
-        Some(self.begin())
+        self.reading_selection |= selection;
+        let window = self.window(label);
+        window.current += 1;
+        window.value = None;
+        window.dismissible = false;
+        Some(window.current)
     }
 
-    fn deliver(&mut self, request: u64, value: PendingClipboard) -> bool {
+    fn deliver(&mut self, label: &str, value: PendingClipboard) -> bool {
         if value.selection {
             self.reading_selection = false;
         }
-        if request != self.current {
+        let window = self.window(label);
+        if value.request != window.current {
             return false;
         }
-        self.value = Some(value);
+        window.value = Some(value);
         true
+    }
+
+    fn finish_popup(&mut self, request: u64) {
+        if request != 0 && self.popup.current == request {
+            self.popup.dismissible = true;
+        }
+    }
+
+    fn close_popup(&mut self) {
+        self.popup.current += 1;
+        self.popup.value = None;
+        self.popup.dismissible = false;
     }
 }
 
@@ -80,9 +107,12 @@ struct AppState {
     engine: tokio::sync::Mutex<Option<engine::Engine>>,
     preparation: CancellationToken,
     operation: Mutex<Option<CancellationToken>>,
+    popup_operation: Mutex<Option<CancellationToken>>,
+    download: tokio::sync::Mutex<()>,
     pending: Mutex<PendingRequests>,
     shortcut: Mutex<shortcut::State>,
-    shortcut_recording: AtomicBool,
+    shortcut_recording: Mutex<Option<String>>,
+    shortcut_popup: AtomicBool,
     settings: PathBuf,
     resident: AtomicBool,
     wayland: bool,
@@ -102,26 +132,62 @@ impl Drop for Operation<'_> {
 }
 
 impl AppState {
-    fn begin(&self) -> Result<Operation<'_>, String> {
-        let mut slot = self
-            .operation
-            .lock()
-            .map_err(|_| "処理状態を取得できません。")?;
+    fn operation(&self, label: &str) -> &Mutex<Option<CancellationToken>> {
+        if label == "popup" {
+            &self.popup_operation
+        } else {
+            &self.operation
+        }
+    }
+
+    fn begin(&self, label: &str) -> Result<Operation<'_>, String> {
+        let operation = self.operation(label);
+        let mut slot = operation.lock().map_err(|_| "処理状態を取得できません。")?;
         if slot.is_some() {
             return Err("別の処理が実行中です。完了後に再試行してください。".into());
         }
         let token = CancellationToken::new();
         *slot = Some(token.clone());
+        if label == "popup" {
+            if let Ok(mut pending) = self.pending.lock() {
+                pending.popup.dismissible = false;
+            }
+        }
         Ok(Operation {
-            slot: &self.operation,
+            slot: operation,
             token,
         })
     }
 
-    fn cancel(&self) {
-        if let Ok(slot) = self.operation.lock() {
+    fn cancel(&self, label: &str) {
+        if let Ok(slot) = self.operation(label).lock() {
             if let Some(token) = slot.as_ref() {
                 token.cancel();
+            }
+        }
+    }
+
+    fn stop_recording(&self, label: &str) {
+        if let Ok(mut recording) = self.shortcut_recording.lock() {
+            if recording.as_deref() == Some(label) {
+                *recording = None;
+            }
+        }
+    }
+
+    fn close_popup(&self) {
+        self.cancel("popup");
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.close_popup();
+        }
+    }
+
+    fn finish_popup(&self, request: u64) {
+        if let Ok(operation) = self.popup_operation.lock() {
+            if operation.is_none() {
+                if let Ok(mut pending) = self.pending.lock() {
+                    pending.finish_popup(request);
+                }
             }
         }
     }
@@ -161,6 +227,7 @@ struct AppStatus {
     shortcut_supported: bool,
     wayland: bool,
     resident: bool,
+    shortcut_popup: bool,
 }
 
 #[tauri::command]
@@ -175,6 +242,7 @@ fn get_status(state: tauri::State<'_, AppState>) -> AppStatus {
         shortcut_supported: shortcut.supported,
         wayland: state.wayland,
         resident: state.resident.load(Ordering::Relaxed),
+        shortcut_popup: state.shortcut_popup.load(Ordering::Relaxed),
     }
 }
 
@@ -193,7 +261,11 @@ fn set_shortcut(
         if !current.supported {
             return Err(shortcut::UNAVAILABLE.into());
         }
-        let pending = shortcut::PendingSave::new(&state.settings, next)?;
+        let pending = shortcut::PendingSave::new(
+            &state.settings,
+            next,
+            state.shortcut_popup.load(Ordering::Relaxed),
+        )?;
         current.change(
             next,
             |key| {
@@ -211,16 +283,49 @@ fn set_shortcut(
 }
 
 #[tauri::command]
-fn set_shortcut_recording(state: tauri::State<'_, AppState>, recording: bool) {
-    state.shortcut_recording.store(recording, Ordering::Relaxed);
+fn set_shortcut_popup(
+    state: tauri::State<'_, AppState>,
+    enabled: bool,
+) -> Result<AppStatus, String> {
+    {
+        // Share the shortcut lock so either setting preserves the other's value.
+        let shortcut = state
+            .shortcut
+            .lock()
+            .map_err(|_| "ショートカットの状態を取得できません。")?;
+        shortcut::PendingSave::new(&state.settings, shortcut.binding, enabled)?.commit()?;
+        state.shortcut_popup.store(enabled, Ordering::Relaxed);
+    }
+    Ok(get_status(state))
+}
+
+#[tauri::command]
+fn set_shortcut_recording(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, AppState>,
+    recording: bool,
+) {
+    if recording {
+        if let Ok(mut owner) = state.shortcut_recording.lock() {
+            *owner = Some(window.label().to_owned());
+        }
+    } else {
+        state.stop_recording(window.label());
+    }
 }
 
 #[tauri::command]
 async fn download_model(
+    window: tauri::WebviewWindow,
     state: tauri::State<'_, AppState>,
     on_event: Channel<ProgressEvent>,
 ) -> Result<(), String> {
-    let operation = state.begin()?;
+    let operation = state.begin(window.label())?;
+    let _download = tokio::select! {
+        biased;
+        _ = operation.token.cancelled() => return Err("CANCELLED".into()),
+        download = state.download.lock() => download,
+    };
     if model::ready(&state.directory) {
         return Ok(());
     }
@@ -244,13 +349,14 @@ async fn prepare_engine(state: tauri::State<'_, AppState>) -> Result<(), String>
 
 #[tauri::command]
 async fn translate(
+    window: tauri::WebviewWindow,
     state: tauri::State<'_, AppState>,
     text: String,
     target: String,
     on_event: Channel<ProgressEvent>,
 ) -> Result<engine::TranslationResult, String> {
     protocol::prompt(&text, &target)?;
-    let operation = state.begin()?;
+    let operation = state.begin(window.label())?;
     if !model::ready(&state.directory) {
         return Err("設定画面から翻訳モデルをダウンロードしてください。".into());
     }
@@ -269,8 +375,8 @@ async fn translate(
 }
 
 #[tauri::command]
-fn cancel_operation(state: tauri::State<'_, AppState>) {
-    state.cancel();
+fn cancel_operation(window: tauri::WebviewWindow, state: tauri::State<'_, AppState>) {
+    state.cancel(window.label());
 }
 
 #[tauri::command]
@@ -298,22 +404,28 @@ async fn write_clipboard(app: tauri::AppHandle, text: String) -> Result<(), Stri
 
 #[tauri::command]
 fn take_pending_clipboard(
+    window: tauri::WebviewWindow,
     state: tauri::State<'_, AppState>,
 ) -> Result<Option<PendingClipboard>, String> {
     Ok(state
         .pending
         .lock()
         .map_err(|_| "クリップボードの状態を取得できません。")?
+        .window(window.label())
         .value
         .take())
 }
 
-fn show(app: &tauri::AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
+fn show_window(app: &tauri::AppHandle, label: &str) {
+    if let Some(window) = app.get_webview_window(label) {
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
     }
+}
+
+fn show(app: &tauri::AppHandle) {
+    show_window(app, "main");
 }
 
 fn handle_launch(app: &tauri::AppHandle, args: &[String]) {
@@ -330,26 +442,29 @@ fn handle_launch(app: &tauri::AppHandle, args: &[String]) {
 }
 
 fn translate_clipboard(app: &tauri::AppHandle) {
-    let Some(request) = begin_request(app) else {
+    let Some(request) = begin_request(app, "main", false) else {
         return;
     };
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let value = read_clipboard(app.clone()).await;
-        deliver_text(&app, request, value, false);
+        deliver_text(&app, "main", request, value, false);
     });
 }
 
 fn translate_selection(app: &tauri::AppHandle) {
+    let label = if app
+        .state::<AppState>()
+        .shortcut_popup
+        .load(Ordering::Relaxed)
+    {
+        "popup"
+    } else {
+        "main"
+    };
     // A repeated shortcut must not replace an in-flight Copy with a busy error
     // and focus this window while the source app is still supplying its text.
-    let Some(request) = app
-        .state::<AppState>()
-        .pending
-        .lock()
-        .ok()
-        .and_then(|mut pending| pending.begin_selection())
-    else {
+    let Some(request) = begin_request(app, label, true) else {
         return;
     };
     let app = app.clone();
@@ -358,31 +473,34 @@ fn translate_selection(app: &tauri::AppHandle) {
         let value = tauri::async_runtime::spawn_blocking(selection::read)
             .await
             .unwrap_or_else(|_| Err("選択した文字を取得できませんでした。".into()));
-        deliver_text(&app, request, value, true);
+        deliver_text(&app, label, request, value, true);
     });
 }
 
-fn begin_request(app: &tauri::AppHandle) -> Option<u64> {
+fn begin_request(app: &tauri::AppHandle, label: &str, selection: bool) -> Option<u64> {
     app.state::<AppState>()
         .pending
         .lock()
         .ok()
-        .map(|mut pending| pending.begin())
+        .and_then(|mut pending| pending.begin(label, selection))
 }
 
 fn deliver_text(
     app: &tauri::AppHandle,
+    label: &'static str,
     request: u64,
     value: Result<String, String>,
     selection: bool,
 ) {
     let pending = match value {
         Ok(text) => PendingClipboard {
+            request,
             text: Some(text),
             error: None,
             selection,
         },
         Err(error) => PendingClipboard {
+            request,
             text: None,
             error: Some(error),
             selection,
@@ -391,28 +509,45 @@ fn deliver_text(
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
         if let Some(state) = handle.try_state::<AppState>() {
-            if let Ok(mut slot) = state.pending.lock() {
+            let delivered = state.pending.lock().is_ok_and(|mut slot| {
                 // Publish and focus together on the UI thread. Queuing window
                 // operations separately could steal focus from a newer read.
-                if slot.deliver(request, pending) {
-                    show(&handle);
-                    let _ = handle.emit("clipboard-request", ());
-                }
+                slot.deliver(label, pending)
+            });
+            if delivered {
+                show_window(&handle, label);
+                let _ = handle.emit_to(label, "clipboard-request", ());
             }
         }
     });
 }
 
 #[tauri::command]
-fn hide_window(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
-    state.shortcut_recording.store(false, Ordering::Relaxed);
-    if state.resident.load(Ordering::Relaxed) {
-        if let Some(window) = app.get_webview_window("main") {
-            window.hide().map_err(|error| error.to_string())?;
-            let _ = window.emit("window-hidden", ());
-        }
+fn hide_window(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    state.stop_recording(window.label());
+    if window.label() == "popup" {
+        state.close_popup();
+    }
+    if window.label() == "popup" || state.resident.load(Ordering::Relaxed) {
+        window.hide().map_err(|error| error.to_string())?;
+        let _ = window.emit_to(window.label(), "window-hidden", ());
     }
     Ok(())
+}
+
+#[tauri::command]
+fn finish_popup_request(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, AppState>,
+    request: u64,
+) {
+    if window.label() != "popup" {
+        return;
+    }
+    state.finish_popup(request);
 }
 
 #[tauri::command]
@@ -442,6 +577,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_status,
             set_shortcut,
+            set_shortcut_popup,
             set_shortcut_recording,
             download_model,
             prepare_engine,
@@ -451,6 +587,7 @@ fn main() {
             write_clipboard,
             take_pending_clipboard,
             hide_window,
+            finish_popup_request,
             open_model_license,
             quit_app
         ])
@@ -479,13 +616,16 @@ fn main() {
                 engine: tokio::sync::Mutex::new(None),
                 preparation: CancellationToken::new(),
                 operation: Mutex::new(None),
+                popup_operation: Mutex::new(None),
+                download: tokio::sync::Mutex::new(()),
                 pending: Mutex::new(PendingRequests::default()),
                 shortcut: Mutex::new(shortcut::State {
                     binding: shortcut::load(&settings),
                     available: false,
                     supported: false,
                 }),
-                shortcut_recording: AtomicBool::new(false),
+                shortcut_recording: Mutex::new(None),
+                shortcut_popup: AtomicBool::new(shortcut::load_popup(&settings)),
                 settings,
                 resident: AtomicBool::new(false),
                 wayland,
@@ -531,15 +671,22 @@ fn main() {
                                                 current.available && current.binding == key
                                             });
                                         if active {
-                                            if state.shortcut_recording.load(Ordering::Relaxed) {
-                                                let _ = handle
-                                                    .emit("shortcut-pressed", shortcut::label(key));
-                                            } else if !handle
-                                                .get_webview_window("main")
-                                                .is_some_and(|window| {
-                                                    window.is_focused().unwrap_or(false)
-                                                })
-                                            {
+                                            let recording = state
+                                                .shortcut_recording
+                                                .lock()
+                                                .ok()
+                                                .and_then(|owner| owner.clone());
+                                            if let Some(label) = recording {
+                                                let _ = handle.emit_to(
+                                                    label,
+                                                    "shortcut-pressed",
+                                                    shortcut::label(key),
+                                                );
+                                            } else if !["main", "popup"].iter().any(|label| {
+                                                handle.get_webview_window(label).is_some_and(
+                                                    |window| window.is_focused().unwrap_or(false),
+                                                )
+                                            }) {
                                                 translate_selection(&handle);
                                             }
                                         }
@@ -558,13 +705,37 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            let Some(state) = window.try_state::<AppState>() else {
+                return;
+            };
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                let state = window.state::<AppState>();
-                state.shortcut_recording.store(false, Ordering::Relaxed);
-                if state.resident.load(Ordering::Relaxed) {
+                state.stop_recording(window.label());
+                if window.label() == "popup" {
+                    state.close_popup();
+                }
+                if window.label() == "popup" || state.resident.load(Ordering::Relaxed) {
                     api.prevent_close();
                     let _ = window.hide();
-                    let _ = window.emit("window-hidden", ());
+                    let _ = window.emit_to(window.label(), "window-hidden", ());
+                } else {
+                    // The hidden popup must not keep an app without a tray alive.
+                    window.app_handle().exit(0);
+                }
+            } else if window.label() == "popup"
+                && matches!(event, tauri::WindowEvent::Focused(false))
+            {
+                let dismiss = state.popup_operation.lock().is_ok_and(|operation| {
+                    operation.is_none()
+                        && state
+                            .pending
+                            .lock()
+                            .is_ok_and(|pending| pending.popup.dismissible)
+                });
+                if dismiss {
+                    state.stop_recording("popup");
+                    state.close_popup();
+                    let _ = window.hide();
+                    let _ = window.emit_to("popup", "window-hidden", ());
                 }
             }
         })
@@ -574,7 +745,8 @@ fn main() {
     app.run(|app, event| {
         if let tauri::RunEvent::Exit = event {
             let state = app.state::<AppState>();
-            state.cancel();
+            state.cancel("main");
+            state.cancel("popup");
             state.preparation.cancel();
             tauri::async_runtime::block_on(async {
                 *state.engine.lock().await = None;
@@ -593,8 +765,9 @@ mod tests {
     use std::{path::PathBuf, sync::atomic::AtomicBool, sync::Mutex, time::Duration};
     use tokio_util::sync::CancellationToken;
 
-    fn text(value: &str) -> PendingClipboard {
+    fn text(request: u64, value: &str) -> PendingClipboard {
         PendingClipboard {
+            request,
             text: Some(value.into()),
             error: None,
             selection: false,
@@ -604,17 +777,17 @@ mod tests {
     #[test]
     fn a_late_read_cannot_replace_the_latest_request() {
         let mut pending = PendingRequests::default();
-        let older = pending.begin();
-        let newer = pending.begin();
+        let older = pending.begin("main", false).unwrap();
+        let newer = pending.begin("main", true).unwrap();
         assert!(pending.deliver(
-            newer,
+            "main",
             PendingClipboard {
                 selection: true,
-                ..text("new selection")
+                ..text(newer, "new selection")
             }
         ));
-        assert!(!pending.deliver(older, text("old clipboard")));
-        let value = pending.value.take().unwrap();
+        assert!(!pending.deliver("main", text(older, "old clipboard")));
+        let value = pending.main.value.take().unwrap();
         assert_eq!(value.text.as_deref(), Some("new selection"));
         assert!(value.selection);
     }
@@ -622,75 +795,165 @@ mod tests {
     #[test]
     fn a_new_request_clears_undelivered_text_and_rejects_old_errors() {
         let mut pending = PendingRequests::default();
-        let older = pending.begin();
-        assert!(pending.deliver(older, text("old selection")));
-        let newer = pending.begin();
-        assert!(pending.value.is_none());
-        assert!(!pending.deliver(
-            older,
+        let older = pending.begin("main", true).unwrap();
+        assert!(pending.deliver(
+            "main",
             PendingClipboard {
+                selection: true,
+                ..text(older, "old selection")
+            }
+        ));
+        let newer = pending.begin("main", false).unwrap();
+        assert!(pending.main.value.is_none());
+        assert!(!pending.deliver(
+            "main",
+            PendingClipboard {
+                request: older,
                 text: None,
                 error: Some("old failure".into()),
                 selection: true,
             }
         ));
-        assert!(pending.value.is_none());
-        assert!(pending.deliver(newer, text("new clipboard")));
+        assert!(pending.main.value.is_none());
+        assert!(pending.deliver("main", text(newer, "new clipboard")));
     }
 
     #[test]
     fn repeated_shortcuts_do_not_interrupt_selection_capture() {
         let mut pending = PendingRequests::default();
-        let request = pending.begin_selection().unwrap();
-        assert!(pending.begin_selection().is_none());
+        let request = pending.begin("popup", true).unwrap();
+        assert!(pending.begin("main", true).is_none());
+        assert!(pending.begin("popup", true).is_none());
         assert!(pending.deliver(
-            request,
+            "popup",
             PendingClipboard {
                 selection: true,
-                ..text("selected PDF")
+                ..text(request, "selected PDF")
             }
         ));
-        let next = pending.begin_selection().unwrap();
-        let clipboard = pending.begin();
+        let next = pending.begin("main", true).unwrap();
+        let clipboard = pending.begin("main", false).unwrap();
         assert!(!pending.deliver(
-            next,
+            "main",
             PendingClipboard {
                 selection: true,
-                ..text("superseded selection")
+                ..text(next, "superseded selection")
             }
         ));
-        assert!(pending.deliver(clipboard, text("clipboard")));
-        assert!(pending.begin_selection().is_some());
+        assert!(pending.deliver("main", text(clipboard, "clipboard")));
+        assert!(pending.begin("popup", true).is_some());
     }
 
-    #[tokio::test]
-    async fn cancelling_a_translation_wait_does_not_cancel_preparation() {
-        let state = AppState {
+    #[test]
+    fn popup_and_manual_requests_are_independent() {
+        let mut pending = PendingRequests::default();
+        let popup = pending.begin("popup", true).unwrap();
+        let main = pending.begin("main", false).unwrap();
+        assert!(pending.deliver(
+            "popup",
+            PendingClipboard {
+                selection: true,
+                ..text(popup, "selection")
+            }
+        ));
+        assert!(pending.deliver("main", text(main, "clipboard")));
+        assert_eq!(
+            pending.window("main").value.take().unwrap().text.as_deref(),
+            Some("clipboard")
+        );
+        assert_eq!(
+            pending
+                .window("popup")
+                .value
+                .take()
+                .unwrap()
+                .text
+                .as_deref(),
+            Some("selection")
+        );
+        pending.finish_popup(popup);
+        assert!(pending.popup.dismissible);
+        pending.close_popup();
+        pending.finish_popup(popup);
+        assert!(!pending.popup.dismissible);
+        let next = pending.begin("popup", true).unwrap();
+        pending.finish_popup(popup);
+        assert!(!pending.popup.dismissible);
+        pending.finish_popup(next);
+        assert!(pending.popup.dismissible);
+    }
+
+    fn state() -> AppState {
+        AppState {
             directory: PathBuf::new(),
             binary: PathBuf::new(),
             engine: tokio::sync::Mutex::new(None),
             preparation: CancellationToken::new(),
             operation: Mutex::new(None),
+            popup_operation: Mutex::new(None),
+            download: tokio::sync::Mutex::new(()),
             pending: Mutex::new(PendingRequests::default()),
             shortcut: Mutex::new(super::shortcut::State {
                 binding: super::shortcut::default(),
                 available: false,
                 supported: false,
             }),
-            shortcut_recording: AtomicBool::new(false),
+            shortcut_recording: Mutex::new(None),
+            shortcut_popup: AtomicBool::new(false),
             settings: PathBuf::new(),
             resident: AtomicBool::new(false),
             wayland: false,
-        };
+        }
+    }
+
+    #[test]
+    fn popup_lifecycle_and_cancellation_do_not_affect_the_manual_window() {
+        let state = state();
+        let request = state.pending.lock().unwrap().begin("popup", true).unwrap();
+        let main = state.begin("main").unwrap();
+        let popup = state.begin("popup").unwrap();
+        assert!(state.begin("main").is_err());
+        assert!(state.begin("popup").is_err());
+        state.finish_popup(request);
+        assert!(!state.pending.lock().unwrap().popup.dismissible);
+        state.cancel("popup");
+        assert!(popup.token.is_cancelled());
+        assert!(!main.token.is_cancelled());
+        drop(popup);
+        state.finish_popup(request);
+        assert!(state.pending.lock().unwrap().popup.dismissible);
+        let popup = state.begin("popup").unwrap();
+        assert!(!state.pending.lock().unwrap().popup.dismissible);
+        state.finish_popup(request);
+        assert!(!state.pending.lock().unwrap().popup.dismissible);
+        state.cancel("main");
+        assert!(main.token.is_cancelled());
+        assert!(!popup.token.is_cancelled());
+        *state.shortcut_recording.lock().unwrap() = Some("main".into());
+        state.stop_recording("popup");
+        assert_eq!(
+            state.shortcut_recording.lock().unwrap().as_deref(),
+            Some("main")
+        );
+        state.close_popup();
+        assert!(popup.token.is_cancelled());
+        drop(popup);
+        state.finish_popup(request);
+        assert!(!state.pending.lock().unwrap().popup.dismissible);
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_translation_wait_does_not_cancel_preparation() {
+        let state = state();
         let preparing = state.engine.lock().await;
-        let operation = state.begin().unwrap();
+        let operation = state.begin("main").unwrap();
         let waiting = state.lock_engine(&operation.token);
         tokio::pin!(waiting);
         tokio::select! {
             _ = &mut waiting => panic!("translation must wait for preparation"),
             _ = tokio::time::sleep(Duration::from_millis(5)) => {}
         }
-        state.cancel();
+        state.cancel("main");
         let result = tokio::time::timeout(Duration::from_secs(1), waiting)
             .await
             .expect("cancellation must interrupt the wait");

@@ -40,6 +40,9 @@ NATIVE_PORT = port()
 URL = f'http://127.0.0.1:{PORT}'
 HTTP = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 SESSION = None
+WINDOWS = {}
+WINDOW_LABEL = 'main'
+WINDOW_TITLES = {'main': 'Anywhere Plamo', 'popup': 'Anywhere Plamo — 選択翻訳'}
 
 def request(method, path, body=None):
     req = urllib.request.Request(URL + path, data=None if body is None else json.dumps(body).encode(), headers={'Content-Type': 'application/json'}, method=method)
@@ -66,9 +69,28 @@ def wait(script, timeout=30):
 def text(id):
     return js('return document.getElementById(arguments[0]).textContent', id)
 
+def select_window(label):
+    global WINDOW_LABEL
+    if label not in WINDOWS:
+        for handle in request('GET', f'/session/{SESSION}/window/handles'):
+            request('POST', f'/session/{SESSION}/window', {'handle': handle})
+            wait("document.getElementById('source') !== null")
+            role = js("return new URLSearchParams(location.search).has('popup') ? 'popup' : 'main'")
+            WINDOWS[role] = handle
+    assert label in WINDOWS, WINDOWS
+    request('POST', f'/session/{SESSION}/window', {'handle': WINDOWS[label]})
+    WINDOW_LABEL = label
+
+def window_id(label=None):
+    title = WINDOW_TITLES[label or WINDOW_LABEL]
+    return subprocess.check_output(['xdotool', 'search', '--onlyvisible', '--name', '^' + re.escape(title) + '$'], env=env, text=True).strip()
+
+def window_visible(label):
+    return subprocess.run(['xdotool', 'search', '--onlyvisible', '--name', '^' + re.escape(WINDOW_TITLES[label]) + '$'], env=env, capture_output=True).returncode == 0
+
 def click(id):
     # Xvfb has no window manager to focus the app when WebDriver clicks it.
-    window = subprocess.check_output(['xdotool', 'search', '--onlyvisible', '--name', '^Anywhere Plamo$'], env=env, text=True).strip()
+    window = window_id()
     subprocess.run(['xdotool', 'windowfocus', '--sync', window], env=env, check=True)
     element = request('POST', f'/session/{SESSION}/element', {'using': 'css selector', 'value': '#' + id})
     key = element['element-6066-11e4-a52e-4f735466cecf']
@@ -91,13 +113,15 @@ def screenshot(name):
     gi.require_version('GdkX11', '3.0')
     from gi.repository import Gdk, GdkX11
     Gdk.init([])
-    window_id = subprocess.check_output(['xdotool', 'search', '--onlyvisible', '--name', '^Anywhere Plamo$'], env=env, text=True).strip()
-    subprocess.run(['xdotool', 'windowraise', window_id], env=env, check=True)
-    window = GdkX11.X11Window.foreign_new_for_display(Gdk.Display.get_default(), int(window_id))
+    native_window = window_id()
+    subprocess.run(['xdotool', 'windowraise', native_window], env=env, check=True)
+    display = Gdk.Display.open(env['DISPLAY'])
+    window = GdkX11.X11Window.foreign_new_for_display(display, int(native_window))
     time.sleep(0.1)
     image = Gdk.pixbuf_get_from_window(window, 0, 0, window.get_width(), window.get_height())
     assert image, 'Could not capture the app window'
     image.savev(str(WORK / name), 'png', [], [])
+    display.close()
 
 def owned_processes():
     rows = subprocess.check_output(['ps', '-e', '-o', 'pid=,ppid='], text=True).splitlines()
@@ -140,12 +164,13 @@ try:
     value = request('POST', '/session', {'capabilities': {'alwaysMatch': {'browserName': 'wry', 'tauri:options': {'application': str(APP), 'args': ['--background']}}}})
     SESSION = value['sessionId']
     request('POST', f'/session/{SESSION}/timeouts', {'script': 30000})
+    select_window('main')
     status = invoke('get_status')
     wait("document.getElementById('model-tag').textContent === " + json.dumps('準備完了' if status['modelReady'] else '未準備'))
     assert status['runtimeAvailable'], status
     check('native application startup', status)
     if status['resident']:
-        visible = lambda: subprocess.run(['xdotool', 'search', '--onlyvisible', '--name', '^Anywhere Plamo$'], env=env, capture_output=True).returncode == 0
+        visible = lambda: window_visible('main')
         app_pids = {pid for pid in owned_processes() if Path(f'/proc/{pid}/exe').resolve() == APP}
         assert app_pids and not visible(), 'Background startup showed the window'
         result = subprocess.run([str(APP), '--background'], env=env, capture_output=True, text=True, timeout=15)
@@ -161,6 +186,16 @@ try:
         assert visible(), 'A normal relaunch did not restore the window'
         assert app_pids == {pid for pid in owned_processes() if Path(f'/proc/{pid}/exe').resolve() == APP}
         check('background launch stays hidden and normal relaunch restores the same process')
+    saved_settings = json.loads((MODEL.parent / 'settings.json').read_text()) if (MODEL.parent / 'settings.json').exists() else {}
+    assert status['shortcutPopup'] == saved_settings.get('shortcutPopup', False)
+    click('settings-button')
+    wait("document.getElementById('shortcut-popup').checked === " + json.dumps(status['shortcutPopup']))
+    if status['shortcutPopup']:
+        click('shortcut-popup')
+        wait("!document.getElementById('shortcut-popup').checked && !document.getElementById('shortcut-popup').disabled")
+    assert not invoke('get_status')['shortcutPopup']
+    click('settings-close')
+    check('selection popup is opt-in and existing settings keep the normal window')
     screenshot('startup.png')
     if not status['modelReady']:
         click('setup-open')
@@ -214,8 +249,7 @@ try:
         if status['shortcut'] != status['defaultShortcut']:
             click('shortcut-reset')
             wait("document.getElementById('shortcut-message').textContent === '保存しました'")
-        window_id = subprocess.check_output(['xdotool', 'search', '--onlyvisible', '--name', '^Anywhere Plamo$'], env=env, text=True).strip()
-        subprocess.run(['xdotool', 'windowfocus', '--sync', window_id], env=env, check=True)
+        subprocess.run(['xdotool', 'windowfocus', '--sync', window_id()], env=env, check=True)
         click('shortcut-record')
         wait("document.getElementById('shortcut-record').getAttribute('aria-pressed') === 'true'")
         subprocess.run(['xdotool', 'key', 'ctrl+shift+j'], env=env, check=True)
@@ -400,6 +434,63 @@ try:
         assert invoke('read_clipboard') == sentinel
         check('Japanese selection automatically uses English without changing the clipboard')
         click('settings-button')
+        click('shortcut-popup')
+        wait("document.getElementById('shortcut-popup').checked && !document.getElementById('shortcut-popup').disabled")
+        assert invoke('get_status')['shortcutPopup']
+        saved_settings = json.loads(settings_path.read_text())
+        assert saved_settings['shortcutPopup'] and saved_settings['shortcut'] == 'Ctrl+Alt+KeyT'
+        click('settings-close')
+        check('enable the optional selection popup without changing the global shortcut')
+        click('edit-source')
+        manual_input = 'The river flows through a quiet town. ' * 250
+        fill(manual_input, 'fr')
+        click('translate-button')
+        wait("document.getElementById('source').readOnly")
+        subprocess.run(['xdotool', 'windowfocus', '--sync', window, 'key', 'ctrl+alt+t'], env=env, check=True)
+        select_window('popup')
+        wait("document.getElementById('source').value === " + json.dumps(japanese_selection))
+        assert window_visible('popup'), 'The enabled selection popup was not shown'
+        subprocess.run(['xdotool', 'windowfocus', '--sync', window], env=env, check=True)
+        time.sleep(0.2)
+        assert window_visible('popup'), 'The popup hid while its translation was waiting'
+        select_window('main')
+        assert js("return document.getElementById('source').value") == manual_input
+        assert js("return document.getElementById('source').readOnly"), 'The selection interrupted the manual translation'
+        assert window_visible('main'), 'The manual window hid when focus moved outside'
+        invoke('cancel_operation')
+        wait("document.getElementById('translation-status').textContent === '翻訳を中断しました'")
+        manual_result = text('translation')
+        select_window('popup')
+        output = translated()
+        assert js("return document.getElementById('target').value") == 'en'
+        assert invoke('read_clipboard') == sentinel
+        assert window_visible('popup'), 'Finishing a translation hid the popup without a new focus change'
+        check('selection popup waits independently and survives cancellation of the manual translation', output)
+        screenshot('translation-popup.png')
+        subprocess.run(['xdotool', 'windowfocus', '--sync', window_id('popup')], env=env, check=True)
+        subprocess.run(['xdotool', 'windowfocus', '--sync', window], env=env, check=True)
+        for _ in range(100):
+            if not window_visible('popup'):
+                break
+            time.sleep(0.05)
+        assert not window_visible('popup'), 'The completed popup stayed open after focus moved outside'
+        assert window_visible('main'), 'Dismissing the popup hid the manual window'
+        select_window('main')
+        assert js("return document.getElementById('source').value") == manual_input
+        assert text('translation') == manual_result
+        assert text('translation-status') == '翻訳を中断しました'
+        check('completed popup dismisses on outside focus and preserves the manual window contents')
+        click('settings-button')
+        click('shortcut-popup')
+        wait("!document.getElementById('shortcut-popup').checked && !document.getElementById('shortcut-popup').disabled")
+        assert not invoke('get_status')['shortcutPopup']
+        click('settings-close')
+        subprocess.run(['xdotool', 'windowfocus', '--sync', window, 'key', 'ctrl+alt+t'], env=env, check=True)
+        wait("document.getElementById('source').value === " + json.dumps(japanese_selection))
+        translated()
+        assert not window_visible('popup')
+        check('disabling the optional popup restores selection translation in the normal window')
+        click('settings-button')
         click('auto-direction')
         click('settings-close')
         subprocess.run(['xdotool', 'windowfocus', '--sync', window, 'mousemove', '--window', window, str(bounds['x'] + 10), y, 'sleep', '0.1', 'click', '1'], env=env, check=True)
@@ -414,6 +505,11 @@ try:
         assert js("return document.getElementById('source').value") == japanese_selection
         assert invoke('read_clipboard') == sentinel
         check('missing selection does not translate old clipboard contents')
+        click('settings-button')
+        click('shortcut-popup')
+        wait("document.getElementById('shortcut-popup').checked && !document.getElementById('shortcut-popup').disabled")
+        assert invoke('get_status')['shortcutPopup']
+        click('settings-close')
         selection_source.terminate()
         selection_source.wait(timeout=5)
         selection_source = None
@@ -441,17 +537,26 @@ try:
         value = request('POST', '/session', {'capabilities': {'alwaysMatch': {'browserName': 'wry', 'tauri:options': {'application': str(APP)}}}})
         SESSION = value['sessionId']
         request('POST', f'/session/{SESSION}/timeouts', {'script': 30000})
+        WINDOWS.clear()
+        select_window('main')
         status = invoke('get_status')
         assert status['shortcut'] == 'Ctrl+Alt+KeyT' and status['shortcutAvailable'], status
         click('settings-button')
         wait("document.getElementById('shortcut-display').textContent === 'Ctrl + Alt + T'")
         check('custom shortcut is registered and displayed after restarting the app')
+        assert status['shortcutPopup']
+        wait("document.getElementById('shortcut-popup').checked")
+        check('the optional popup preference survives restarting the app')
         click('shortcut-reset')
         wait("document.getElementById('shortcut-message').textContent === '保存しました'")
         status = invoke('get_status')
         assert status['shortcut'] == status['defaultShortcut'] and status['shortcutAvailable'], status
         assert json.loads(settings_path.read_text())['shortcut'] == status['defaultShortcut']
+        assert json.loads(settings_path.read_text())['shortcutPopup']
         check('restore the default shortcut through the UI')
+        click('shortcut-popup')
+        wait("!document.getElementById('shortcut-popup').checked && !document.getElementById('shortcut-popup').disabled")
+        assert not invoke('get_status')['shortcutPopup']
         try:
             invoke('quit_app')
         except RuntimeError:

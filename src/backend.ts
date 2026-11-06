@@ -5,6 +5,7 @@ export interface AppStatus {
   shortcut: string;
   defaultShortcut: string;
   shortcutSupported: boolean;
+  shortcutPopup: boolean;
   wayland: boolean;
   resident: boolean;
 }
