@@ -4,6 +4,7 @@ mod engine;
 mod model;
 mod protocol;
 mod selection;
+mod shortcut;
 
 use serde::Serialize;
 use std::{
@@ -20,7 +21,7 @@ use tauri::{
     Emitter, Manager,
 };
 use tauri_plugin_clipboard_manager::ClipboardExt;
-use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Serialize)]
@@ -67,7 +68,9 @@ struct AppState {
     preparation: CancellationToken,
     operation: Mutex<Option<CancellationToken>>,
     pending: Mutex<PendingRequests>,
-    shortcut: AtomicBool,
+    shortcut: Mutex<shortcut::State>,
+    shortcut_recording: AtomicBool,
+    settings: PathBuf,
     resident: AtomicBool,
     wayland: bool,
 }
@@ -140,19 +143,63 @@ struct AppStatus {
     model_ready: bool,
     runtime_available: bool,
     shortcut_available: bool,
+    shortcut: String,
+    default_shortcut: String,
+    shortcut_supported: bool,
     wayland: bool,
     resident: bool,
 }
 
 #[tauri::command]
 fn get_status(state: tauri::State<'_, AppState>) -> AppStatus {
+    let shortcut = state.shortcut.lock().expect("shortcut state poisoned");
     AppStatus {
         model_ready: model::ready(&state.directory),
         runtime_available: state.binary.is_file(),
-        shortcut_available: state.shortcut.load(Ordering::Relaxed),
+        shortcut_available: shortcut.available,
+        shortcut: shortcut::label(shortcut.binding),
+        default_shortcut: shortcut::label(shortcut::default()),
+        shortcut_supported: shortcut.supported,
         wayland: state.wayland,
         resident: state.resident.load(Ordering::Relaxed),
     }
+}
+
+#[tauri::command]
+fn set_shortcut(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    shortcut: String,
+) -> Result<AppStatus, String> {
+    let next = shortcut::parse(&shortcut)?;
+    {
+        let mut current = state
+            .shortcut
+            .lock()
+            .map_err(|_| "ショートカットの状態を取得できません。")?;
+        if !current.supported {
+            return Err(shortcut::UNAVAILABLE.into());
+        }
+        let pending = shortcut::PendingSave::new(&state.settings, next)?;
+        current.change(
+            next,
+            |key| {
+                if app.global_shortcut().is_registered(key) {
+                    Ok(())
+                } else {
+                    app.global_shortcut().register(key).map_err(|_| ())
+                }
+            },
+            |key| app.global_shortcut().unregister(key).map_err(|_| ()),
+            || pending.commit(),
+        )?;
+    }
+    Ok(get_status(state))
+}
+
+#[tauri::command]
+fn set_shortcut_recording(state: tauri::State<'_, AppState>, recording: bool) {
+    state.shortcut_recording.store(recording, Ordering::Relaxed);
 }
 
 #[tauri::command]
@@ -314,9 +361,11 @@ fn deliver_text(app: &tauri::AppHandle, request: u64, value: Result<String, Stri
 
 #[tauri::command]
 fn hide_window(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    state.shortcut_recording.store(false, Ordering::Relaxed);
     if state.resident.load(Ordering::Relaxed) {
         if let Some(window) = app.get_webview_window("main") {
             window.hide().map_err(|error| error.to_string())?;
+            let _ = window.emit("window-hidden", ());
         }
     }
     Ok(())
@@ -352,6 +401,8 @@ fn main() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .invoke_handler(tauri::generate_handler![
             get_status,
+            set_shortcut,
+            set_shortcut_recording,
             download_model,
             prepare_engine,
             translate,
@@ -364,7 +415,9 @@ fn main() {
             quit_app
         ])
         .setup(|app| {
-            let directory = app.path().app_data_dir()?.join("models");
+            let app_directory = app.path().app_data_dir()?;
+            let directory = app_directory.join("models");
+            let settings = app_directory.join("settings.json");
             let binary = std::env::var_os("ANYWHERE_PLAMO_LLAMA_SERVER")
                 .map(PathBuf::from)
                 .unwrap_or(
@@ -387,7 +440,13 @@ fn main() {
                 preparation: CancellationToken::new(),
                 operation: Mutex::new(None),
                 pending: Mutex::new(PendingRequests::default()),
-                shortcut: AtomicBool::new(false),
+                shortcut: Mutex::new(shortcut::State {
+                    binding: shortcut::load(&settings),
+                    available: false,
+                    supported: false,
+                }),
+                shortcut_recording: AtomicBool::new(false),
+                settings,
                 resident: AtomicBool::new(false),
                 wayland,
             });
@@ -418,25 +477,42 @@ fn main() {
                     .handle()
                     .plugin(
                         tauri_plugin_global_shortcut::Builder::new()
-                            .with_handler(|app, _, event| {
+                            .with_handler(|app, key, event| {
                                 if event.state == ShortcutState::Pressed {
-                                    translate_selection(app);
+                                    let handle = app.clone();
+                                    let key = *key;
+                                    // The X11 event worker also handles registration. Do not
+                                    // block it on a window query while registration waits.
+                                    let _ = app.run_on_main_thread(move || {
+                                        let state = handle.state::<AppState>();
+                                        // Ignore obsolete bindings if an OS cleanup failed.
+                                        let active =
+                                            state.shortcut.try_lock().is_ok_and(|current| {
+                                                current.available && current.binding == key
+                                            });
+                                        if active {
+                                            if state.shortcut_recording.load(Ordering::Relaxed) {
+                                                let _ = handle
+                                                    .emit("shortcut-pressed", shortcut::label(key));
+                                            } else if !handle
+                                                .get_webview_window("main")
+                                                .is_some_and(|window| {
+                                                    window.is_focused().unwrap_or(false)
+                                                })
+                                            {
+                                                translate_selection(&handle);
+                                            }
+                                        }
+                                    });
                                 }
                             })
                             .build(),
                     )
                     .is_ok();
-                let modifiers = if cfg!(target_os = "macos") {
-                    Modifiers::SUPER | Modifiers::SHIFT
-                } else {
-                    Modifiers::CONTROL | Modifiers::SHIFT
-                };
-                let registered = installed
-                    && app
-                        .global_shortcut()
-                        .register(Shortcut::new(Some(modifiers), Code::KeyJ))
-                        .is_ok();
-                state.shortcut.store(registered, Ordering::Relaxed);
+                let mut shortcut = state.shortcut.lock().expect("shortcut state poisoned");
+                shortcut.supported = installed;
+                shortcut.available =
+                    installed && app.global_shortcut().register(shortcut.binding).is_ok();
             }
             if std::env::args().any(|arg| arg == "--translate-selection") {
                 translate_selection(app.handle());
@@ -450,9 +526,11 @@ fn main() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let state = window.state::<AppState>();
+                state.shortcut_recording.store(false, Ordering::Relaxed);
                 if state.resident.load(Ordering::Relaxed) {
                     api.prevent_close();
                     let _ = window.hide();
+                    let _ = window.emit("window-hidden", ());
                 }
             }
         })
@@ -528,7 +606,13 @@ mod tests {
             preparation: CancellationToken::new(),
             operation: Mutex::new(None),
             pending: Mutex::new(PendingRequests::default()),
-            shortcut: AtomicBool::new(false),
+            shortcut: Mutex::new(super::shortcut::State {
+                binding: super::shortcut::default(),
+                available: false,
+                supported: false,
+            }),
+            shortcut_recording: AtomicBool::new(false),
+            settings: PathBuf::new(),
             resident: AtomicBool::new(false),
             wayland: false,
         };

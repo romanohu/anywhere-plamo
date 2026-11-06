@@ -2,6 +2,9 @@ export interface AppStatus {
   modelReady: boolean;
   runtimeAvailable: boolean;
   shortcutAvailable: boolean;
+  shortcut: string;
+  defaultShortcut: string;
+  shortcutSupported: boolean;
   wayland: boolean;
   resident: boolean;
 }
@@ -39,4 +42,12 @@ export function progressChannel(onmessage: (event: ProgressEvent) => void): Nati
 
 export async function onClipboardRequest(handler: () => void): Promise<void> {
   await window.__TAURI__?.event.listen('clipboard-request', handler);
+}
+
+export async function onShortcutPressed(handler: (shortcut: string) => void): Promise<void> {
+  await window.__TAURI__?.event.listen<string>('shortcut-pressed', event => handler(event.payload));
+}
+
+export async function onWindowHidden(handler: () => void): Promise<void> {
+  await window.__TAURI__?.event.listen('window-hidden', handler);
 }

@@ -1,4 +1,4 @@
-import { invoke, isDesktop, onClipboardRequest, progressChannel } from './backend';
+import { invoke, isDesktop, onClipboardRequest, onShortcutPressed, onWindowHidden, progressChannel } from './backend';
 import type { AppStatus } from './backend';
 
 function element<T extends HTMLElement>(id: string): T {
@@ -20,8 +20,16 @@ const downloadButton = element<HTMLButtonElement>('download-button');
 const preloadModel = element<HTMLInputElement>('preload-model');
 const statusText = element<HTMLSpanElement>('translation-status');
 const message = element<HTMLDivElement>('message');
+const shortcutRecord = element<HTMLButtonElement>('shortcut-record');
+const shortcutSave = element<HTMLButtonElement>('shortcut-save');
+const shortcutReset = element<HTMLButtonElement>('shortcut-reset');
+const shortcutMessage = element('shortcut-message');
 const mac = /Mac/.test(navigator.platform);
-let status: AppStatus = { modelReady: false, runtimeAvailable: false, shortcutAvailable: false, wayland: false, resident: false };
+let status: AppStatus = { modelReady: false, runtimeAvailable: false, shortcutAvailable: false, shortcut: '', defaultShortcut: '', shortcutSupported: false, wayland: false, resident: false };
+let shortcutDraft = '';
+let recordingShortcut = false;
+let startingShortcut = false;
+let savingShortcut = false;
 let busy = false;
 let downloading = false;
 let cancelling = false;
@@ -54,7 +62,7 @@ function updateControls(): void {
   const hasText = source.value.trim().length > 0;
   translateButton.disabled = cancelling || downloading || (!busy && (!hasText || !isDesktop));
   translateButton.classList.toggle('is-busy', busy);
-  element('translate-label').textContent = cancelling ? '中断中…' : busy ? '中断する' : '翻訳する';
+  element('translate-label').textContent = cancelling ? '中断中…' : busy ? '中断' : '翻訳';
   element('translate-arrow').textContent = busy ? '■' : '→';
   source.readOnly = busy || cancelling || readingMode;
   target.disabled = busy || cancelling;
@@ -81,7 +89,7 @@ function resetResult(): void {
   result.hidden = true;
   empty.hidden = false;
   element('copy-label').textContent = 'コピー';
-  statusText.textContent = '翻訳する準備ができたら、ボタンを押してください';
+  statusText.textContent = '';
   statusText.title = '';
   message.hidden = true;
   updateControls();
@@ -89,31 +97,70 @@ function resetResult(): void {
 
 async function refreshStatus(): Promise<void> {
   status = await invoke<AppStatus>('get_status');
-  element('model-status').classList.toggle('ready', status.modelReady && status.runtimeAvailable);
-  element('model-status-text').textContent = !status.runtimeAvailable ? '初期設定が必要' : status.modelReady ? 'オフライン翻訳' : 'モデル未準備';
   element('setup-banner').hidden = status.modelReady && status.runtimeAvailable;
   element('model-tag').textContent = status.modelReady ? '準備完了' : '未準備';
   element('download-section').hidden = status.modelReady;
   downloadButton.disabled = !status.runtimeAvailable;
   element('download-message').textContent = !status.runtimeAvailable
-    ? '推論エンジンが見つかりません。開発中は npm run runtime:build を実行し、アプリを再起動してください。'
-    : status.modelReady ? 'モデルの準備ができました。ネット接続なしで翻訳できます。' : '';
-  if (status.shortcutAvailable) {
-    element('shortcut-display').textContent = `${mac ? '⌘' : 'Ctrl'} + Shift + J`;
-    element('shortcut-description').textContent = mac
-      ? '他のアプリで文章を選択して、このショートカットを押すと翻訳します。初回はmacOSのアクセシビリティ許可が必要です。'
-      : '他のアプリで文章を選択して、このショートカットを押すと翻訳します。コピー操作は不要です。';
-  } else {
-    element('shortcut-display').textContent = 'anywhere-plamo --translate-selection';
-    element('shortcut-description').textContent = status.wayland
-      ? 'OSのキーボード設定で下のコマンドに好きなキーを割り当て、文章を選択してから押してください。選択文字の取得はデスクトップ環境と元のアプリの対応が必要です。'
-      : 'ショートカットを登録できませんでした。OSのキーボード設定で下のコマンドを登録し、文章を選択してから押してください。';
-  }
-  element('shortcut-note').textContent = status.resident
-    ? '閉じる・Escでウィンドウを隠します。終了はトレイメニュー、または下のボタンから。'
-    : '常駐アイコンを利用できないため、閉じるボタンでアプリを終了します。コマンドから再び開けます。';
+    ? '翻訳エンジンが見つかりません。アプリを再インストールしてください。' : '';
+  if (!recordingShortcut && !savingShortcut) shortcutDraft = status.shortcut;
+  renderShortcut();
   updateControls();
   prepareEngine();
+}
+
+function renderShortcut(): void {
+  shortcutRecord.disabled = !status.shortcutSupported || savingShortcut;
+  shortcutRecord.setAttribute('aria-pressed', String(recordingShortcut && !startingShortcut));
+  element('shortcut-display').textContent = startingShortcut ? '準備中…' : recordingShortcut ? 'キーを押してください…'
+    : !status.shortcutSupported ? 'OSで設定' : shortcutDraft.split('+').map(key => {
+      if (key === 'Super') return mac ? '⌘' : 'Super';
+      if (key === 'Alt' && mac) return 'Option';
+      return key.replace(/^Key([A-Z])$/, '$1').replace(/^Digit([0-9])$/, '$1');
+    }).join(' + ');
+  shortcutSave.hidden = shortcutReset.hidden = !status.shortcutSupported;
+  shortcutSave.disabled = savingShortcut || recordingShortcut || (shortcutDraft === status.shortcut && status.shortcutAvailable);
+  shortcutReset.disabled = savingShortcut || recordingShortcut || (shortcutDraft === status.defaultShortcut && status.shortcut === status.defaultShortcut && status.shortcutAvailable);
+  element('shortcut-description').textContent = status.shortcutSupported
+    ? '他のアプリで選択した文章を翻訳します。'
+    : isDesktop ? 'OSのキーボード設定で、次のコマンドにキーを割り当ててください。' : 'デスクトップアプリで設定できます。';
+  element('shortcut-note').textContent = !status.shortcutSupported && isDesktop ? 'anywhere-plamo --translate-selection'
+    : mac ? 'macOSのアクセシビリティ許可が必要です。' : '';
+  element('shortcut-help').hidden = !status.shortcutSupported;
+}
+
+function openSettings(): void {
+  shortcutDraft = status.shortcut;
+  stopShortcutRecording();
+  shortcutMessage.textContent = status.shortcutSupported && !status.shortcutAvailable ? 'このキーを登録できませんでした。別のキーを設定してください。' : '';
+  renderShortcut();
+  dialog.showModal();
+}
+
+function stopShortcutRecording(): void {
+  if (!recordingShortcut) return;
+  recordingShortcut = false;
+  if (!startingShortcut) {
+    void invoke('set_shortcut_recording', { recording: false }).catch(error => { shortcutMessage.textContent = String(error); });
+  }
+}
+
+async function saveShortcut(value = shortcutDraft): Promise<void> {
+  if (savingShortcut || !status.shortcutSupported) return;
+  stopShortcutRecording();
+  savingShortcut = true;
+  shortcutMessage.textContent = '';
+  renderShortcut();
+  try {
+    status = await invoke<AppStatus>('set_shortcut', { shortcut: value });
+    shortcutDraft = status.shortcut;
+    shortcutMessage.textContent = '保存しました';
+  } catch (error) {
+    shortcutMessage.textContent = String(error);
+  } finally {
+    savingShortcut = false;
+    renderShortcut();
+  }
 }
 
 function prepareEngine(): void {
@@ -155,7 +202,7 @@ async function cancel(clearPending = true): Promise<void> {
 async function translate(): Promise<void> {
   if (busy) return cancel();
   if (cancelling || downloading || !source.value.trim()) return;
-  if (!status.modelReady || !status.runtimeAvailable) { dialog.showModal(); return; }
+  if (!status.modelReady || !status.runtimeAvailable) { openSettings(); return; }
   resetResult();
   busy = true;
   cancelling = false;
@@ -307,9 +354,47 @@ copyButton.addEventListener('click', async () => {
     copyTimer = setTimeout(() => { element('copy-label').textContent = 'コピー'; }, 1800);
   } catch (error) { showError(error); }
 });
-element('settings-button').addEventListener('click', () => dialog.showModal());
-element('setup-open').addEventListener('click', () => dialog.showModal());
+element('settings-button').addEventListener('click', openSettings);
+element('setup-open').addEventListener('click', openSettings);
 element('settings-close').addEventListener('click', () => dialog.close());
+dialog.addEventListener('close', () => {
+  stopShortcutRecording();
+  shortcutDraft = status.shortcut;
+  renderShortcut();
+});
+shortcutRecord.addEventListener('click', async () => {
+  if (startingShortcut) return;
+  if (recordingShortcut) {
+    stopShortcutRecording();
+    shortcutMessage.textContent = '';
+    renderShortcut();
+    return;
+  }
+  recordingShortcut = true;
+  startingShortcut = true;
+  shortcutMessage.textContent = '';
+  renderShortcut();
+  try {
+    await invoke('set_shortcut_recording', { recording: true });
+    if (!recordingShortcut || !dialog.open) await invoke('set_shortcut_recording', { recording: false });
+    else shortcutMessage.textContent = 'Escで取消';
+  } catch (error) {
+    recordingShortcut = false;
+    shortcutMessage.textContent = String(error);
+  } finally {
+    startingShortcut = false;
+    renderShortcut();
+    if (recordingShortcut) shortcutRecord.focus();
+  }
+});
+dialog.addEventListener('focusin', event => {
+  if (!recordingShortcut || event.target === shortcutRecord) return;
+  stopShortcutRecording();
+  shortcutMessage.textContent = '';
+  renderShortcut();
+});
+shortcutSave.addEventListener('click', () => { void saveShortcut(); });
+shortcutReset.addEventListener('click', () => { void saveShortcut(status.defaultShortcut); });
 downloadButton.addEventListener('click', () => { void download(); });
 preloadModel.addEventListener('change', () => {
   try { localStorage.setItem('preload-model', String(preloadModel.checked)); } catch { /* Optional preference. */ }
@@ -324,6 +409,27 @@ element('license-link').addEventListener('click', async () => {
 });
 element('quit-button').addEventListener('click', () => { void invoke('quit_app').catch(showError); });
 document.addEventListener('keydown', event => {
+  if (recordingShortcut) {
+    if (startingShortcut) { event.preventDefault(); return; }
+    if ((event.key === 'Tab' || event.key === 'Escape') && !event.ctrlKey && !event.altKey && !event.metaKey) {
+      if (event.key === 'Escape') event.preventDefault();
+      stopShortcutRecording();
+      shortcutMessage.textContent = '';
+      renderShortcut();
+      return;
+    }
+    event.preventDefault();
+    if (event.isComposing || event.repeat || /^(Control|Alt|Shift|Meta)(Left|Right)$/.test(event.code)) return;
+    if (!event.code || event.code === 'Unidentified' || (!event.ctrlKey && !event.altKey && !event.metaKey && !/^F([1-9]|1[0-9]|2[0-4])$/.test(event.code))) {
+      shortcutMessage.textContent = `Ctrl・${mac ? 'Option・⌘' : 'Alt・Super'}と組み合わせるか、F1〜F24を押してください。`;
+      return;
+    }
+    shortcutDraft = [event.ctrlKey && 'Ctrl', event.altKey && 'Alt', event.shiftKey && 'Shift', event.metaKey && 'Super', event.code].filter(Boolean).join('+');
+    stopShortcutRecording();
+    shortcutMessage.textContent = '保存で反映';
+    renderShortcut();
+    return;
+  }
   if (event.isComposing) return;
   if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !dialog.open) {
     event.preventDefault();
@@ -342,10 +448,10 @@ document.addEventListener('keydown', event => {
 
 async function init(): Promise<void> {
   updateControls();
+  renderShortcut();
   if (!isDesktop) {
-    element('model-status-text').textContent = '画面プレビュー';
     element('setup-banner').hidden = false;
-    element('setup-heading').textContent = 'デスクトップアプリの画面プレビュー';
+    element('setup-heading').textContent = '画面プレビュー';
     element('setup-banner').querySelector('p')!.textContent = '翻訳・モデル取得・ショートカットはアプリで利用できます。';
     downloadButton.disabled = true;
     element<HTMLButtonElement>('quit-button').disabled = true;
@@ -353,6 +459,14 @@ async function init(): Promise<void> {
   }
   try {
     await onClipboardRequest(() => { if (initialized) void takePending().catch(showError); });
+    await onWindowHidden(() => { dialog.close(); });
+    await onShortcutPressed(shortcut => {
+      if (!recordingShortcut) return;
+      shortcutDraft = shortcut;
+      stopShortcutRecording();
+      shortcutMessage.textContent = '';
+      renderShortcut();
+    });
     await refreshStatus();
     initialized = true;
     await takePending();

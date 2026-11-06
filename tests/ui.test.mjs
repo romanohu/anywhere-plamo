@@ -27,12 +27,14 @@ async function fixture(t, options = {}) {
   const byId = id => window.document.getElementById(id);
   // JSDOM does not implement native dialog presentation. Its open state is enough for these tests.
   window.HTMLDialogElement.prototype.showModal = function () { this.open = true; };
-  window.HTMLDialogElement.prototype.close = function () { this.open = false; };
+  window.HTMLDialogElement.prototype.close = function () { this.open = false; this.dispatchEvent(new window.Event('close')); };
   const calls = [];
   const listeners = new Map();
   const state = {
     modelReady: options.modelReady ?? true, runtimeAvailable: true,
     shortcutAvailable: true, wayland: false, resident: true,
+    shortcut: 'Ctrl+Shift+KeyJ', defaultShortcut: 'Ctrl+Shift+KeyJ', shortcutSupported: true,
+    ...options.status,
   };
   let clipboard = options.clipboard ?? 'Hello, world.';
   let pending = options.pending ?? null;
@@ -42,6 +44,7 @@ async function fixture(t, options = {}) {
   let finishClipboard;
   let finishCancellation;
   let finishPending;
+  let finishRecording;
   const channels = [];
   const native = {
     core: {
@@ -50,6 +53,14 @@ async function fixture(t, options = {}) {
         calls.push({ command, args });
         switch (command) {
           case 'get_status': return { ...state };
+          case 'set_shortcut_recording':
+            if (args.recording && options.holdRecording) return new Promise(resolve => { finishRecording = resolve; });
+            return;
+          case 'set_shortcut':
+            if (options.shortcutError) throw options.shortcutError;
+            state.shortcut = args.shortcut;
+            state.shortcutAvailable = true;
+            return { ...state };
           case 'prepare_engine':
             if (options.prepareError) throw options.prepareError;
             return;
@@ -89,13 +100,19 @@ async function fixture(t, options = {}) {
   };
   if (!options.browser) window.__TAURI__ = native;
   window.eval(bundle);
-  await until(() => byId('model-status-text').textContent !== '確認中');
+  await until(() => options.browser || calls.some(call => call.command === 'take_pending_clipboard'));
   t.after(() => { dom.window.close(); assert.deepEqual(errors, []); });
   return {
     window, byId, calls, state, channels,
     advance(milliseconds) { now += milliseconds; },
     input(text) { byId('source').value = text; byId('source').dispatchEvent(new window.Event('input')); },
-    click(id) { byId(id).click(); },
+    click(id) { byId(id).focus(); byId(id).click(); },
+    async record() { byId('shortcut-record').focus(); byId('shortcut-record').click(); await until(() => byId('shortcut-record').getAttribute('aria-pressed') === 'true'); },
+    key(code, modifiers = {}) {
+      const event = new window.KeyboardEvent('keydown', { code, key: code.replace(/^Key/, ''), bubbles: true, cancelable: true, ...modifiers });
+      window.document.dispatchEvent(event);
+      return event;
+    },
     send(event) { channel.onmessage(event); },
     finish(value) { finishOperation(value); },
     fail(error) { rejectOperation(error); },
@@ -103,6 +120,9 @@ async function fixture(t, options = {}) {
     finishClipboard(text) { finishClipboard(text); },
     finishCancellation() { finishCancellation(); },
     finishPending() { finishPending(); },
+    finishRecording() { finishRecording(); },
+    shortcutPressed(shortcut) { listeners.get('shortcut-pressed')?.({ payload: shortcut }); },
+    closeWindow() { listeners.get('window-hidden')?.({ payload: null }); },
     request(text) { pending = { text }; listeners.get('clipboard-request')?.({ payload: null }); },
     requestError(error) { pending = { text: null, error }; listeners.get('clipboard-request')?.({ payload: null }); },
   };
@@ -111,12 +131,156 @@ async function fixture(t, options = {}) {
 test('browser preview clearly disables translation and model download', async t => {
   const f = await fixture(t, { browser: true });
   f.input('Test');
-  assert.equal(f.byId('model-status-text').textContent, '画面プレビュー');
+  assert.equal(f.byId('setup-heading').textContent, '画面プレビュー');
+  assert.equal(f.byId('shortcut-record').disabled, true);
   assert.equal(f.byId('translate-button').disabled, true);
   f.click('setup-open');
   assert.equal(f.byId('settings-dialog').open, true);
   assert.equal(f.byId('download-button').disabled, true);
   assert.equal(f.calls.length, 0);
+});
+
+test('shortcut recording saves a key combination through the native settings command', async t => {
+  const f = await fixture(t);
+  f.input('Keep this original');
+  f.click('settings-button');
+  await f.record();
+  assert.equal(f.byId('shortcut-record').getAttribute('aria-pressed'), 'true');
+  const event = f.key('KeyT', { ctrlKey: true, altKey: true });
+  assert.equal(event.defaultPrevented, true);
+  assert.equal(f.byId('shortcut-display').textContent, 'Ctrl + Alt + T');
+  assert.equal(f.byId('shortcut-save').disabled, false);
+  assert.equal(f.calls.some(call => call.command === 'set_shortcut'), false);
+  f.click('shortcut-save');
+  await until(() => f.byId('shortcut-message').textContent === '保存しました');
+  assert.equal(f.calls.find(call => call.command === 'set_shortcut').args.shortcut, 'Ctrl+Alt+KeyT');
+  assert.equal(f.byId('source').value, 'Keep this original');
+  f.click('settings-close');
+  f.click('settings-button');
+  assert.equal(f.byId('shortcut-display').textContent, 'Ctrl + Alt + T');
+  assert.equal(f.byId('shortcut-save').disabled, true);
+});
+
+test('recording rejects typing keys, allows function keys, and Escape cancels without hiding the app', async t => {
+  const f = await fixture(t);
+  f.click('settings-button');
+  await f.record();
+  f.key('KeyA', { shiftKey: true });
+  assert.equal(f.byId('shortcut-record').getAttribute('aria-pressed'), 'true');
+  assert.match(f.byId('shortcut-message').textContent, /組み合わせ/);
+  f.key('Escape');
+  assert.equal(f.byId('shortcut-display').textContent, 'Ctrl + Shift + J');
+  assert.equal(f.byId('settings-dialog').open, true);
+  assert.equal(f.calls.some(call => call.command === 'hide_window'), false);
+  await f.record();
+  f.key('F8');
+  f.click('shortcut-save');
+  await until(() => f.state.shortcut === 'F8');
+});
+
+test('shortcut conflicts preserve the active binding and keep the candidate available to edit', async t => {
+  const f = await fixture(t, { shortcutError: 'このキーは使われています。' });
+  f.click('settings-button');
+  await f.record();
+  f.key('KeyT', { ctrlKey: true });
+  f.click('shortcut-save');
+  await until(() => f.byId('shortcut-message').textContent.includes('使われています'));
+  assert.equal(f.state.shortcut, 'Ctrl+Shift+KeyJ');
+  assert.equal(f.byId('shortcut-display').textContent, 'Ctrl + T');
+  assert.equal(f.byId('shortcut-save').disabled, false);
+  f.click('settings-close');
+  f.click('settings-button');
+  assert.equal(f.byId('shortcut-display').textContent, 'Ctrl + Shift + J');
+});
+
+for (const closing of ['settings', 'window']) {
+test(`closing ${closing} while native recording starts clears capture after the request settles`, async t => {
+  const f = await fixture(t, { holdRecording: true });
+  f.click('settings-button');
+  f.click('shortcut-record');
+  if (closing === 'window') f.closeWindow();
+  else f.click('settings-close');
+  f.finishRecording();
+  await until(() => f.calls.some(call => call.command === 'set_shortcut_recording' && call.args.recording === false));
+  assert.equal(f.byId('shortcut-record').getAttribute('aria-pressed'), 'false');
+  f.shortcutPressed('Ctrl+Shift+KeyJ');
+  assert.equal(f.byId('settings-dialog').open, false);
+});
+}
+
+test('modified Tab and Escape can be recorded without dismissing settings', async t => {
+  const f = await fixture(t);
+  f.click('settings-button');
+  for (const code of ['Tab', 'Escape']) {
+    await f.record();
+    assert.equal(f.key(code, { ctrlKey: true, altKey: true }).defaultPrevented, true);
+    assert.equal(f.byId('shortcut-display').textContent, `Ctrl + Alt + ${code}`);
+    assert.equal(f.byId('settings-dialog').open, true);
+  }
+});
+
+test('the current OS-registered shortcut can be recorded and is ignored outside recording', async t => {
+  const f = await fixture(t);
+  f.click('settings-button');
+  await f.record();
+  f.byId('shortcut-record').dispatchEvent(new f.window.FocusEvent('blur'));
+  assert.equal(f.byId('shortcut-record').getAttribute('aria-pressed'), 'true');
+  f.shortcutPressed('Ctrl+Shift+KeyJ');
+  assert.equal(f.byId('shortcut-record').getAttribute('aria-pressed'), 'false');
+  assert.equal(f.byId('shortcut-display').textContent, 'Ctrl + Shift + J');
+  assert.equal(f.byId('shortcut-save').disabled, true);
+  await f.record();
+  f.key('KeyT', { ctrlKey: true });
+  f.shortcutPressed('Ctrl+Shift+KeyJ');
+  assert.equal(f.byId('shortcut-display').textContent, 'Ctrl + T');
+  assert.equal(f.calls.some(call => call.command === 'translate'), false);
+  await f.record();
+  f.byId('preload-model').focus();
+  assert.equal(f.byId('shortcut-record').getAttribute('aria-pressed'), 'false');
+});
+
+test('saved shortcuts are displayed on startup and can be reset to the platform default', async t => {
+  const f = await fixture(t, { status: { shortcut: 'Alt+KeyY' } });
+  f.click('settings-button');
+  assert.equal(f.byId('shortcut-display').textContent, 'Alt + Y');
+  f.click('shortcut-reset');
+  await until(() => f.byId('shortcut-message').textContent === '保存しました');
+  assert.equal(f.byId('shortcut-display').textContent, 'Ctrl + Shift + J');
+  assert.equal(f.byId('shortcut-reset').disabled, true);
+});
+
+test('an unavailable shortcut can be retried without changing its keys', async t => {
+  const f = await fixture(t, { status: { shortcutAvailable: false } });
+  f.click('settings-button');
+  assert.equal(f.byId('shortcut-save').disabled, false);
+  f.click('shortcut-save');
+  await until(() => f.state.shortcutAvailable);
+  assert.equal(f.byId('shortcut-save').disabled, true);
+});
+
+test('Wayland shows the OS command without offering unsupported shortcut registration', async t => {
+  const f = await fixture(t, { status: { wayland: true, shortcutSupported: false, shortcutAvailable: false } });
+  f.click('settings-button');
+  assert.equal(f.byId('shortcut-record').disabled, true);
+  assert.equal(f.byId('shortcut-save').hidden, true);
+  assert.equal(f.byId('shortcut-reset').hidden, true);
+  assert.equal(f.byId('shortcut-note').textContent, 'anywhere-plamo --translate-selection');
+});
+
+test('closing or tabbing away cancels recording and never consumes translation shortcuts', async t => {
+  const f = await fixture(t);
+  f.input('Hello');
+  f.click('settings-button');
+  await f.record();
+  assert.equal(f.key('Tab').defaultPrevented, false);
+  assert.equal(f.byId('shortcut-record').getAttribute('aria-pressed'), 'false');
+  await f.record();
+  f.key('Enter', { ctrlKey: true });
+  assert.equal(f.byId('shortcut-display').textContent, 'Ctrl + Enter');
+  assert.equal(f.calls.some(call => call.command === 'translate'), false);
+  f.click('settings-close');
+  f.click('settings-button');
+  assert.equal(f.byId('shortcut-display').textContent, 'Ctrl + Shift + J');
 });
 
 test('paste, translate, copy and clear operate on the current text', async t => {
@@ -249,7 +413,7 @@ test('a failed cancellation leaves the running translation cancellable', async t
   f.click('translate-button');
   await until(() => !f.byId('message').hidden);
   assert.equal(f.byId('translate-button').disabled, false);
-  assert.equal(f.byId('translate-label').textContent, '中断する');
+  assert.equal(f.byId('translate-label').textContent, '中断');
   assert.equal(f.byId('source').readOnly, true);
   f.send({ kind: 'token', text: '訳文' });
   f.finish({ truncated: false });

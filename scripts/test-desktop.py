@@ -67,6 +67,9 @@ def text(id):
     return js('return document.getElementById(arguments[0]).textContent', id)
 
 def click(id):
+    # Xvfb has no window manager to focus the app when WebDriver clicks it.
+    window = subprocess.check_output(['xdotool', 'search', '--onlyvisible', '--name', '^Anywhere Plamo$'], env=env, text=True).strip()
+    subprocess.run(['xdotool', 'windowfocus', '--sync', window], env=env, check=True)
     element = request('POST', f'/session/{SESSION}/element', {'using': 'css selector', 'value': '#' + id})
     key = element['element-6066-11e4-a52e-4f735466cecf']
     request('POST', f'/session/{SESSION}/element/{key}/click', {})
@@ -137,8 +140,8 @@ try:
     value = request('POST', '/session', {'capabilities': {'alwaysMatch': {'browserName': 'wry', 'tauri:options': {'application': str(APP)}}}})
     SESSION = value['sessionId']
     request('POST', f'/session/{SESSION}/timeouts', {'script': 30000})
-    wait("document.getElementById('model-status-text').textContent !== '確認中'")
     status = invoke('get_status')
+    wait("document.getElementById('model-tag').textContent === " + json.dumps('準備完了' if status['modelReady'] else '未準備'))
     assert status['runtimeAvailable'], status
     check('native application startup', status)
     screenshot('startup.png')
@@ -189,6 +192,51 @@ try:
     assert invoke('read_clipboard') == output
     check('copy writes the actual OS clipboard')
     screenshot('translation-ja.png')
+    if status['shortcutSupported']:
+        click('settings-button')
+        if status['shortcut'] != status['defaultShortcut']:
+            click('shortcut-reset')
+            wait("document.getElementById('shortcut-message').textContent === '保存しました'")
+        window_id = subprocess.check_output(['xdotool', 'search', '--onlyvisible', '--name', '^Anywhere Plamo$'], env=env, text=True).strip()
+        subprocess.run(['xdotool', 'windowfocus', '--sync', window_id], env=env, check=True)
+        click('shortcut-record')
+        wait("document.getElementById('shortcut-record').getAttribute('aria-pressed') === 'true'")
+        subprocess.run(['xdotool', 'key', 'ctrl+shift+j'], env=env, check=True)
+        wait("document.getElementById('shortcut-record').getAttribute('aria-pressed') === 'false'")
+        assert text('shortcut-display') == 'Ctrl + Shift + J'
+        assert js("return document.getElementById('source').value") == 'Hello, world.'
+        check('the currently registered shortcut can be recorded without triggering translation')
+        click('shortcut-record')
+        wait("document.getElementById('shortcut-record').getAttribute('aria-pressed') === 'true'")
+        subprocess.run(['xdotool', 'key', 'ctrl+alt+t'], env=env, check=True)
+        wait("document.getElementById('shortcut-display').textContent === 'Ctrl + Alt + T'")
+        click('shortcut-save')
+        wait("document.getElementById('shortcut-message').textContent === '保存しました'")
+        status = invoke('get_status')
+        assert status['shortcut'] == 'Ctrl+Alt+KeyT' and status['shortcutAvailable'], status
+        settings_path = MODEL.parent / 'settings.json'
+        assert json.loads(settings_path.read_text())['shortcut'] == status['shortcut']
+        check('record and save a custom global shortcut through the UI', status['shortcut'])
+        screenshot('settings-shortcut.png')
+        try:
+            invoke('set_shortcut', {'shortcut': 'KeyJ'})
+        except RuntimeError as error:
+            assert '組み合わせてください' in str(error), error
+        else:
+            raise AssertionError('An unmodified typing key was accepted')
+        assert invoke('get_status')['shortcut'] == 'Ctrl+Alt+KeyT'
+        assert json.loads(settings_path.read_text())['shortcut'] == 'Ctrl+Alt+KeyT'
+        check('invalid shortcut leaves the current setting unchanged')
+        click('settings-close')
+        if status['resident']:
+            click('settings-button')
+            click('shortcut-record')
+            wait("document.getElementById('shortcut-record').getAttribute('aria-pressed') === 'true'")
+            invoke('hide_window')
+            result = subprocess.run([str(APP)], env=env, capture_output=True, text=True, timeout=15)
+            assert result.returncode == 0, result.stderr
+            wait("!document.getElementById('settings-dialog').open && document.getElementById('shortcut-record').getAttribute('aria-pressed') === 'false'")
+            check('hiding and reopening the window cancels shortcut recording')
     fill('今日は良い天気ですね。', 'en')
     click('translate-button')
     output = translated()
@@ -267,11 +315,15 @@ try:
                 break
             time.sleep(0.05)
         assert json.loads(selection_state.read_text())['selected'] == 'Please open the window.'
-        subprocess.run(['xdotool', 'key', 'ctrl+shift+j'], env=env, check=True)
+        fill('Waiting for the new shortcut.')
+        subprocess.run(['xdotool', 'windowfocus', '--sync', window, 'key', 'ctrl+shift+j'], env=env, check=True)
+        time.sleep(0.3)
+        assert js("return document.getElementById('source').value") == 'Waiting for the new shortcut.'
+        subprocess.run(['xdotool', 'key', 'ctrl+alt+t'], env=env, check=True)
         wait("document.getElementById('source').value === 'Please open the window.'")
         output = translated()
         assert invoke('read_clipboard') == sentinel
-        check('mouse selection in another app + global shortcut, without copying', output)
+        check('new shortcut translates the selection and the previous shortcut is released', output)
         fill('Waiting for selection command.')
         subprocess.run(['xdotool', 'windowfocus', '--sync', window], env=env, check=True)
         result = subprocess.run([str(APP), '--translate-selection'], env=env, capture_output=True, text=True, timeout=15)
@@ -286,7 +338,7 @@ try:
                 break
             time.sleep(0.05)
         assert json.loads(selection_state.read_text())['selected'] == ''
-        subprocess.run(['xdotool', 'key', 'ctrl+shift+j'], env=env, check=True)
+        subprocess.run(['xdotool', 'key', 'ctrl+alt+t'], env=env, check=True)
         wait("!document.getElementById('message').hidden")
         assert '選択した文字' in text('message')
         assert js("return document.getElementById('source').value") == 'Please open the window.'
@@ -312,7 +364,28 @@ try:
         time.sleep(0.1)
     assert all((not Path(f'/proc/{pid}').exists() for pid in app_pids | engine_pids)), 'App or inference process survived exit'
     check('quit stops the app and its inference process')
+    request('DELETE', f'/session/{SESSION}')
     SESSION = None
+    if status['shortcutSupported']:
+        value = request('POST', '/session', {'capabilities': {'alwaysMatch': {'browserName': 'wry', 'tauri:options': {'application': str(APP)}}}})
+        SESSION = value['sessionId']
+        request('POST', f'/session/{SESSION}/timeouts', {'script': 30000})
+        status = invoke('get_status')
+        assert status['shortcut'] == 'Ctrl+Alt+KeyT' and status['shortcutAvailable'], status
+        click('settings-button')
+        wait("document.getElementById('shortcut-display').textContent === 'Ctrl + Alt + T'")
+        check('custom shortcut is registered and displayed after restarting the app')
+        click('shortcut-reset')
+        wait("document.getElementById('shortcut-message').textContent === '保存しました'")
+        status = invoke('get_status')
+        assert status['shortcut'] == status['defaultShortcut'] and status['shortcutAvailable'], status
+        assert json.loads(settings_path.read_text())['shortcut'] == status['defaultShortcut']
+        check('restore the default shortcut through the UI')
+        try:
+            invoke('quit_app')
+        except RuntimeError:
+            pass
+        SESSION = None
     print('ALL DESKTOP CHECKS PASSED', flush=True)
 except Exception:
     if SESSION:
