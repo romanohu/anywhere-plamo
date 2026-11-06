@@ -404,7 +404,7 @@ element('download-cancel').addEventListener('click', () => { void cancel(); });
 element('license-link').addEventListener('click', async () => {
   try {
     if (isDesktop) await invoke('open_model_license');
-    else window.open('https://huggingface.co/pfnet/plamo-3-translate-0.8b-GGUF#license', '_blank', 'noopener,noreferrer');
+    else window.open('https://plamo.preferredai.jp/info/plamo-community-license-ja', '_blank', 'noopener,noreferrer');
   } catch (error) { element('download-message').textContent = String(error); }
 });
 element('quit-button').addEventListener('click', () => { void invoke('quit_app').catch(showError); });

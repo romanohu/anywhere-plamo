@@ -374,9 +374,9 @@ fn hide_window(app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Resu
 #[tauri::command]
 async fn open_model_license() -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(|| {
-        open::that("https://huggingface.co/pfnet/plamo-3-translate-0.8b-GGUF#license").map_err(
-            |_| "ブラウザを開けませんでした。READMEのモデルライセンスをご確認ください。".to_owned(),
-        )
+        open::that("https://plamo.preferredai.jp/info/plamo-community-license-ja").map_err(|_| {
+            "ブラウザを開けませんでした。READMEのモデルライセンスをご確認ください。".to_owned()
+        })
     })
     .await
     .map_err(|error| error.to_string())?

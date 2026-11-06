@@ -58,6 +58,8 @@ anywhere-plamo --translate-selection
 
 ## ライセンス
 
-アプリ: [MIT](LICENSE) · モデル: [PLaMo Community License](https://huggingface.co/pfnet/plamo-3-translate-0.8b-GGUF#license) · [依存ライブラリ](THIRD_PARTY_NOTICES.md)
+Built with PLaMo. アプリ: [MIT](LICENSE) · モデル: [PLaMo Community License](https://plamo.preferredai.jp/info/plamo-community-license-ja) · [第三者ライセンス](THIRD_PARTY_NOTICES.md)
+
+モデルの業務・商用利用（社内利用を含む）には、事前登録またはPFNとの別契約が必要です。
 
 開発では[tanakh/plamo-translate-desktop](https://github.com/tanakh/plamo-translate-desktop)を参考にしています。
