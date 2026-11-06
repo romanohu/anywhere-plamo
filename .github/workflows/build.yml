@@ -87,5 +87,5 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" --draft --title "Anywhere Plamo $RELEASE_TAG" --generate-notes
-          find installers -type f \( -name '*.deb' -o -name '*.AppImage' -o -name '*.dmg' \) -exec gh release upload "$RELEASE_TAG" '{}' --clobber \;
+          find installers -type f \( -name '*.deb' -o -name '*.AppImage' -o -name '*.dmg' \) -exec gh release upload "$RELEASE_TAG" --clobber '{}' +
           gh release edit "$RELEASE_TAG" --draft=false
