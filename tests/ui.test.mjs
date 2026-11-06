@@ -22,6 +22,8 @@ async function fixture(t, options = {}) {
   const dom = new JSDOM(html, { url: 'http://localhost/', runScripts: 'outside-only', virtualConsole: console });
   const { window } = dom;
   if (options.preload !== undefined) window.localStorage.setItem('preload-model', String(options.preload));
+  if (options.autoDirection !== undefined) window.localStorage.setItem('auto-direction', String(options.autoDirection));
+  if (options.target) window.localStorage.setItem('target-language', options.target);
   let now = 0;
   if (options.manualClock) window.performance.now = () => now;
   const byId = id => window.document.getElementById(id);
@@ -123,7 +125,7 @@ async function fixture(t, options = {}) {
     finishRecording() { finishRecording(); },
     shortcutPressed(shortcut) { listeners.get('shortcut-pressed')?.({ payload: shortcut }); },
     closeWindow() { listeners.get('window-hidden')?.({ payload: null }); },
-    request(text) { pending = { text }; listeners.get('clipboard-request')?.({ payload: null }); },
+    request(text, selection = true) { pending = { text, selection }; listeners.get('clipboard-request')?.({ payload: null }); },
     requestError(error) { pending = { text: null, error }; listeners.get('clipboard-request')?.({ payload: null }); },
   };
 }
@@ -361,6 +363,80 @@ test('a pending shortcut request translates after startup status has loaded', as
   assert.equal(f.byId('settings-dialog').open, false);
 });
 
+test('automatic direction is off by default and preserves the selected language', async t => {
+  const f = await fixture(t, { target: 'fr' });
+  assert.equal(f.byId('auto-direction').checked, false);
+  for (const text of ['日本語です。', 'English text.']) {
+    const count = f.calls.filter(call => call.command === 'translate').length;
+    f.request(text);
+    await until(() => f.calls.filter(call => call.command === 'translate').length > count);
+    assert.equal(f.calls.filter(call => call.command === 'translate').at(-1).args.target, 'fr');
+  }
+});
+
+test('automatic direction switches selected Japanese and English without changing the manual preference', async t => {
+  const f = await fixture(t, { autoDirection: true, target: 'fr' });
+  assert.equal(f.byId('auto-direction').checked, true);
+  for (const [text, language] of [
+    ['日本語の文章です。', 'en'], ['翻訳', 'en'], ['AIで翻訳する', 'en'], ['ｶﾀｶﾅ', 'en'],
+    ['Hello, world.', 'ja'], ['123!? 😀', 'fr'], ['Привет world', 'fr'],
+  ]) {
+    const count = f.calls.filter(call => call.command === 'translate').length;
+    f.request(text);
+    await until(() => f.calls.filter(call => call.command === 'translate').length > count);
+    assert.equal(f.calls.filter(call => call.command === 'translate').at(-1).args.target, language);
+    assert.equal(f.byId('target').value, language);
+    assert.equal(f.window.localStorage.getItem('target-language'), 'fr');
+  }
+});
+
+test('automatic direction never applies to pasted text, manual edits, or tray clipboard requests', async t => {
+  const f = await fixture(t, { autoDirection: true, target: 'fr', clipboard: '日本語のクリップボード' });
+  f.request('日本語の選択');
+  await until(() => f.byId('translation-status').textContent.includes('翻訳完了'));
+  assert.equal(f.byId('target').value, 'en');
+  f.click('edit-source');
+  f.input('Manual English');
+  f.click('translate-button');
+  await until(() => f.byId('translation-status').textContent.includes('翻訳完了'));
+  assert.equal(f.calls.filter(call => call.command === 'translate').at(-1).args.target, 'fr');
+  f.request('Another selection');
+  await until(() => f.byId('target').value === 'ja');
+  f.click('paste-button');
+  await until(() => f.byId('source').value === '日本語のクリップボード');
+  f.click('translate-button');
+  await until(() => f.byId('translation-status').textContent.includes('翻訳完了'));
+  assert.equal(f.calls.filter(call => call.command === 'translate').at(-1).args.target, 'fr');
+  f.request('日本語のトレイ操作', false);
+  await until(() => f.byId('source').value === '日本語のトレイ操作');
+  assert.equal(f.calls.filter(call => call.command === 'translate').at(-1).args.target, 'fr');
+});
+
+test('automatic direction preference persists and applies to the latest queued selection', async t => {
+  const f = await fixture(t, { holdTranslation: true, holdCancellation: true, target: 'fr' });
+  f.click('auto-direction');
+  assert.equal(f.window.localStorage.getItem('auto-direction'), 'true');
+  f.input('Manual text');
+  f.click('translate-button');
+  f.request('日本語です。');
+  await until(() => f.calls.some(call => call.command === 'cancel_operation'));
+  f.request('Newest English text');
+  await until(() => f.calls.filter(call => call.command === 'take_pending_clipboard').length === 3);
+  f.fail('CANCELLED');
+  f.finishCancellation();
+  await until(() => f.calls.filter(call => call.command === 'translate').length === 2);
+  const latest = f.calls.filter(call => call.command === 'translate').at(-1).args;
+  assert.equal(latest.text, 'Newest English text');
+  assert.equal(latest.target, 'ja');
+  f.finish({ truncated: false });
+  await until(() => f.byId('translation-status').textContent.includes('翻訳完了'));
+  f.click('auto-direction');
+  assert.equal(f.window.localStorage.getItem('auto-direction'), 'false');
+  f.request('日本語です。');
+  await until(() => f.calls.filter(call => call.command === 'translate').length === 3);
+  assert.equal(f.calls.filter(call => call.command === 'translate').at(-1).args.target, 'fr');
+});
+
 test('oversized clipboard input is rejected without truncating the existing original', async t => {
   const f = await fixture(t, { clipboard: 'x'.repeat(12001) });
   f.input('Keep this original');
@@ -404,6 +480,19 @@ test('a native clipboard error is shown without retrying or translating other cl
   assert.equal(f.calls.some(call => call.command === 'read_clipboard'), false);
   assert.equal(f.calls.some(call => call.command === 'translate'), false);
   assert.equal(f.byId('source').value, '');
+});
+
+test('shortcut errors are visible when settings was left open', async t => {
+  const f = await fixture(t);
+  f.input('Keep this original');
+  for (const request of [() => f.requestError('選択文字を取得できませんでした。'), () => f.request('x'.repeat(12001))]) {
+    f.click('settings-button');
+    request();
+    await until(() => !f.byId('settings-dialog').open);
+    assert.equal(f.byId('message').hidden, false);
+    assert.equal(f.byId('source').value, 'Keep this original');
+    assert.equal(f.calls.some(call => call.command === 'translate'), false);
+  }
 });
 
 test('a failed cancellation leaves the running translation cancellable', async t => {

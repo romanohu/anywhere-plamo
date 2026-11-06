@@ -37,6 +37,7 @@ pub enum ProgressEvent {
 struct PendingClipboard {
     text: Option<String>,
     error: Option<String>,
+    selection: bool,
 }
 
 #[derive(Default)]
@@ -303,6 +304,19 @@ fn show(app: &tauri::AppHandle) {
     }
 }
 
+fn handle_launch(app: &tauri::AppHandle, args: &[String]) {
+    if args.iter().any(|arg| arg == "--translate-selection") {
+        translate_selection(app);
+    } else if args.iter().any(|arg| arg == "--translate-clipboard") {
+        translate_clipboard(app);
+    } else if !args.iter().any(|arg| arg == "--background")
+        || !app.state::<AppState>().resident.load(Ordering::Relaxed)
+    {
+        // Without a tray, keep the window available so the app can be reopened.
+        show(app);
+    }
+}
+
 fn translate_clipboard(app: &tauri::AppHandle) {
     let Some(request) = begin_request(app) else {
         return;
@@ -310,7 +324,7 @@ fn translate_clipboard(app: &tauri::AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let value = read_clipboard(app.clone()).await;
-        deliver_text(&app, request, value);
+        deliver_text(&app, request, value, false);
     });
 }
 
@@ -324,7 +338,7 @@ fn translate_selection(app: &tauri::AppHandle) {
         let value = tauri::async_runtime::spawn_blocking(selection::read)
             .await
             .unwrap_or_else(|_| Err("選択した文字を取得できませんでした。".into()));
-        deliver_text(&app, request, value);
+        deliver_text(&app, request, value, true);
     });
 }
 
@@ -336,27 +350,37 @@ fn begin_request(app: &tauri::AppHandle) -> Option<u64> {
         .map(|mut pending| pending.begin())
 }
 
-fn deliver_text(app: &tauri::AppHandle, request: u64, value: Result<String, String>) {
+fn deliver_text(
+    app: &tauri::AppHandle,
+    request: u64,
+    value: Result<String, String>,
+    selection: bool,
+) {
     let pending = match value {
         Ok(text) => PendingClipboard {
             text: Some(text),
             error: None,
+            selection,
         },
         Err(error) => PendingClipboard {
             text: None,
             error: Some(error),
+            selection,
         },
     };
-    if let Some(state) = app.try_state::<AppState>() {
-        if let Ok(mut slot) = state.pending.lock() {
-            // Checking and publishing under the same lock also keeps an older
-            // completion from focusing the window during a newer selection read.
-            if slot.deliver(request, pending) {
-                show(app);
-                let _ = app.emit("clipboard-request", ());
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(state) = handle.try_state::<AppState>() {
+            if let Ok(mut slot) = state.pending.lock() {
+                // Publish and focus together on the UI thread. Queuing window
+                // operations separately could steal focus from a newer read.
+                if slot.deliver(request, pending) {
+                    show(&handle);
+                    let _ = handle.emit("clipboard-request", ());
+                }
             }
         }
-    }
+    });
 }
 
 #[tauri::command]
@@ -390,13 +414,9 @@ fn quit_app(app: tauri::AppHandle) {
 fn main() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, _| {
-            if args.iter().any(|arg| arg == "--translate-selection") {
-                translate_selection(app);
-            } else if args.iter().any(|arg| arg == "--translate-clipboard") {
-                translate_clipboard(app);
-            } else {
-                show(app);
-            }
+            // The plugin calls from a worker, potentially before setup finishes.
+            let handle = app.clone();
+            let _ = app.run_on_main_thread(move || handle_launch(&handle, &args));
         }))
         .plugin(tauri_plugin_clipboard_manager::init())
         .invoke_handler(tauri::generate_handler![
@@ -514,13 +534,7 @@ fn main() {
                 shortcut.available =
                     installed && app.global_shortcut().register(shortcut.binding).is_ok();
             }
-            if std::env::args().any(|arg| arg == "--translate-selection") {
-                translate_selection(app.handle());
-            } else if std::env::args().any(|arg| arg == "--translate-clipboard") {
-                translate_clipboard(app.handle());
-            } else {
-                show(app.handle());
-            }
+            handle_launch(app.handle(), &std::env::args().collect::<Vec<_>>());
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -563,6 +577,7 @@ mod tests {
         PendingClipboard {
             text: Some(value.into()),
             error: None,
+            selection: false,
         }
     }
 
@@ -571,12 +586,17 @@ mod tests {
         let mut pending = PendingRequests::default();
         let older = pending.begin();
         let newer = pending.begin();
-        assert!(pending.deliver(newer, text("new selection")));
+        assert!(pending.deliver(
+            newer,
+            PendingClipboard {
+                selection: true,
+                ..text("new selection")
+            }
+        ));
         assert!(!pending.deliver(older, text("old clipboard")));
-        assert_eq!(
-            pending.value.take().unwrap().text.as_deref(),
-            Some("new selection")
-        );
+        let value = pending.value.take().unwrap();
+        assert_eq!(value.text.as_deref(), Some("new selection"));
+        assert!(value.selection);
     }
 
     #[test]
@@ -591,6 +611,7 @@ mod tests {
             PendingClipboard {
                 text: None,
                 error: Some("old failure".into()),
+                selection: true,
             }
         ));
         assert!(pending.value.is_none());

@@ -74,6 +74,7 @@
         <div class="shortcut-actions"><span class="setting-description" id="shortcut-help">押してキーを入力</span><button class="text-button" id="shortcut-reset">既定に戻す</button><button class="button small" id="shortcut-save" disabled>保存</button></div>
         <p class="setting-description" id="shortcut-message" role="status" aria-live="polite"></p>
         <p class="setting-description" id="shortcut-note"></p>
+        <label class="setting-toggle"><input type="checkbox" id="auto-direction" />選択した文章の日英を自動切替</label>
       </section>
       <section class="settings-section">
         <h3>翻訳モデル</h3>
@@ -85,7 +86,7 @@
         <label class="setting-toggle" title="初回の翻訳を速くします"><input type="checkbox" id="preload-model" checked aria-describedby="preload-description" />起動時にモデルを先読み</label>
         <p class="setting-description" id="preload-description">待機中もメモリを使用。オフは次回起動から。</p>
       </section>
-      <section class="settings-section about"><span>Anywhere Plamo 0.1.0 · MIT</span><button class="text-button" id="quit-button">終了</button></section>
+      <section class="settings-section about"><span>Anywhere Plamo 0.1.1 · MIT</span><button class="text-button" id="quit-button">終了</button></section>
     </dialog>
     <script type="module" src="/src/main.ts"></script>
   </body>

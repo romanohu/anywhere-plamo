@@ -4,6 +4,12 @@
 
 ## セットアップ
 
+Mac（macOS 13.3以降）では[Releases](https://github.com/romanohu/anywhere-plamo/releases/latest)から、Apple Silicon用の`aarch64.dmg`またはIntel用の`x64.dmg`を取得し、アプリを「アプリケーション」へ移動してください。
+
+Mac版はアドホック署名のみで未公証です。初回起動がブロックされた場合は「システム設定 → プライバシーとセキュリティ → このまま開く」から許可してください。
+
+### ソースから起動
+
 Node.js 24、Rust 1.90以上、Python 3.12以上、CMake、C/C++コンパイラと[TauriのOS別依存](https://v2.tauri.app/start/prerequisites/)が必要です。
 
 Ubuntu / Debianの追加パッケージ:
@@ -34,7 +40,7 @@ python3 scripts/collect-licenses.py
 npm run tauri build
 ```
 
-成果物は`src-tauri/target/release/bundle/`に生成されます。macOSの署名・公証は未設定です。
+成果物は`src-tauri/target/release/bundle/`に生成されます。
 
 ## 使い方
 
@@ -44,7 +50,11 @@ npm run tauri build
 
 ショートカットは「設定」でキー表示を押し、使いたい組み合わせを入力して「保存」します。設定は次回起動時も引き継ぎます。Ctrl・Alt・Command/Superを含む組み合わせ、またはF1〜F24を指定できます。
 
+「選択した文章の日英を自動切替」をオンにすると、日本語の選択文は英語、英語の選択文は日本語へ翻訳します。文字種による簡易判定で、判定できない文章は選択中の翻訳先を使います。
+
 「起動時にモデルを先読み」を有効にすると、初回の翻訳が速くなる代わりに待機中もメモリを使います。オフへの変更は次回起動から反映されます。アプリを終了するには、設定の「終了」を使います。
+
+ウィンドウを閉じてもメニューバー／トレイに常駐し、ショートカットを使えます（トレイを利用できる環境のみ）。画面を出さずに起動するには、Macでは`open -a "Anywhere Plamo" --args --background`、Linuxでは`anywhere-plamo --background`を使います。
 
 Macでは「システム設定 → プライバシーとセキュリティ → アクセシビリティ」でアプリを許可してください。
 

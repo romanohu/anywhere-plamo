@@ -53,12 +53,16 @@ def main():
         "-DLLAMA_USE_PREBUILT_UI=OFF", "-DLLAMA_SUBPROCESS=OFF",
     ]
     if platform.system() == "Darwin":
-        args += ["-DGGML_METAL_EMBED_LIBRARY=ON", "-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0"]
+        args += ["-DGGML_METAL_EMBED_LIBRARY=ON", "-DCMAKE_OSX_DEPLOYMENT_TARGET=13.3"]
     subprocess.run(args, check=True)
     subprocess.run(["cmake", "--build", str(build), "--target", "llama-server",
                     "--config", "Release", "--parallel", str(min(os.cpu_count() or 2, 8))], check=True)
     OUTPUT.mkdir(parents=True, exist_ok=True)
     shutil.copy2(build / "bin/llama-server", OUTPUT / "llama-server")
+    if platform.system() == "Darwin":
+        # Tauri signs app binaries, but does not sign executables in resources.
+        subprocess.run(["codesign", "--force", "--sign", "-", str(OUTPUT / "llama-server")],
+                       check=True)
     # Keep upstream notices with the distributed executable.
     shutil.copy2(SOURCE / "LICENSE", OUTPUT / "llama.cpp-LICENSE")
     licenses = OUTPUT / "vendor-licenses"

@@ -137,13 +137,30 @@ try:
             if driver.poll() is not None:
                 raise RuntimeError('Driver stopped: ' + (WORK / 'desktop.log').read_text())
             time.sleep(0.1)
-    value = request('POST', '/session', {'capabilities': {'alwaysMatch': {'browserName': 'wry', 'tauri:options': {'application': str(APP)}}}})
+    value = request('POST', '/session', {'capabilities': {'alwaysMatch': {'browserName': 'wry', 'tauri:options': {'application': str(APP), 'args': ['--background']}}}})
     SESSION = value['sessionId']
     request('POST', f'/session/{SESSION}/timeouts', {'script': 30000})
     status = invoke('get_status')
     wait("document.getElementById('model-tag').textContent === " + json.dumps('準備完了' if status['modelReady'] else '未準備'))
     assert status['runtimeAvailable'], status
     check('native application startup', status)
+    if status['resident']:
+        visible = lambda: subprocess.run(['xdotool', 'search', '--onlyvisible', '--name', '^Anywhere Plamo$'], env=env, capture_output=True).returncode == 0
+        app_pids = {pid for pid in owned_processes() if Path(f'/proc/{pid}/exe').resolve() == APP}
+        assert app_pids and not visible(), 'Background startup showed the window'
+        result = subprocess.run([str(APP), '--background'], env=env, capture_output=True, text=True, timeout=15)
+        assert result.returncode == 0, result.stderr
+        time.sleep(0.2)
+        assert not visible(), 'A background relaunch showed the window'
+        result = subprocess.run([str(APP)], env=env, capture_output=True, text=True, timeout=15)
+        assert result.returncode == 0, result.stderr
+        for _ in range(100):
+            if visible():
+                break
+            time.sleep(0.05)
+        assert visible(), 'A normal relaunch did not restore the window'
+        assert app_pids == {pid for pid in owned_processes() if Path(f'/proc/{pid}/exe').resolve() == APP}
+        check('background launch stays hidden and normal relaunch restores the same process')
     screenshot('startup.png')
     if not status['modelReady']:
         click('setup-open')
@@ -239,9 +256,22 @@ try:
             check('hiding and reopening the window cancels shortcut recording')
     fill('今日は良い天気ですね。', 'en')
     click('translate-button')
+    if status['resident']:
+        invoke('hide_window')
     output = translated()
     assert re.search('[A-Za-z]', output), output
     check('Japanese to English', output)
+    if status['resident']:
+        assert not visible(), 'Translation reopened the hidden window'
+        result = subprocess.run([str(APP)], env=env, capture_output=True, text=True, timeout=15)
+        assert result.returncode == 0, result.stderr
+        for _ in range(100):
+            if visible():
+                break
+            time.sleep(0.05)
+        assert visible()
+        assert text('translation') == output
+        check('translation completes in the background and survives reopening')
     for language in ('ko', 'zh-hans', 'fr', 'de', 'es'):
         fill('Thank you for your help.', language)
         click('translate-button')
@@ -315,7 +345,11 @@ try:
                 break
             time.sleep(0.05)
         assert json.loads(selection_state.read_text())['selected'] == 'Please open the window.'
-        fill('Waiting for the new shortcut.')
+        click('settings-button')
+        if not js("return document.getElementById('auto-direction').checked"):
+            click('auto-direction')
+        click('settings-close')
+        fill('Waiting for the new shortcut.', 'fr')
         subprocess.run(['xdotool', 'windowfocus', '--sync', window, 'key', 'ctrl+shift+j'], env=env, check=True)
         time.sleep(0.3)
         assert js("return document.getElementById('source').value") == 'Waiting for the new shortcut.'
@@ -323,8 +357,11 @@ try:
         wait("document.getElementById('source').value === 'Please open the window.'")
         output = translated()
         assert invoke('read_clipboard') == sentinel
+        assert js("return document.getElementById('target').value") == 'ja'
+        assert js("return localStorage.getItem('target-language')") == 'fr'
         check('new shortcut translates the selection and the previous shortcut is released', output)
-        fill('Waiting for selection command.')
+        check('English selection automatically uses Japanese and retains the manual target')
+        fill('Waiting for selection command.', 'fr')
         subprocess.run(['xdotool', 'windowfocus', '--sync', window], env=env, check=True)
         result = subprocess.run([str(APP), '--translate-selection'], env=env, capture_output=True, text=True, timeout=15)
         assert result.returncode == 0, result.stderr
@@ -332,6 +369,39 @@ try:
         translated()
         assert invoke('read_clipboard') == sentinel
         check('selection command preserves the ordinary clipboard')
+        result = subprocess.run([str(APP), '--translate-clipboard'], env=env, capture_output=True, text=True, timeout=15)
+        assert result.returncode == 0, result.stderr
+        wait("document.getElementById('source').value === " + json.dumps(sentinel))
+        translated()
+        assert js("return document.getElementById('target').value") == 'fr'
+        check('clipboard translation keeps the manual target when selection auto direction is enabled')
+        selection_source.terminate()
+        selection_source.wait(timeout=5)
+        selection_state.unlink(missing_ok=True)
+        japanese_selection = '今日は良い天気ですね。'
+        selection_source = subprocess.Popen(['/usr/bin/python3', str(ROOT / 'tests/selection-source.py'), str(selection_state), japanese_selection], env=env, stdout=log, stderr=log)
+        for _ in range(100):
+            if selection_state.exists():
+                break
+            time.sleep(0.1)
+        bounds = json.loads(selection_state.read_text())
+        window = subprocess.check_output(['xdotool', 'search', '--onlyvisible', '--name', '^Anywhere Plamo selection test source$'], env=env, text=True).strip()
+        y = str(bounds['y'] + bounds['height'] // 2)
+        subprocess.run(['xdotool', 'windowfocus', '--sync', window, 'key', 'ctrl+a'], env=env, check=True)
+        for _ in range(100):
+            if json.loads(selection_state.read_text())['selected'] == japanese_selection:
+                break
+            time.sleep(0.05)
+        assert json.loads(selection_state.read_text())['selected'] == japanese_selection
+        subprocess.run(['xdotool', 'key', 'ctrl+alt+t'], env=env, check=True)
+        wait("document.getElementById('source').value === " + json.dumps(japanese_selection))
+        translated()
+        assert js("return document.getElementById('target').value") == 'en'
+        assert invoke('read_clipboard') == sentinel
+        check('Japanese selection automatically uses English without changing the clipboard')
+        click('settings-button')
+        click('auto-direction')
+        click('settings-close')
         subprocess.run(['xdotool', 'windowfocus', '--sync', window, 'mousemove', '--window', window, str(bounds['x'] + 10), y, 'sleep', '0.1', 'click', '1'], env=env, check=True)
         for _ in range(100):
             if json.loads(selection_state.read_text())['selected'] == '':
@@ -341,15 +411,16 @@ try:
         subprocess.run(['xdotool', 'key', 'ctrl+alt+t'], env=env, check=True)
         wait("!document.getElementById('message').hidden")
         assert '選択した文字' in text('message')
-        assert js("return document.getElementById('source').value") == 'Please open the window.'
+        assert js("return document.getElementById('source').value") == japanese_selection
         assert invoke('read_clipboard') == sentinel
         check('missing selection does not translate old clipboard contents')
         selection_source.terminate()
         selection_source.wait(timeout=5)
         selection_source = None
     screenshot('translation-final.png')
-    assert js('return localStorage.length') == 1
-    check('only language preference is stored in localStorage')
+    expected_preferences = ['auto-direction', 'target-language'] if status['shortcutAvailable'] else ['target-language']
+    assert js('return Object.keys(localStorage).sort()') == expected_preferences
+    check('only preferences are stored in localStorage')
     owned = owned_processes()
     app_pids = {pid for pid in owned if Path(f'/proc/{pid}/exe').resolve() == APP}
     engine_pids = {pid for pid in owned if Path(f'/proc/{pid}/exe').resolve().name == 'llama-server'}

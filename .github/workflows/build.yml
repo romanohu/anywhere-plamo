@@ -18,7 +18,9 @@ jobs:
         include:
           - os: ubuntu-24.04
             bundles: deb,appimage
-          - os: macos-14
+          - os: macos-15
+            bundles: dmg
+          - os: macos-15-intel
             bundles: dmg
     runs-on: ${{ matrix.os }}
     steps:
@@ -49,6 +51,14 @@ jobs:
       - run: python3 scripts/collect-licenses.py
       - name: Package desktop app
         run: npm run tauri build -- --bundles ${{ matrix.bundles }}
+      - name: Verify macOS bundle
+        if: runner.os == 'macOS'
+        run: |
+          app="src-tauri/target/release/bundle/macos/Anywhere Plamo.app"
+          runtime="$app/Contents/Resources/resources/runtime/llama-server"
+          codesign --verify --deep --strict "$app"
+          codesign --verify --strict "$runtime"
+          "$runtime" --version
       - uses: actions/upload-artifact@v4
         with:
           name: anywhere-plamo-${{ matrix.os }}
@@ -70,7 +80,7 @@ jobs:
           pattern: anywhere-plamo-*
           path: installers
           merge-multiple: true
-      - name: Create draft release
+      - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
@@ -78,3 +88,4 @@ jobs:
         run: |
           gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" --draft --title "Anywhere Plamo $RELEASE_TAG" --generate-notes
           find installers -type f \( -name '*.deb' -o -name '*.AppImage' -o -name '*.dmg' \) -exec gh release upload "$RELEASE_TAG" '{}' --clobber \;
+          gh release edit "$RELEASE_TAG" --draft=false

@@ -18,6 +18,7 @@ const copyButton = element<HTMLButtonElement>('copy-button');
 const dialog = element<HTMLDialogElement>('settings-dialog');
 const downloadButton = element<HTMLButtonElement>('download-button');
 const preloadModel = element<HTMLInputElement>('preload-model');
+const autoDirection = element<HTMLInputElement>('auto-direction');
 const statusText = element<HTMLSpanElement>('translation-status');
 const message = element<HTMLDivElement>('message');
 const shortcutRecord = element<HTMLButtonElement>('shortcut-record');
@@ -37,7 +38,7 @@ let generation = 0;
 let copyTimer: ReturnType<typeof setTimeout>;
 let initialized = false;
 let readingMode = false;
-let pendingSelection: string | null = null;
+let pendingSelection: { text: string; selection: boolean } | null = null;
 let cancelRequest: Promise<void> | null = null;
 let takingPending = false;
 let takePendingAgain = false;
@@ -49,7 +50,9 @@ try {
   const saved = localStorage.getItem('target-language');
   if (saved && Array.from(target.options).some(option => option.value === saved)) target.value = saved;
   preloadModel.checked = localStorage.getItem('preload-model') !== 'false';
+  autoDirection.checked = localStorage.getItem('auto-direction') === 'true';
 } catch { /* Preferences are optional when browser storage is unavailable. */ }
+let manualTarget = target.value;
 
 element('modifier-key').textContent = mac ? '⌘' : 'Ctrl';
 
@@ -170,9 +173,18 @@ function prepareEngine(): void {
   }
 }
 
+function selectionTarget(text: string): 'ja' | 'en' | null {
+  if (/[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}]/u.test(text)) return 'en';
+  // Only infer English when all letters are ASCII; leave other scripts unchanged.
+  if (/[a-z]/i.test(text) && !/\p{L}/u.test(text.replace(/[a-z]/gi, ''))) return 'ja';
+  return null;
+}
+
 function translatePendingSelection(): void {
   if (busy || downloading || cancelRequest || takingPending || pendingSelection === null) return;
-  source.value = pendingSelection;
+  source.value = pendingSelection.text;
+  target.value = autoDirection.checked && pendingSelection.selection
+    ? selectionTarget(pendingSelection.text) ?? manualTarget : manualTarget;
   pendingSelection = null;
   setReadingMode(true);
   resetResult();
@@ -262,6 +274,7 @@ async function paste(): Promise<void> {
     const value = isDesktop ? await invoke<string>('read_clipboard') : await navigator.clipboard.readText();
     if (busy || cancelling || downloading || requested !== generation || !validInput(value)) return;
     source.value = value;
+    target.value = manualTarget;
     setReadingMode(false);
     resetResult();
     source.focus();
@@ -275,14 +288,15 @@ async function takePending(): Promise<void> {
   try {
     do {
       takePendingAgain = false;
-      const pending = await invoke<{ text: string | null; error: string | null } | null>('take_pending_clipboard');
+      const pending = await invoke<{ text: string | null; error: string | null; selection: boolean } | null>('take_pending_clipboard');
       if (readGeneration === selectionGeneration && pending) {
+        if (dialog.open && status.modelReady) dialog.close();
         pendingSelection = null;
         if (pending.error) showError(pending.error);
         else if (pending.text != null && validInput(pending.text)) {
           if (downloading) showError('モデルのダウンロード中です。完了後に、もう一度ショートカットを押してください。');
           else {
-            pendingSelection = pending.text;
+            pendingSelection = { text: pending.text, selection: pending.selection };
             if (busy) void cancel(false);
           }
         }
@@ -330,8 +344,9 @@ async function download(): Promise<void> {
   }
 }
 
-source.addEventListener('input', resetResult);
+source.addEventListener('input', () => { target.value = manualTarget; resetResult(); });
 target.addEventListener('change', () => {
+  manualTarget = target.value;
   try { localStorage.setItem('target-language', target.value); } catch { /* Optional preference. */ }
   resetResult();
 });
@@ -344,7 +359,7 @@ element('toggle-original').addEventListener('click', () => {
   element('toggle-original').textContent = panel.hidden ? '原文を表示' : '原文を隠す';
 });
 element('edit-source').addEventListener('click', () => { setReadingMode(false); source.focus(); });
-clearButton.addEventListener('click', () => { source.value = ''; resetResult(); source.focus(); });
+clearButton.addEventListener('click', () => { source.value = ''; target.value = manualTarget; resetResult(); source.focus(); });
 copyButton.addEventListener('click', async () => {
   try {
     if (isDesktop) await invoke('write_clipboard', { text: result.textContent ?? '' });
@@ -399,6 +414,9 @@ downloadButton.addEventListener('click', () => { void download(); });
 preloadModel.addEventListener('change', () => {
   try { localStorage.setItem('preload-model', String(preloadModel.checked)); } catch { /* Optional preference. */ }
   prepareEngine();
+});
+autoDirection.addEventListener('change', () => {
+  try { localStorage.setItem('auto-direction', String(autoDirection.checked)); } catch { /* Optional preference. */ }
 });
 element('download-cancel').addEventListener('click', () => { void cancel(); });
 element('license-link').addEventListener('click', async () => {

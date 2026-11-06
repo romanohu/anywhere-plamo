@@ -136,6 +136,12 @@ mod macos {
             attribute: CFStringRef,
             value: *mut CFTypeRef,
         ) -> i32;
+        fn AXUIElementCopyParameterizedAttributeValue(
+            element: CFTypeRef,
+            attribute: CFStringRef,
+            parameter: CFTypeRef,
+            value: *mut CFTypeRef,
+        ) -> i32;
     }
 
     fn attribute(element: &CFType, name: &str) -> Result<CFType, String> {
@@ -153,6 +159,36 @@ mod macos {
             return Err(super::UNAVAILABLE.into());
         }
         Ok(unsafe { CFType::wrap_under_create_rule(value) })
+    }
+
+    fn selected_text(element: &CFType) -> Result<String, String> {
+        if let Ok(value) = attribute(element, "AXSelectedText") {
+            if let Some(text) = value.downcast::<CFString>() {
+                return Ok(text.to_string());
+            }
+        }
+
+        // Web content can expose its selection as text markers instead of
+        // AXSelectedText (including selections spanning multiple DOM nodes).
+        let range = attribute(element, "AXSelectedTextMarkerRange")?;
+        let name = CFString::new("AXStringForTextMarkerRange");
+        let mut value = std::ptr::null();
+        // The opaque range comes from this same element. Copy owns its result.
+        let result = unsafe {
+            AXUIElementCopyParameterizedAttributeValue(
+                element.as_CFTypeRef(),
+                name.as_concrete_TypeRef(),
+                range.as_CFTypeRef(),
+                &mut value,
+            )
+        };
+        if result != 0 || value.is_null() {
+            return Err(super::UNAVAILABLE.into());
+        }
+        unsafe { CFType::wrap_under_create_rule(value) }
+            .downcast::<CFString>()
+            .map(|text| text.to_string())
+            .ok_or_else(|| super::UNAVAILABLE.to_owned())
     }
 
     pub fn read() -> Result<String, String> {
@@ -175,10 +211,7 @@ mod macos {
             return Err(super::UNAVAILABLE.into());
         }
         unsafe { AXUIElementSetMessagingTimeout(focused.as_CFTypeRef(), 2.0) };
-        attribute(&focused, "AXSelectedText")?
-            .downcast::<CFString>()
-            .map(|text| text.to_string())
-            .ok_or_else(|| super::UNAVAILABLE.to_owned())
+        selected_text(&focused)
     }
 }
 
