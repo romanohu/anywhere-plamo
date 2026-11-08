@@ -23,7 +23,7 @@ tokio-util = "0.7"
 sha2 = "0.10"
 uuid = { version = "1", features = ["v4"] }
 open = "5"
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "pnm"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 arboard = { version = "3.7", default-features = false, features = ["wayland-data-control"] }

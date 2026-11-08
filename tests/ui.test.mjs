@@ -999,11 +999,11 @@ test('lens anchors paragraphs separately and repositions cached translations wit
   ] });
   await f.tickLens();
   assert.deepEqual(f.calls.filter(call => call.command === 'translate').map(call => call.args.text), blocks.map(block => block.text));
-  const positions = [...f.byId('lens-translation').children].map(node => parseFloat(node.style.top));
+  const positions = [...f.byId('lens-translation').querySelectorAll('.lens-block')].map(node => parseFloat(node.style.top));
   assert.equal(positions[1] - positions[0], 170);
   await f.tickLens();
   await f.tickLens();
-  const paragraphs = [...f.byId('lens-translation').children];
+  const paragraphs = [...f.byId('lens-translation').querySelectorAll('.lens-block')];
   assert.equal(paragraphs.length, 2);
   assert.equal(parseFloat(paragraphs[0].style.top) - positions[0], 34);
   assert.equal(f.calls.filter(call => call.command === 'translate').length, 2);
@@ -1021,7 +1021,7 @@ test('lens ignores unchanged resize events and stops wheel overscroll without ca
   assert.equal(f.calls.some(call => call.command === 'cancel_operation'), false);
   f.finishCapture('Same screen.');
   await until(() => f.byId('lens-status').textContent.startsWith('更新しました'));
-  const paragraph = f.byId('lens-translation').firstElementChild;
+  const paragraph = f.byId('lens-translation').querySelector('.lens-block');
   Object.defineProperties(paragraph, { clientHeight: { value: 50 }, scrollHeight: { value: 150 } });
   const scroll = () => {
     const event = new f.window.WheelEvent('wheel', { deltaY: 100, bubbles: true, cancelable: true });

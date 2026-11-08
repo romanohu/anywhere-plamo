@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-#[cfg(any(target_os = "linux", test))]
 use std::{
     fs::File,
     io::{BufWriter, Write},
@@ -40,6 +39,38 @@ pub struct TextBlock {
     y: f64,
     width: f64,
     height: f64,
+    #[serde(skip)]
+    lines: Vec<OcrLine>,
+}
+
+#[derive(Debug, Clone)]
+struct OcrLine {
+    text: String,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    confidence: f64,
+    words: usize,
+    max_gap: f64,
+}
+
+impl OcrLine {
+    fn right(&self) -> f64 {
+        self.x + self.width
+    }
+    fn bottom(&self) -> f64 {
+        self.y + self.height
+    }
+    fn center_y(&self) -> f64 {
+        self.y + self.height / 2.0
+    }
+    fn score(&self) -> f64 {
+        self.confidence / self.words.max(1) as f64
+    }
+    fn vertical(&self) -> bool {
+        self.height > self.width * 1.8 && self.text.chars().filter(|ch| cjk(*ch)).count() > 1
+    }
 }
 
 impl Watch {
@@ -92,6 +123,7 @@ pub fn ready(runtime: &Path) -> bool {
         "tesseract",
         "tessdata/eng.traineddata",
         "tessdata/jpn.traineddata",
+        "tessdata/jpn_vert.traineddata",
     ]
     .iter()
     .all(|file| runtime.join(file).is_file())
@@ -125,7 +157,6 @@ impl Drop for CaptureFile {
 }
 
 // PPM needs no platform image codecs in the bundled OCR executable.
-#[cfg(any(target_os = "linux", test))]
 fn write_image(path: &Path, image: image::RgbImage) -> Result<(), String> {
     let image = if image.width().max(image.height()) > 4096 {
         image::DynamicImage::ImageRgb8(image)
@@ -223,6 +254,185 @@ async fn recognize(
     path: &Path,
     cancel: &CancellationToken,
 ) -> Result<Vec<TextBlock>, String> {
+    let blocks = recognize_page(runtime, path, cancel, "3", "eng+jpn+jpn_vert").await?;
+    let lines: Vec<_> = blocks.iter().flat_map(|block| &block.lines).collect();
+    // Normal documents and vertical Japanese retain Tesseract's reading order.
+    // Sparse layouts need a separate pass: page segmentation can interleave
+    // neighbouring speech balloons, especially with small handwritten lettering.
+    let small_uncertain = lines
+        .iter()
+        .any(|line| line.height < 18.0 && line.score() < 75.0);
+    let mixed_columns = lines.iter().any(|line| line.max_gap > line.height * 2.5);
+    if lines.iter().any(|line| line.vertical()) || !(small_uncertain || mixed_columns) {
+        return Ok(blocks);
+    }
+    let image = image::open(path)
+        .map_err(|_| "読み取り画像を開けません。")?
+        .to_rgb8();
+    let (width, height) = image.dimensions();
+    let scale = (4096.0 / width.max(height) as f64).min(2.0);
+    let file = CaptureFile::new()?;
+    write_image(
+        &file.path,
+        image::imageops::resize(
+            &image,
+            (width as f64 * scale) as u32,
+            (height as f64 * scale) as u32,
+            image::imageops::FilterType::Triangle,
+        ),
+    )?;
+    let sparse = recognize_page(runtime, &file.path, cancel, "11", "eng+jpn").await?;
+    let mut groups = group_lines(sparse.into_iter().flat_map(|block| block.lines).collect());
+    // Recognize each independent region as a paragraph. This avoids asking the
+    // translator to repair text interleaved across unrelated balloons/columns.
+    let mut result = Vec::new();
+    for group in &mut groups {
+        if cancel.is_cancelled() {
+            return Err("CANCELLED".into());
+        }
+        group.sort_by(|a, b| a.center_y().total_cmp(&b.center_y()));
+        let left = group
+            .iter()
+            .map(|line| line.x)
+            .fold(f64::INFINITY, f64::min)
+            / scale;
+        let top = group
+            .iter()
+            .map(|line| line.y)
+            .fold(f64::INFINITY, f64::min)
+            / scale;
+        let right = group.iter().map(OcrLine::right).fold(0.0, f64::max) / scale;
+        let bottom = group.iter().map(OcrLine::bottom).fold(0.0, f64::max) / scale;
+        let x = left.floor().max(0.0) as u32;
+        let y = top.floor().max(0.0) as u32;
+        let w = (right.ceil() as u32).min(width).saturating_sub(x);
+        let h = (bottom.ceil() as u32).min(height).saturating_sub(y);
+        if w == 0 || h == 0 {
+            continue;
+        }
+        let crop = image::imageops::crop_imm(&image, x, y, w, h).to_image();
+        let factor = (4000.0 / w.max(h) as f64).min(3.0);
+        let enlarged = image::imageops::resize(
+            &crop,
+            (w as f64 * factor) as u32,
+            (h as f64 * factor) as u32,
+            image::imageops::FilterType::Triangle,
+        );
+        let mut padded = image::RgbImage::from_pixel(
+            enlarged.width() + 20,
+            enlarged.height() + 20,
+            image::Rgb([255; 3]),
+        );
+        image::imageops::replace(&mut padded, &enlarged, 10, 10);
+        write_image(&file.path, padded)?;
+        let source: String = group
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let letters = source.chars().filter(|ch| ch.is_alphabetic()).count();
+        let latin = source.chars().filter(|ch| ch.is_ascii_alphabetic()).count();
+        let language = if latin * 5 >= letters * 4 {
+            "eng"
+        } else {
+            "jpn+eng"
+        };
+        let refined = recognize_page(runtime, &file.path, cancel, "6", language).await?;
+        let text = refined
+            .iter()
+            .map(|block| block.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        if text.trim().is_empty() {
+            continue;
+        }
+        result.push(TextBlock {
+            text,
+            x: x as f64 / width as f64,
+            y: y as f64 / height as f64,
+            width: w as f64 / width as f64,
+            height: h as f64 / height as f64,
+            lines: Vec::new(),
+        });
+    }
+    check_text_limit(&result)?;
+    Ok(if result.is_empty() { blocks } else { result })
+}
+
+fn group_lines(mut lines: Vec<OcrLine>) -> Vec<Vec<OcrLine>> {
+    lines.retain(|line| {
+        line.text.chars().filter(|ch| ch.is_alphanumeric()).count() >= 2 && line.score() >= 35.0
+    });
+    if lines.is_empty() {
+        return Vec::new();
+    }
+    let mut heights: Vec<_> = lines.iter().map(|line| line.height).collect();
+    heights.sort_by(f64::total_cmp);
+    let height = heights[heights.len() / 2];
+    lines.retain(|line| line.height <= height * 2.2);
+    // Join fragments on the same baseline, without crossing the gutter between columns.
+    lines.sort_by(|a, b| a.x.total_cmp(&b.x));
+    let mut i = 0;
+    while i < lines.len() {
+        let mut j = i + 1;
+        while j < lines.len() {
+            let a = &lines[i];
+            let b = &lines[j];
+            let overlap = a.bottom().min(b.bottom()) - a.y.max(b.y);
+            let gap = b.x - a.right();
+            if overlap >= a.height.min(b.height) * 0.6 && gap >= 0.0 && gap <= height * 1.5 {
+                let b = lines.remove(j);
+                let a = &mut lines[i];
+                let right = a.right().max(b.right());
+                let bottom = a.bottom().max(b.bottom());
+                append_text(&mut a.text, &b.text, false);
+                a.y = a.y.min(b.y);
+                a.width = right - a.x;
+                a.height = bottom - a.y;
+                a.confidence += b.confidence;
+                a.words += b.words;
+            } else {
+                j += 1;
+            }
+        }
+        i += 1;
+    }
+    lines.sort_by(|a, b| {
+        a.center_y()
+            .total_cmp(&b.center_y())
+            .then(a.x.total_cmp(&b.x))
+    });
+    let mut groups: Vec<Vec<OcrLine>> = Vec::new();
+    for line in lines {
+        let closest = groups
+            .iter()
+            .enumerate()
+            .filter_map(|(index, group)| {
+                let previous = group.last()?;
+                let distance = line.center_y() - previous.center_y();
+                let overlap = line.right().min(previous.right()) - line.x.max(previous.x);
+                (distance > 0.0
+                    && distance <= height * 1.8
+                    && overlap >= line.width.min(previous.width) * 0.5)
+                    .then_some((index, distance))
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1));
+        if let Some((index, _)) = closest {
+            groups[index].push(line);
+        } else {
+            groups.push(vec![line]);
+        }
+    }
+    groups
+}
+
+async fn recognize_page(
+    runtime: &Path,
+    path: &Path,
+    cancel: &CancellationToken,
+    segmentation: &str,
+    language: &str,
+) -> Result<Vec<TextBlock>, String> {
     use tokio::io::AsyncReadExt;
     if cancel.is_cancelled() {
         return Err("CANCELLED".into());
@@ -232,7 +442,7 @@ async fn recognize(
         .arg("stdout")
         .arg("--tessdata-dir")
         .arg(runtime.join("tessdata"))
-        .args(["-l", "jpn+eng", "--oem", "1", "--psm", "3"])
+        .args(["-l", language, "--oem", "1", "--psm", segmentation])
         .args(["-c", "tessedit_create_tsv=1"])
         .env("OMP_THREAD_LIMIT", "2")
         .stdin(std::process::Stdio::null())
@@ -322,6 +532,7 @@ fn parse_tsv(tsv: &str) -> Result<Vec<TextBlock>, String> {
                 y: y / page_height,
                 width: width / page_width,
                 height: height / page_height,
+                lines: Vec::new(),
             });
         } else {
             if paragraph != Some(key) {
@@ -332,15 +543,30 @@ fn parse_tsv(tsv: &str) -> Result<Vec<TextBlock>, String> {
             if word.is_empty() {
                 continue;
             }
-            // OCR line endings are visual wraps, not paragraph breaks. Japanese
-            // words also must not acquire spaces simply because OCR split them.
-            if let (Some(left), Some(right)) = (block.text.chars().last(), word.chars().next()) {
-                let cjk = |ch| matches!(ch as u32, 0x3000..=0x30ff | 0x3400..=0x9fff | 0xac00..=0xd7af | 0xff00..=0xffef | 0x20000..=0x323af);
-                if !cjk(left) && !cjk(right) && !(line != fields[4] && left == '-') {
-                    block.text.push(' ');
-                }
+            if line != fields[4] {
+                block.lines.push(OcrLine {
+                    text: String::new(),
+                    x,
+                    y,
+                    width,
+                    height,
+                    confidence: 0.0,
+                    words: 0,
+                    max_gap: 0.0,
+                });
             }
-            block.text.push_str(word);
+            let row = block.lines.last_mut().ok_or(invalid)?;
+            row.max_gap = row.max_gap.max(x - row.right());
+            let right = row.right().max(x + width);
+            let bottom = row.bottom().max(y + height);
+            row.x = row.x.min(x);
+            row.y = row.y.min(y);
+            row.width = right - row.x;
+            row.height = bottom - row.y;
+            row.confidence += fields[10].parse::<f64>().unwrap_or(0.0).clamp(0.0, 100.0);
+            row.words += 1;
+            append_text(&mut row.text, word, false);
+            append_text(&mut block.text, word, line != fields[4]);
             line = fields[4];
         }
     }
@@ -348,6 +574,24 @@ fn parse_tsv(tsv: &str) -> Result<Vec<TextBlock>, String> {
         return Err(invalid.into());
     }
     blocks.retain(|block| !block.text.is_empty() && block.width > 0.0 && block.height > 0.0);
+    check_text_limit(&blocks)?;
+    Ok(blocks)
+}
+
+fn cjk(ch: char) -> bool {
+    matches!(ch as u32, 0x3000..=0x30ff | 0x3400..=0x9fff | 0xac00..=0xd7af | 0xff00..=0xffef | 0x20000..=0x323af)
+}
+
+fn append_text(text: &mut String, word: &str, wrapped: bool) {
+    if let (Some(left), Some(right)) = (text.chars().last(), word.chars().next()) {
+        if !cjk(left) && !cjk(right) && !(wrapped && left == '-') {
+            text.push(' ');
+        }
+    }
+    text.push_str(word);
+}
+
+fn check_text_limit(blocks: &[TextBlock]) -> Result<(), String> {
     if blocks
         .iter()
         .map(|block| block.text.encode_utf16().count() + 2)
@@ -357,7 +601,7 @@ fn parse_tsv(tsv: &str) -> Result<Vec<TextBlock>, String> {
     {
         return Err("文字が多すぎます。読み取る範囲を小さくしてください。".into());
     }
-    Ok(blocks)
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -602,7 +846,12 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let runtime = root.join("resources/runtime");
         assert!(ready(&runtime), "Run npm run ocr:build first");
-        for (name, expected) in [("english", "Local translation"), ("japanese", "画像")] {
+        for (name, expected) in [
+            ("english", "Local translation"),
+            ("japanese", "画像"),
+            ("columns", "speech bubble"),
+            ("vertical", "画像の文字を翻訳します日本語を英語に変換する"),
+        ] {
             let image = image::open(root.join(format!("../tests/fixtures/ocr-{name}.png")))
                 .unwrap()
                 .to_rgb8();
@@ -615,6 +864,23 @@ mod tests {
                 text.iter().any(|block| block.text.contains(expected)),
                 "{name}: {text:?}"
             );
+            if name == "columns" {
+                assert_eq!(text.len(), 5, "{text:?}");
+                assert_eq!(text[0].text, "Read this speech bubble. Keep its lines together. Local translation is useful.");
+                assert_eq!(
+                    text[1].text,
+                    "This is another speaker. Do not mix these words with the text on the left."
+                );
+                assert!(text[2].text.starts_with("The last speaker replies."));
+                assert!(text[0].x + text[0].width < text[1].x);
+                assert!(text[1].x + text[1].width < text[2].x);
+                assert!(text[3].y > text[0].y + text[0].height);
+            } else if name == "vertical" {
+                assert_eq!(text.len(), 2, "{text:?}");
+                assert_eq!(text[1].text, "今日は良い天気ですね明日も晴れるでしょう");
+                assert!(text[0].x > text[1].x + text[1].width);
+                assert!(text.iter().all(|block| block.height > block.width * 3.0));
+            }
         }
     }
 }

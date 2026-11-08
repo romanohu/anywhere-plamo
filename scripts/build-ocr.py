@@ -65,6 +65,7 @@ def main():
     for name, checksum in [
         ("eng.traineddata", "7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2"),
         ("jpn.traineddata", "1f5de9236d2e85f5fdf4b3c500f2d4926f8d9449f28f5394472d9e8d83b91b4d"),
+        ("jpn_vert.traineddata", "bf1e2640954691797e2dc14f38533e601b59ee37958698ae0f0b81dc6f09c71b"),
         ("LICENSE", "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"),
     ]:
         cached = download("tessdata-LICENSE" if name == "LICENSE" else name,

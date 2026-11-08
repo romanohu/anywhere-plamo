@@ -31,7 +31,7 @@ npm run runtime:build
 npm run tauri dev
 ```
 
-推論・OCRエンジンと日英のOCRデータは初回に取得・ビルドされます。翻訳の推論は既定でLinuxはCPU、macOSはMetalを使用します。OCRは両OSともCPUで動きます。
+推論・OCRエンジンと日英のOCRデータ（日本語の縦書きを含む）は初回に取得・ビルドされます。既存のソース版は `npm run ocr:build` でOCRデータを更新してください。翻訳の推論は既定でLinuxはCPU、macOSはMetalを使用します。OCRは両OSともCPUで動きます。
 
 配布用ファイルを作る場合:
 

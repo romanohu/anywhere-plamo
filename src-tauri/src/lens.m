@@ -103,11 +103,14 @@ char *plamo_lens_capture(void *viewPointer, double x, double y, double width, do
             NSView *view = (__bridge NSView *)viewPointer;
             NSWindow *window = view.window;
             if (!window.visible || !view) return;
-            // Webview CSS coordinates are points, with the origin at the top left.
-            NSRect region = NSMakeRect(NSMinX(view.bounds) + x,
-                                       view.isFlipped ? NSMinY(view.bounds) + y : NSMaxY(view.bounds) - y - height,
+            // WebKit can inset its viewport below the titlebar. CSS coordinates
+            // start at that visible content area, not at the full NSView bounds.
+            NSRect viewport = NSIntersectionRect(view.bounds,
+                [view convertRect:window.contentLayoutRect fromView:nil]);
+            NSRect region = NSMakeRect(NSMinX(viewport) + x,
+                                       view.isFlipped ? NSMinY(viewport) + y : NSMaxY(viewport) - y - height,
                                        width, height);
-            if (!NSContainsRect(view.bounds, region)) return;
+            if (!NSContainsRect(viewport, region)) return;
             NSRect screenRect = [window convertRectToScreen:[view convertRect:region toView:nil]];
             for (NSScreen *screen in NSScreen.screens) {
                 // Keep the first version on one display; never silently crop a second display.

@@ -30,6 +30,7 @@ export async function initLens(): Promise<void> {
   let generation = 0;
   let showingOriginal = false;
   let cancellation: Promise<void> | null = null;
+  const backdrops = new WeakMap<HTMLElement, { element: HTMLElement; width: number; height: number }>();
 
   document.body.classList.add('lens-mode');
   document.title = 'Anywhere Plamo — OCRレンズ';
@@ -87,10 +88,16 @@ export async function initLens(): Promise<void> {
         const left = Math.max(0, block.x * rect.width - 5);
         const top = Math.max(0, block.y * rect.height - 3);
         const height = Math.max(0, bottom * rect.height - top - 3);
+        const backdrop = document.createElement('div');
+        backdrop.className = 'lens-backdrop';
+        backdrop.setAttribute('aria-hidden', 'true');
+        Object.assign(backdrop.style, { left: `${left}px`, top: `${top}px` });
+        translation.append(backdrop);
+        backdrops.set(paragraph, { element: backdrop, width: Math.min(right * rect.width - left - 3, block.width * rect.width + 10), height: Math.min(height, block.height * rect.height + 6) });
         Object.assign(paragraph.style, {
           position: 'absolute', left: `${left}px`, top: `${top}px`,
-          width: `${Math.max(0, right * rect.width - left - 3)}px`,
-          minHeight: `${Math.min(height, block.height * rect.height + 6)}px`, maxHeight: `${height}px`,
+          width: 'max-content', maxWidth: `${Math.max(0, right * rect.width - left - 3)}px`,
+          maxHeight: `${height}px`,
         });
       }
       translation.append(paragraph);
@@ -103,6 +110,18 @@ export async function initLens(): Promise<void> {
     paragraph.style.fontSize = '16px';
     for (let size = 15; size >= 12 && paragraph.scrollHeight > paragraph.clientHeight + 1; size--) {
       paragraph.style.fontSize = `${size}px`;
+    }
+    const backdrop = backdrops.get(paragraph);
+    if (backdrop) {
+      const { width, height } = paragraph.getBoundingClientRect();
+      const maxWidth = Math.max(width, backdrop.width), maxHeight = Math.max(height, backdrop.height);
+      const minWidth = Math.min(width, backdrop.width), minHeight = Math.min(height, backdrop.height);
+      // Union of the source and translation rectangles, without painting the empty
+      // corner of an L-shaped union (e.g. vertical source / horizontal translation).
+      const corner = width >= backdrop.width && height >= backdrop.height || width <= backdrop.width && height <= backdrop.height;
+      const points = corner ? `0 0, 100% 0, 100% 100%, 0 100%`
+        : `0 0, ${maxWidth}px 0, ${maxWidth}px ${minHeight}px, ${minWidth}px ${minHeight}px, ${minWidth}px ${maxHeight}px, 0 ${maxHeight}px`;
+      Object.assign(backdrop.element.style, { width: `${maxWidth}px`, height: `${maxHeight}px`, clipPath: `polygon(${points})` });
     }
   }
 
