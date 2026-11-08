@@ -1,7 +1,8 @@
 import { invoke, isDesktop, onWindowHidden, progressChannel } from './backend';
 import type { AppStatus } from './backend';
 
-type CaptureResult = { kind: 'changed' } | { kind: 'unchanged' } | { kind: 'text'; text: string };
+type TextBlock = { text: string; x: number; y: number; width: number; height: number };
+type CaptureResult = { kind: 'changed' } | { kind: 'unchanged' } | { kind: 'text'; text: string; blocks: TextBlock[] };
 
 export async function initLens(): Promise<void> {
   const element = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
@@ -23,8 +24,7 @@ export async function initLens(): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let pollDelay = 200;
   let reset = true;
-  let lastText = '';
-  let lastTranslation = '';
+  let translations = new Map<string, string>();
   const updateKey = /Mac/.test(navigator.platform) ? '⌘+Enter' : 'Ctrl+Enter';
   const instruction = (): string => selection ? '「更新」でOSの画面選択を開きます' : auto ? '枠内の文字を自動で翻訳します' : '読み取りたい範囲に枠を合わせて「更新」';
   let generation = 0;
@@ -43,6 +43,7 @@ export async function initLens(): Promise<void> {
 
   function message(text: string, error = false): void {
     status.textContent = text;
+    status.title = text;
     status.classList.toggle('is-error', error);
   }
 
@@ -70,13 +71,47 @@ export async function initLens(): Promise<void> {
     try { localStorage.setItem('lens-auto', String(auto)); } catch { /* Optional preference. */ }
   }
 
+  function placeBlocks(blocks: TextBlock[]): HTMLElement[] {
+    translation.replaceChildren();
+    const rect = region.getBoundingClientRect();
+    return blocks.map(block => {
+      const paragraph = document.createElement('p');
+      paragraph.className = 'lens-block';
+      paragraph.dir = 'auto';
+      if (!selection) {
+        // Expand into free space, but leave neighbouring columns/paragraphs clear.
+        const right = Math.min(1, ...blocks.filter(other => other.x >= block.x + block.width
+          && other.y < block.y + block.height && other.y + other.height > block.y).map(other => other.x));
+        const bottom = Math.min(1, ...blocks.filter(other => other.y >= block.y + block.height
+          && other.x < right && other.x + other.width > block.x).map(other => other.y));
+        const left = Math.max(0, block.x * rect.width - 5);
+        const top = Math.max(0, block.y * rect.height - 3);
+        const height = Math.max(0, bottom * rect.height - top - 3);
+        Object.assign(paragraph.style, {
+          position: 'absolute', left: `${left}px`, top: `${top}px`,
+          width: `${Math.max(0, right * rect.width - left - 3)}px`,
+          minHeight: `${Math.min(height, block.height * rect.height + 6)}px`, maxHeight: `${height}px`,
+        });
+      }
+      translation.append(paragraph);
+      return paragraph;
+    });
+  }
+
+  function fitBlock(paragraph: HTMLElement): void {
+    if (selection || !paragraph.getClientRects().length) return;
+    paragraph.style.fontSize = '16px';
+    for (let size = 15; size >= 12 && paragraph.scrollHeight > paragraph.clientHeight + 1; size--) {
+      paragraph.style.fontSize = `${size}px`;
+    }
+  }
+
   function invalidate(text: string): void {
     clearTimeout(timer);
     generation++;
     reset = true;
     pollDelay = 200;
-    lastText = '';
-    lastTranslation = '';
+    translations.clear();
     translation.textContent = '';
     source.textContent = '';
     showingOriginal = false;
@@ -103,7 +138,7 @@ export async function initLens(): Promise<void> {
     translating = false;
     if (!background) {
       reset = true;
-      lastText = '';
+      translations.clear();
       translation.textContent = '';
       source.textContent = '';
       showingOriginal = false;
@@ -144,29 +179,39 @@ export async function initLens(): Promise<void> {
       }
       if (text.length > 12000) throw new Error('文字が多すぎます。読み取る範囲を小さくしてください。');
       source.textContent = text;
-      if (watching && text === lastText && lastTranslation) {
-        translation.textContent = lastTranslation;
-        message('自動更新中');
-        return;
-      }
       translating = true;
-      translation.textContent = '';
+      const paragraphs = placeBlocks(capture.blocks);
+      const nextTranslations = new Map<string, string>();
+      let truncated = false;
       message('翻訳中…');
       render();
-      const channel = progressChannel(event => {
-        if (run !== generation || !busy) return;
-        if (event.kind === 'loading') message('モデルを読み込み中…');
-        if (event.kind === 'token') {
-          translation.textContent += event.text;
-          message('翻訳中…');
+      for (const [index, block] of capture.blocks.entries()) {
+        const paragraph = paragraphs[index];
+        const cached = nextTranslations.get(block.text) ?? translations.get(block.text);
+        if (cached) {
+          paragraph.textContent = cached;
           render();
+          fitBlock(paragraph);
+          nextTranslations.set(block.text, cached);
+          continue;
         }
-      });
-      const outcome = await invoke<{ truncated: boolean }>('translate', { text, target: target.value, onEvent: channel });
-      if (run !== generation) return;
-      lastText = outcome.truncated ? '' : text;
-      lastTranslation = translation.textContent ?? '';
-      message(outcome.truncated ? '訳文が上限に達しました。範囲を小さくして更新してください。' : watching ? '自動更新中' : `更新しました · ${updateKey}で再読取`);
+        const channel = progressChannel(event => {
+          if (run !== generation || !busy) return;
+          if (event.kind === 'loading') message('モデルを読み込み中…');
+          if (event.kind === 'token') {
+            paragraph.textContent += event.text;
+            message('翻訳中…');
+            render();
+            fitBlock(paragraph);
+          }
+        });
+        const outcome = await invoke<{ truncated: boolean }>('translate', { text: block.text, target: target.value, onEvent: channel });
+        if (run !== generation) return;
+        truncated ||= outcome.truncated;
+        if (!outcome.truncated) nextTranslations.set(block.text, paragraph.textContent ?? '');
+      }
+      translations = nextTranslations;
+      message(truncated ? '訳文が上限に達しました。範囲を小さくして更新してください。' : watching ? '自動更新中' : `更新しました · ${updateKey}で再読取`);
     } catch (error) {
       if (run === generation) {
         const detail = error instanceof Error ? error.message : String(error);
@@ -195,14 +240,33 @@ export async function initLens(): Promise<void> {
     if (auto || busy) invalidate(instruction());
     else { clearTimeout(timer); message('自動更新を停止しました'); render(); }
   });
-  original.addEventListener('click', () => { showingOriginal = !showingOriginal; render(); });
+  original.addEventListener('click', () => {
+    showingOriginal = !showingOriginal;
+    render();
+    if (!showingOriginal) translation.querySelectorAll<HTMLElement>('.lens-block').forEach(fitBlock);
+  });
   element('lens-close').addEventListener('click', () => { void close(); });
   target.addEventListener('change', () => {
     invalidate(auto ? instruction() : '「更新」で選んだ言語に翻訳');
     try { localStorage.setItem('lens-target', target.value); } catch { /* Optional preference. */ }
   });
   const moved = (): void => { if (!selection) invalidate(auto ? '範囲が決まると自動で翻訳します' : '範囲を変更しました。「更新」で再読取'); };
-  window.addEventListener('resize', moved);
+  let viewport = [window.innerWidth, window.innerHeight];
+  window.addEventListener('resize', () => {
+    const current = [window.innerWidth, window.innerHeight];
+    if (current[0] === viewport[0] && current[1] === viewport[1]) return;
+    viewport = current;
+    moved();
+  });
+  // Stop trackpad gestures at a text box's edges instead of rubber-banding the
+  // entire webview and shifting the screen coordinates of the capture region.
+  document.addEventListener('wheel', event => {
+    let box = event.target instanceof Element ? event.target.closest<HTMLElement>('.lens-block, #lens-source, .lens-selection #lens-translation') : null;
+    if (selection && box?.classList.contains('lens-block')) box = translation;
+    const canScroll = box && ((event.deltaY < 0 && box.scrollTop > 0)
+      || (event.deltaY > 0 && box.scrollTop + box.clientHeight < box.scrollHeight - 1));
+    if (event.ctrlKey || event.deltaX || !canScroll) event.preventDefault();
+  }, { passive: false });
   document.addEventListener('keydown', event => {
     if (event.isComposing || event.repeat) return;
     if (event.key === 'Escape') { event.preventDefault(); void close(); }
@@ -223,6 +287,7 @@ export async function initLens(): Promise<void> {
     const app = await invoke<AppStatus>('get_status');
     ready = app.lensSupported;
     selection = app.lensUsesSelection;
+    result.classList.toggle('lens-selection', selection);
     if (selection) auto = false;
     message(instruction());
     if (!ready) message('OCRレンズはMac・Linuxで利用できます。');

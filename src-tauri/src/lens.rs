@@ -22,11 +22,24 @@ pub struct Watch {
 }
 
 #[derive(Serialize)]
-#[serde(tag = "kind", content = "text", rename_all = "camelCase")]
+#[serde(tag = "kind", rename_all = "camelCase")]
 pub enum CaptureResult {
     Changed,
     Unchanged,
-    Text(String),
+    Text {
+        text: String,
+        blocks: Vec<TextBlock>,
+    },
+}
+
+#[derive(Debug, Serialize)]
+pub struct TextBlock {
+    text: String,
+    // Fractions of the captured image, independent of Retina scale/downsampling.
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
 }
 
 impl Watch {
@@ -148,7 +161,13 @@ pub async fn capture(
     #[cfg(target_os = "macos")]
     {
         let _ = selection;
-        let native = window.ns_window().map_err(|error| error.to_string())? as usize;
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        window
+            .with_webview(move |view| {
+                let _ = sender.send(view.inner() as usize);
+            })
+            .map_err(|error| error.to_string())?;
+        let native = receiver.await.map_err(|error| error.to_string())?;
         let path = file.path.clone();
         let token = cancel.clone();
         tauri::async_runtime::spawn_blocking(move || capture_macos(native, region, &path, &token))
@@ -184,21 +203,26 @@ pub async fn capture(
             return Ok(result);
         }
     }
-    let text = recognize(runtime, &file.path, cancel).await?;
+    let blocks = recognize(runtime, &file.path, cancel).await?;
     if let Some(watch) = watch {
         watch
             .lock()
             .map_err(|_| "画面の状態を取得できません。")?
             .recognized = true;
     }
-    Ok(CaptureResult::Text(text))
+    let text = blocks
+        .iter()
+        .map(|block| block.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    Ok(CaptureResult::Text { text, blocks })
 }
 
 async fn recognize(
     runtime: &Path,
     path: &Path,
     cancel: &CancellationToken,
-) -> Result<String, String> {
+) -> Result<Vec<TextBlock>, String> {
     use tokio::io::AsyncReadExt;
     if cancel.is_cancelled() {
         return Err("CANCELLED".into());
@@ -209,6 +233,7 @@ async fn recognize(
         .arg("--tessdata-dir")
         .arg(runtime.join("tessdata"))
         .args(["-l", "jpn+eng", "--oem", "1", "--psm", "3"])
+        .args(["-c", "tessedit_create_tsv=1"])
         .env("OMP_THREAD_LIMIT", "2")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -216,7 +241,8 @@ async fn recognize(
         .kill_on_drop(true)
         .spawn()
         .map_err(|_| "文字認識エンジンを起動できません。アプリを再インストールしてください。")?;
-    let limit = crate::protocol::MAX_CHARACTERS * 4;
+    // TSV adds geometry and hierarchy to every word, in addition to UTF-8 text.
+    let limit = crate::protocol::MAX_CHARACTERS * 256;
     let stdout = child
         .stdout
         .take()
@@ -251,10 +277,87 @@ async fn recognize(
         return Err("文字を認識できませんでした。範囲を変えて再試行してください。".into());
     }
     let text = String::from_utf8(bytes).map_err(|_| "文字認識の結果を取得できませんでした。")?;
-    if text.encode_utf16().count() > crate::protocol::MAX_CHARACTERS {
+    parse_tsv(&text)
+}
+
+fn parse_tsv(tsv: &str) -> Result<Vec<TextBlock>, String> {
+    let invalid = "文字認識の位置情報を取得できませんでした。";
+    let mut size = None;
+    let mut blocks: Vec<TextBlock> = Vec::new();
+    let mut paragraph = None;
+    let mut line = "";
+    for row in tsv.lines().skip(1) {
+        let fields: Vec<_> = row.splitn(12, '\t').collect();
+        if fields.len() != 12 {
+            return Err(invalid.into());
+        }
+        if !matches!(fields[0], "1" | "3" | "5") {
+            continue;
+        }
+        let number = |index: usize| -> Result<f64, String> {
+            fields[index]
+                .parse::<u32>()
+                .map(f64::from)
+                .map_err(|_| invalid.into())
+        };
+        let (x, y, width, height) = (number(6)?, number(7)?, number(8)?, number(9)?);
+        if fields[0] == "1" {
+            if size.is_some() || width == 0.0 || height == 0.0 {
+                return Err(invalid.into());
+            }
+            size = Some((width, height));
+            continue;
+        }
+        let (page_width, page_height) = size.ok_or(invalid)?;
+        if x + width > page_width || y + height > page_height {
+            return Err(invalid.into());
+        }
+        let key = (fields[1], fields[2], fields[3]);
+        if fields[0] == "3" {
+            paragraph = Some(key);
+            line = "";
+            blocks.push(TextBlock {
+                text: String::new(),
+                x: x / page_width,
+                y: y / page_height,
+                width: width / page_width,
+                height: height / page_height,
+            });
+        } else {
+            if paragraph != Some(key) {
+                return Err(invalid.into());
+            }
+            let block = blocks.last_mut().ok_or(invalid)?;
+            let word = fields[11].trim();
+            if word.is_empty() {
+                continue;
+            }
+            // OCR line endings are visual wraps, not paragraph breaks. Japanese
+            // words also must not acquire spaces simply because OCR split them.
+            if let (Some(left), Some(right)) = (block.text.chars().last(), word.chars().next()) {
+                let cjk = |ch| matches!(ch as u32, 0x3000..=0x30ff | 0x3400..=0x9fff | 0xac00..=0xd7af | 0xff00..=0xffef | 0x20000..=0x323af);
+                if !cjk(left) && !cjk(right) && !(line != fields[4] && left == '-') {
+                    block.text.push(' ');
+                }
+            }
+            block.text.push_str(word);
+            line = fields[4];
+        }
+    }
+    if size.is_none() {
+        return Err(invalid.into());
+    }
+    blocks.retain(|block| !block.text.is_empty() && block.width > 0.0 && block.height > 0.0);
+    if blocks
+        .iter()
+        .map(|block| block.text.encode_utf16().count() + 2)
+        .sum::<usize>()
+        .saturating_sub(2)
+        > crate::protocol::MAX_CHARACTERS
+    {
         return Err("文字が多すぎます。読み取る範囲を小さくしてください。".into());
     }
-    Ok(text.trim().to_owned())
+    Ok(blocks)
 }
 
 #[cfg(target_os = "macos")]
@@ -315,6 +418,52 @@ fn capture_macos(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn layout_tsv() -> String {
+        concat!(
+            "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n",
+            "1\t1\t0\t0\t0\t0\t0\t0\t1000\t800\t-1\t\n",
+            "3\t1\t1\t1\t0\t0\t100\t80\t400\t60\t-1\t\n",
+            "5\t1\t1\t1\t1\t1\t100\t80\t80\t20\t96\tHello\n",
+            "5\t1\t1\t1\t2\t1\t100\t120\t80\t20\t96\tworld.\n",
+            "3\t1\t2\t1\t0\t0\t600\t400\t300\t60\t-1\t\n",
+            "5\t1\t2\t1\t1\t1\t600\t400\t40\t20\t96\t画像\n",
+            "5\t1\t2\t1\t2\t1\t600\t440\t80\t20\t96\tの文字です。\n",
+        ).into()
+    }
+
+    #[test]
+    fn ocr_preserves_paragraph_positions_without_visual_line_breaks() {
+        let blocks = parse_tsv(&layout_tsv()).unwrap();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].text, "Hello world.");
+        assert_eq!(blocks[1].text, "画像の文字です。");
+        assert_eq!(
+            (blocks[0].x, blocks[0].y, blocks[0].width, blocks[0].height),
+            (0.1, 0.1, 0.4, 0.075)
+        );
+        assert_eq!((blocks[1].x, blocks[1].y), (0.6, 0.5));
+        let result = serde_json::to_value(CaptureResult::Text {
+            text: "Hello world.\n\n画像の文字です。".into(),
+            blocks,
+        })
+        .unwrap();
+        assert_eq!(result["kind"], "text");
+        assert_eq!(result["blocks"][1]["text"], "画像の文字です。");
+    }
+
+    #[test]
+    fn ocr_rejects_invalid_geometry_and_oversized_text_but_accepts_empty_pages() {
+        let tsv = layout_tsv();
+        assert!(parse_tsv("").is_err());
+        assert!(parse_tsv(&tsv.replace("1000\t800", "0\t800")).is_err());
+        assert!(parse_tsv(&tsv.replace("600\t400\t300", "900\t400\t300")).is_err());
+        assert!(parse_tsv(&tsv.replace("Hello", &"😀".repeat(6001)))
+            .unwrap_err()
+            .contains("多すぎ"));
+        let page = tsv.lines().take(2).collect::<Vec<_>>().join("\n");
+        assert!(parse_tsv(&page).unwrap().is_empty());
+    }
 
     #[test]
     fn watch_waits_for_settled_frames_and_skips_recognized_images() {
@@ -462,7 +611,10 @@ mod tests {
             let text = recognize(&runtime, &file.path, &CancellationToken::new())
                 .await
                 .unwrap();
-            assert!(text.contains(expected), "{name}: {text}");
+            assert!(
+                text.iter().any(|block| block.text.contains(expected)),
+                "{name}: {text:?}"
+            );
         }
     }
 }

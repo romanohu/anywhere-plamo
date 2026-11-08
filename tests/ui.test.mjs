@@ -35,6 +35,9 @@ async function fixture(t, options = {}) {
   let now = 0;
   if (options.manualClock) window.performance.now = () => now;
   const byId = id => window.document.getElementById(id);
+  const captureResult = result => result.kind !== 'text' || result.blocks ? result : {
+    ...result, blocks: result.text.trim() ? [{ text: result.text, x: .1, y: .2, width: .6, height: .1 }] : [],
+  };
   byId('lens-region').getBoundingClientRect = () => ({ x: 1, y: 49, width: 638, height: 340 });
   // JSDOM does not implement native dialog presentation. Its open state is enough for these tests.
   window.HTMLDialogElement.prototype.showModal = function () { this.open = true; };
@@ -71,7 +74,7 @@ async function fixture(t, options = {}) {
           case 'capture_lens':
             if (options.captureError) throw options.captureError;
             if (options.holdCapture) return new Promise(resolve => { finishCapture = resolve; });
-            return options.captureResults?.shift() ?? { kind: 'text', text: options.ocrText ?? 'Text in an image.' };
+            return captureResult(options.captureResults?.shift() ?? { kind: 'text', text: options.ocrText ?? 'Text in an image.' });
           case 'set_shortcut_recording':
             if (args.recording && options.holdRecording) return new Promise(resolve => { finishRecording = resolve; });
             return;
@@ -144,7 +147,7 @@ async function fixture(t, options = {}) {
     finishCancellation() { finishCancellation(); },
     finishPending() { finishPending(); },
     finishRecording() { finishRecording(); },
-    finishCapture(text) { finishCapture({ kind: 'text', text }); },
+    finishCapture(text) { finishCapture(captureResult({ kind: 'text', text })); },
     async tickLens() {
       const pending = [...lensTimers.values()]; lensTimers.clear();
       pending.forEach(callback => callback());
@@ -983,6 +986,68 @@ test('lens permission failures, empty OCR and oversized regions leave a retryabl
   }
 });
 
+test('lens anchors paragraphs separately and repositions cached translations without repeating inference', async t => {
+  const blocks = [
+    { text: 'First paragraph without visual wraps.', x: .1, y: .1, width: .4, height: .1 },
+    { text: 'Second paragraph.', x: .1, y: .6, width: .4, height: .1 },
+  ];
+  const moved = blocks.map(block => ({ ...block, y: block.y + .1 }));
+  const f = await fixture(t, { lens: true, autoLens: true, captureResults: [
+    { kind: 'text', text: blocks.map(block => block.text).join('\n\n'), blocks },
+    { kind: 'changed' },
+    { kind: 'text', text: blocks.map(block => block.text).join('\n\n'), blocks: moved },
+  ] });
+  await f.tickLens();
+  assert.deepEqual(f.calls.filter(call => call.command === 'translate').map(call => call.args.text), blocks.map(block => block.text));
+  const positions = [...f.byId('lens-translation').children].map(node => parseFloat(node.style.top));
+  assert.equal(positions[1] - positions[0], 170);
+  await f.tickLens();
+  await f.tickLens();
+  const paragraphs = [...f.byId('lens-translation').children];
+  assert.equal(paragraphs.length, 2);
+  assert.equal(parseFloat(paragraphs[0].style.top) - positions[0], 34);
+  assert.equal(f.calls.filter(call => call.command === 'translate').length, 2);
+  assert.equal(f.byId('lens-result').hidden, false);
+});
+
+test('lens ignores unchanged resize events and stops wheel overscroll without cancelling OCR', async t => {
+  const f = await fixture(t, { lens: true, holdCapture: true });
+  f.click('lens-refresh');
+  await until(() => f.calls.some(call => call.command === 'capture_lens'));
+  f.window.dispatchEvent(new f.window.Event('resize'));
+  const wheel = new f.window.WheelEvent('wheel', { deltaY: 100, bubbles: true, cancelable: true });
+  f.byId('lens-region').dispatchEvent(wheel);
+  assert.equal(wheel.defaultPrevented, true);
+  assert.equal(f.calls.some(call => call.command === 'cancel_operation'), false);
+  f.finishCapture('Same screen.');
+  await until(() => f.byId('lens-status').textContent.startsWith('更新しました'));
+  const paragraph = f.byId('lens-translation').firstElementChild;
+  Object.defineProperties(paragraph, { clientHeight: { value: 50 }, scrollHeight: { value: 150 } });
+  const scroll = () => {
+    const event = new f.window.WheelEvent('wheel', { deltaY: 100, bubbles: true, cancelable: true });
+    paragraph.dispatchEvent(event);
+    return event.defaultPrevented;
+  };
+  assert.equal(scroll(), false);
+  paragraph.scrollTop = 100;
+  assert.equal(scroll(), true);
+  assert.equal(f.calls.some(call => call.command === 'cancel_operation'), false);
+});
+
+test('closing during a paragraph translation prevents remaining paragraphs and late tokens', async t => {
+  const blocks = ['First', 'Second'].map((text, index) => ({ text, x: .1, y: .1 + index * .4, width: .5, height: .1 }));
+  const f = await fixture(t, { lens: true, holdTranslation: true, captureResults: [{ kind: 'text', text: 'First\n\nSecond', blocks }] });
+  f.click('lens-refresh');
+  await until(() => f.calls.some(call => call.command === 'translate'));
+  f.send({ kind: 'token', text: '最初の訳文' });
+  f.closeWindow();
+  f.send({ kind: 'token', text: '遅れた訳文' });
+  f.finish({ truncated: false });
+  await until(() => f.byId('lens-refresh').textContent === '更新');
+  assert.equal(f.calls.filter(call => call.command === 'translate').length, 1);
+  assert.equal(f.byId('lens-translation').textContent, '');
+});
+
 test('lens checks model readiness on each update, including after a download in the main window', async t => {
   const f = await fixture(t, { lens: true, modelReady: false });
   f.click('lens-refresh');
@@ -998,7 +1063,7 @@ test('moving or resizing the lens discards late OCR without translating or refre
     const f = await fixture(t, { lens: true, holdCapture: true });
     f.click('lens-refresh');
     await until(() => f.calls.some(call => call.command === 'capture_lens'));
-    if (resize) f.window.dispatchEvent(new f.window.Event('resize'));
+    if (resize) { f.window.innerWidth += 100; f.window.dispatchEvent(new f.window.Event('resize')); }
     else f.moveLens();
     await until(() => f.calls.some(call => call.command === 'cancel_operation'));
     f.finishCapture('Obsolete image text');

@@ -87,7 +87,7 @@ static NSString *LensWait(dispatch_semaphore_t semaphore, LensCancelled cancelle
 }
 
 // Rust calls this on a worker. Only the AppKit coordinate conversion uses the main thread.
-char *plamo_lens_capture(void *windowPointer, double x, double y, double width, double height,
+char *plamo_lens_capture(void *viewPointer, double x, double y, double width, double height,
                          const char *path, LensCancelled cancelled, const void *context) {
     @autoreleasepool {
         if (cancelled(context)) return LensResponse(@{@"error": @"CANCELLED"});
@@ -99,11 +99,13 @@ char *plamo_lens_capture(void *windowPointer, double x, double y, double width, 
         __block CGDirectDisplayID displayID = 0;
         __block CGFloat scale = 1.0;
         dispatch_sync(dispatch_get_main_queue(), ^{
-            NSWindow *window = (__bridge NSWindow *)windowPointer;
-            NSView *view = window.contentView;
+            // Use the actual webview, not its parent (which may include titlebar insets).
+            NSView *view = (__bridge NSView *)viewPointer;
+            NSWindow *window = view.window;
             if (!window.visible || !view) return;
             // Webview CSS coordinates are points, with the origin at the top left.
-            NSRect region = NSMakeRect(x, view.isFlipped ? y : NSHeight(view.bounds) - y - height,
+            NSRect region = NSMakeRect(NSMinX(view.bounds) + x,
+                                       view.isFlipped ? NSMinY(view.bounds) + y : NSMaxY(view.bounds) - y - height,
                                        width, height);
             if (!NSContainsRect(view.bounds, region)) return;
             NSRect screenRect = [window convertRectToScreen:[view convertRect:region toView:nil]];

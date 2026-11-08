@@ -509,7 +509,10 @@ mod tests {
             )
             .await
             .unwrap();
-            assert!(text.contains(expected), "{name}: {text}");
+            assert!(
+                text.iter().any(|block| block.text.contains(expected)),
+                "{name}: {text:?}"
+            );
         }
     }
 

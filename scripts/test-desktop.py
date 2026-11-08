@@ -158,9 +158,9 @@ def lens_checks():
     state.write_text(json.dumps({'mode': 'english'}))
     selection_source = subprocess.Popen(['/usr/bin/python3', str(ROOT / 'tests/lens-source.py'), str(state)], env=env, stdout=log, stderr=log)
 
-    def source(mode):
+    def source(mode, **options):
         temporary = state.with_suffix('.command')
-        temporary.write_text(json.dumps({'mode': mode}))
+        temporary.write_text(json.dumps({'mode': mode, **options}))
         temporary.replace(state)
         for _ in range(100):
             if acknowledged.exists():
@@ -291,7 +291,7 @@ def lens_checks():
       window.__TAURI__.core={...window.__TAURI__.core,invoke:(command,args)=>{
         const entry={command,args};
         if(command==='capture_lens'||command==='translate') window.lensCalls.push(entry);
-        return nativeInvoke(command,args).then(result=>{entry.kind=result?.kind;return result;});
+        return nativeInvoke(command,args).then(result=>{entry.kind=result?.kind;entry.result=result;return result;});
       }};""")
     events = WORK / 'lens-window-events.log'
     with events.open('w') as output:
@@ -345,6 +345,54 @@ def lens_checks():
     select_window('lens')
     wait("document.getElementById('lens-source').textContent.includes('画像') && document.getElementById('lens-status').textContent === '自動更新中'", 30)
     check('automatic mode stops and resumes, including after closing and reopening the lens')
+
+    source('layout')
+    target('ja')
+    wait("document.getElementById('lens-source').textContent.includes('This paragraph') && document.getElementById('lens-status').textContent === '自動更新中'", 30)
+    layout = js("""const capture=lensCalls.filter(call=>call.result?.kind==='text').at(-1).result;
+      const region=document.getElementById('lens-region').getBoundingClientRect();
+      const paragraphs=[...document.querySelectorAll('.lens-block')].map(node=>{
+        const rect=node.getBoundingClientRect();return {x:rect.x-region.x,y:rect.y-region.y,width:rect.width,height:rect.height,
+          scrolls:node.scrollHeight>node.clientHeight+1,whiteSpace:getComputedStyle(node).whiteSpace};
+      }); return {capture,region:region.toJSON(),paragraphs};""")
+    assert len(layout['capture']['blocks']) == len(layout['paragraphs']) == 2, layout
+    assert layout['capture']['blocks'][0]['text'] == 'This paragraph continues on the next line.', layout
+    for block, paragraph in zip(layout['capture']['blocks'], layout['paragraphs']):
+        assert abs(paragraph['x'] + 5 - block['x'] * layout['region']['width']) < 1, layout
+        assert abs(paragraph['y'] + 3 - block['y'] * layout['region']['height']) < 1, layout
+        assert not paragraph['scrolls'] and paragraph['whiteSpace'] == 'normal', layout
+    check('soft-wrapped OCR paragraphs are joined and translations follow their source positions', layout)
+    desktop_image('lens-layout.png')
+
+    # Changes behind the opaque language bar must neither enter OCR nor invalidate its hash.
+    import gi
+    gi.require_version('GdkX11', '3.0')
+    from gi.repository import Gdk, GdkX11
+    display = Gdk.Display.open(env['DISPLAY'])
+    _, origin_x, origin_y = GdkX11.X11Window.foreign_new_for_display(display, int(native_window)).get_origin()
+    display.close()
+    translations = js("return lensCalls.filter(call=>call.command==='translate').length")
+    captures = js("return lensCalls.filter(call=>call.command==='capture_lens').length")
+    source('layout-bars', bar=[origin_x + 10, origin_y + 8])
+    # Send actual X11 wheel events over the translated paragraph and the toolbar.
+    for y in [8, round(layout['region']['y'] + layout['paragraphs'][0]['y'] + 10)]:
+        subprocess.run(['xdotool', 'mousemove', '--window', native_window, '120', str(y),
+                        'click', '--repeat', '8', '--delay', '15', '5', 'click', '4'], env=env, check=True)
+    time.sleep(1.5)
+    assert js("return lensCalls.filter(call=>call.command==='translate').length") == translations
+    kinds = js("return lensCalls.filter(call=>call.command==='capture_lens').slice(arguments[0]).filter(call=>call.kind).map(call=>call.kind)", captures)
+    assert len(kinds) >= 2 and all(kind == 'unchanged' for kind in kinds), kinds
+    assert js("return window.scrollX===0 && window.scrollY===0 && document.getElementById('lens-result').scrollTop===0")
+    assert js("return document.getElementById('lens-region').getBoundingClientRect().y") == layout['region']['y']
+    check('scroll gestures and changes behind the language bar do not move the lens or trigger translation')
+
+    subprocess.run(['xdotool', 'windowsize', '--sync', native_window, '950', '440'], env=env, check=True)
+    wait("document.getElementById('lens-source').textContent.includes('This paragraph') && document.getElementById('lens-status').textContent === '自動更新中'", 30)
+    widths = js("return [...document.querySelectorAll('.lens-block')].map(node=>node.getBoundingClientRect().width)")
+    assert all(after > before['width'] + 200 for before, after in zip(layout['paragraphs'], widths)), widths
+    assert js("return [...document.querySelectorAll('.lens-block')].every(node=>node.scrollHeight<=node.clientHeight+1)")
+    check('widening the lens lets translated paragraphs reflow without internal scrolling', widths)
+    desktop_image('lens-layout-wide.png')
     print('ALL LENS DESKTOP CHECKS PASSED', flush=True)
 
 env = os.environ.copy()
