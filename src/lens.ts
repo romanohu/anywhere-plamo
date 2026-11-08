@@ -23,7 +23,7 @@ export async function initLens(): Promise<void> {
   let auto = true;
   let visible = true;
   let timer: ReturnType<typeof setTimeout> | undefined;
-  let pollDelay = 200;
+  let pollDelay = 120;
   let reset = true;
   let translations = new Map<string, string>();
   const updateKey = /Mac/.test(navigator.platform) ? '⌘+Enter' : 'Ctrl+Enter';
@@ -130,7 +130,7 @@ export async function initLens(): Promise<void> {
     clearTimeout(timer);
     generation++;
     reset = true;
-    pollDelay = 200;
+    pollDelay = 120;
     translations.clear();
     translation.textContent = '';
     source.textContent = '';
@@ -175,14 +175,18 @@ export async function initLens(): Promise<void> {
         throw new Error('文字認識エンジンが見つかりません。アプリを再インストールしてください。ソース版では npm run ocr:build を実行してください。');
       }
       const rect = region.getBoundingClientRect();
+      const onEvent = progressChannel(event => {
+        if (event.kind === 'reading' && run === generation && busy) message('文字を読み取り中…');
+      });
       const capture = await invoke<CaptureResult>('capture_lens', {
-        region: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
-        automatic: watching, reset,
+        region: { x: rect.x, y: rect.y, width: rect.width, height: rect.height,
+          bottomInset: status.parentElement!.getBoundingClientRect().height + 1 },
+        automatic: watching, reset, onEvent,
       });
       if (run !== generation) return;
       reset = false;
       // Confirm a changed frame promptly; sample settled screens less often.
-      pollDelay = capture.kind === 'changed' ? 200 : 350;
+      pollDelay = capture.kind === 'changed' ? 120 : 350;
       if (capture.kind === 'unchanged') return;
       if (capture.kind === 'changed') {
         translation.textContent = '';
@@ -264,6 +268,9 @@ export async function initLens(): Promise<void> {
     showingOriginal = !showingOriginal;
     render();
     if (!showingOriginal) translation.querySelectorAll<HTMLElement>('.lens-block').forEach(fitBlock);
+  });
+  region.addEventListener('click', event => {
+    if (event.button === 0 && !window.getSelection()?.toString()) original.click();
   });
   element('lens-close').addEventListener('click', () => { void close(); });
   target.addEventListener('change', () => {

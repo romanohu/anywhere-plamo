@@ -18,6 +18,7 @@ mod linux;
 pub struct Watch {
     frame: Option<([u8; 32], Instant)>,
     recognized: bool,
+    waiting_since: Option<Instant>,
 }
 
 #[derive(Serialize)]
@@ -84,21 +85,25 @@ impl OcrLine {
 
 impl Watch {
     fn observe(&mut self, hash: [u8; 32], now: Instant) -> Option<CaptureResult> {
-        match self.frame {
-            Some((previous, _)) if previous == hash && self.recognized => {
-                Some(CaptureResult::Unchanged)
-            }
-            Some((previous, since))
-                if previous == hash && now.duration_since(since) >= Duration::from_millis(200) =>
-            {
-                None
-            }
-            Some((previous, _)) if previous == hash => Some(CaptureResult::Changed),
-            _ => {
-                self.frame = Some((hash, now));
-                self.recognized = false;
-                Some(CaptureResult::Changed)
-            }
+        let same = self.frame.is_some_and(|(previous, _)| previous == hash);
+        if same && self.recognized {
+            return Some(CaptureResult::Unchanged);
+        }
+        let waiting = *self.waiting_since.get_or_insert(now);
+        let settled = same
+            && self
+                .frame
+                .is_some_and(|(_, since)| now.duration_since(since) >= Duration::from_millis(100));
+        if !same {
+            self.frame = Some((hash, now));
+            self.recognized = false;
+        }
+        // A blinking caret or animation in a large region must not postpone OCR forever.
+        if settled || now.duration_since(waiting) >= Duration::from_millis(800) {
+            self.waiting_since = None;
+            None
+        } else {
+            Some(CaptureResult::Changed)
         }
     }
 }
@@ -109,6 +114,14 @@ pub struct Region {
     y: f64,
     width: f64,
     height: f64,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+pub struct CaptureArea {
+    #[serde(flatten)]
+    region: Region,
+    #[serde(rename = "bottomInset")]
+    bottom_inset: f64,
 }
 
 impl Region {
@@ -184,13 +197,18 @@ fn write_image(path: &Path, image: image::RgbImage) -> Result<(), String> {
 
 pub async fn capture(
     window: tauri::WebviewWindow,
-    region: Region,
+    area: CaptureArea,
     selection: bool,
     runtime: &Path,
     cancel: &CancellationToken,
     watch: Option<&Mutex<Watch>>,
+    on_read: impl FnOnce(),
 ) -> Result<CaptureResult, String> {
+    let region = area.region;
     region.validate()?;
+    if !area.bottom_inset.is_finite() || !(0.0..=8192.0).contains(&area.bottom_inset) {
+        return Err("読み取り範囲が無効です。".into());
+    }
     if watch.is_some() && selection {
         return Err("Waylandでは「更新」で画面を選択してください。".into());
     }
@@ -199,7 +217,7 @@ pub async fn capture(
     }
     let file = CaptureFile::new()?;
     #[cfg(target_os = "macos")]
-    {
+    let captured_height = {
         let _ = selection;
         let (sender, receiver) = tokio::sync::oneshot::channel();
         window
@@ -210,10 +228,10 @@ pub async fn capture(
         let native = receiver.await.map_err(|error| error.to_string())?;
         let path = file.path.clone();
         let token = cancel.clone();
-        tauri::async_runtime::spawn_blocking(move || capture_macos(native, region, &path, &token))
+        tauri::async_runtime::spawn_blocking(move || capture_macos(native, area, &path, &token))
             .await
-            .map_err(|error| error.to_string())??;
-    }
+            .map_err(|error| error.to_string())??
+    };
     #[cfg(target_os = "linux")]
     linux::capture(
         &window,
@@ -243,7 +261,10 @@ pub async fn capture(
             return Ok(result);
         }
     }
+    on_read();
     let blocks = recognize(runtime, &file.path, cancel).await?;
+    #[cfg(target_os = "macos")]
+    let blocks = fit_capture_height(blocks, captured_height / region.height);
     if let Some(watch) = watch {
         watch
             .lock()
@@ -256,6 +277,20 @@ pub async fn capture(
         .collect::<Vec<_>>()
         .join("\n\n");
     Ok(CaptureResult::Text { text, blocks })
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn fit_capture_height(mut blocks: Vec<TextBlock>, fraction: f64) -> Vec<TextBlock> {
+    // Keep OCR positions relative to the requested DOM region when AppKit clips its bottom.
+    for block in &mut blocks {
+        block.y *= fraction;
+        block.height *= fraction;
+        for region in &mut block.regions {
+            region.y *= fraction;
+            region.height *= fraction;
+        }
+    }
+    blocks
 }
 
 async fn recognize(
@@ -626,10 +661,10 @@ fn check_text_limit(blocks: &[TextBlock]) -> Result<(), String> {
 #[cfg(target_os = "macos")]
 fn capture_macos(
     window: usize,
-    region: Region,
+    area: CaptureArea,
     path: &Path,
     cancel: &CancellationToken,
-) -> Result<(), String> {
+) -> Result<f64, String> {
     use std::ffi::{c_char, c_void, CStr, CString};
     unsafe extern "C" {
         fn plamo_lens_capture(
@@ -638,6 +673,7 @@ fn capture_macos(
             y: f64,
             width: f64,
             height: f64,
+            bottom_inset: f64,
             path: *const c_char,
             cancelled: extern "C" fn(*const c_void) -> bool,
             context: *const c_void,
@@ -651,9 +687,11 @@ fn capture_macos(
     #[derive(Deserialize)]
     struct Response {
         error: Option<String>,
+        height: Option<f64>,
     }
     let path = CString::new(path.as_os_str().as_encoded_bytes())
         .map_err(|_| "画像の保存先が無効です。")?;
+    let region = area.region;
     let response = unsafe {
         let value = plamo_lens_capture(
             window as *mut c_void,
@@ -661,6 +699,7 @@ fn capture_macos(
             region.y,
             region.width,
             region.height,
+            area.bottom_inset,
             path.as_ptr(),
             cancelled,
             (cancel as *const CancellationToken).cast(),
@@ -675,7 +714,10 @@ fn capture_macos(
     if let Some(error) = response.error {
         return Err(error);
     }
-    Ok(())
+    response
+        .height
+        .filter(|height| height.is_finite() && *height > 0.0 && *height <= region.height)
+        .ok_or_else(|| "画面の取得範囲を読み取れませんでした。".into())
 }
 
 #[cfg(test)]
@@ -741,19 +783,19 @@ mod tests {
             Some(CaptureResult::Changed)
         ));
         assert!(matches!(
-            watch.observe([1; 32], start + Duration::from_millis(199)),
+            watch.observe([1; 32], start + Duration::from_millis(99)),
             Some(CaptureResult::Changed)
         ));
         assert!(matches!(
-            watch.observe([2; 32], start + Duration::from_millis(200)),
+            watch.observe([2; 32], start + Duration::from_millis(100)),
             Some(CaptureResult::Changed)
         ));
         assert!(matches!(
-            watch.observe([2; 32], start + Duration::from_millis(399)),
+            watch.observe([2; 32], start + Duration::from_millis(199)),
             Some(CaptureResult::Changed)
         ));
         assert!(watch
-            .observe([2; 32], start + Duration::from_millis(400))
+            .observe([2; 32], start + Duration::from_millis(200))
             .is_none());
         watch.recognized = true;
         assert!(matches!(
@@ -765,6 +807,53 @@ mod tests {
             Some(CaptureResult::Changed)
         ));
         assert!(!watch.recognized);
+    }
+
+    #[test]
+    fn continuous_motion_cannot_postpone_ocr_indefinitely() {
+        let mut watch = Watch::default();
+        let start = Instant::now();
+        for frame in 0..8 {
+            assert!(matches!(
+                watch.observe(
+                    [frame; 32],
+                    start + Duration::from_millis(frame as u64 * 100)
+                ),
+                Some(CaptureResult::Changed)
+            ));
+        }
+        assert!(watch
+            .observe([8; 32], start + Duration::from_millis(800))
+            .is_none());
+        watch.recognized = true;
+        assert!(matches!(
+            watch.observe([8; 32], start + Duration::from_secs(10)),
+            Some(CaptureResult::Unchanged)
+        ));
+        assert!(matches!(
+            watch.observe([9; 32], start + Duration::from_secs(11)),
+            Some(CaptureResult::Changed)
+        ));
+        assert!(watch
+            .observe([9; 32], start + Duration::from_millis(11100))
+            .is_none());
+    }
+
+    #[test]
+    fn clipping_the_capture_bottom_preserves_ocr_positions_in_the_lens() {
+        let blocks = parse_tsv(&layout_tsv()).unwrap();
+        let fitted = fit_capture_height(parse_tsv(&layout_tsv()).unwrap(), 0.9);
+        for (before, after) in blocks.iter().zip(fitted) {
+            assert_eq!((before.x, before.width), (after.x, after.width));
+            assert_eq!(before.text, after.text);
+            assert!((before.y * 720.0 - after.y * 800.0).abs() < 0.001);
+            assert!((before.height * 720.0 - after.height * 800.0).abs() < 0.001);
+            for (before, after) in before.regions.iter().zip(after.regions) {
+                assert_eq!((before.x, before.width), (after.x, after.width));
+                assert!((before.y * 720.0 - after.y * 800.0).abs() < 0.001);
+                assert!((before.height * 720.0 - after.height * 800.0).abs() < 0.001);
+            }
+        }
     }
 
     #[test]

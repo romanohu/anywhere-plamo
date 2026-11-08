@@ -17,6 +17,7 @@ export type ProgressEvent =
   | { kind: 'download'; received: number; total: number }
   | { kind: 'verifying' }
   | { kind: 'loading' }
+  | { kind: 'reading' }
   | { kind: 'token'; text: string };
 
 interface NativeChannel<T> { onmessage: (message: T) => void }

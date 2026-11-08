@@ -26,10 +26,11 @@ fixed.put(marker, 0, 0)
 window.add(fixed)
 window.connect("destroy", Gtk.main_quit)
 mode = None
+frame = 0
 
 
 def update():
-    global mode
+    global mode, frame
     command = json.loads(state_file.read_text())
     value = command['mode']
     if mode != value:
@@ -54,24 +55,36 @@ def update():
             path = state_file.with_name('lens-layout-source.png')
             surface.write_to_png(str(path))
             image.set_from_file(str(path))
-            if mode == 'layout-bars':
-                surface = cairo.ImageSurface(cairo.FORMAT_RGB24, 260, 30)
+            if 'bar' in command:
+                height = 16 if mode == 'layout-footer' else 30
+                surface = cairo.ImageSurface(cairo.FORMAT_RGB24, 260, height)
                 context = cairo.Context(surface)
                 context.set_source_rgb(1, 1, 1)
                 context.paint()
                 context.set_source_rgb(0, 0, 0)
-                context.set_font_size(20)
-                context.move_to(4, 22)
-                context.show_text('Toolbar text changed')
+                context.set_font_size(11 if mode == 'layout-footer' else 20)
+                context.move_to(4, height - 5)
+                context.show_text('Footer edge text' if mode == 'layout-bottom' else 'Toolbar text changed')
                 path = state_file.with_name('lens-marker.png')
                 surface.write_to_png(str(path))
                 marker.set_from_file(str(path))
                 _, x, y = window.get_window().get_origin()
                 fixed.move(marker, command['bar'][0] - x, command['bar'][1] - y)
         else:
-            image.set_from_file(str(fixtures / f"ocr-{mode}.png"))
+            image.set_from_file(str(fixtures / f"ocr-{'english' if mode == 'animated' else mode}.png"))
         window.queue_draw()
         GLib.timeout_add(100, report)
+    if mode == 'animated':
+        # Change every frame so exact-image matching cannot mistake this for a pause.
+        frame = (frame + 1) % 256
+        surface = cairo.ImageSurface(cairo.FORMAT_RGB24, 6, 6)
+        context = cairo.Context(surface)
+        context.set_source_rgb(frame / 255, 0, 0)
+        context.paint()
+        path = state_file.with_name('lens-marker.png')
+        surface.write_to_png(str(path))
+        marker.set_from_file(str(path))
+        fixed.move(marker, 870, 400)
     return True
 
 

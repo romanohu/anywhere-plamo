@@ -40,6 +40,7 @@ async function fixture(t, options = {}) {
       .map(block => ({ ...block, regions: block.regions ?? [{ x: block.x, y: block.y, width: block.width, height: block.height }] })),
   };
   byId('lens-region').getBoundingClientRect = () => ({ x: 1, y: 49, width: 638, height: 340 });
+  byId('lens-status').parentElement.getBoundingClientRect = () => ({ height: 18 });
   // JSDOM does not implement native dialog presentation. Its open state is enough for these tests.
   window.HTMLDialogElement.prototype.showModal = function () { this.open = true; };
   window.HTMLDialogElement.prototype.close = function () { this.open = false; this.dispatchEvent(new window.Event('close')); };
@@ -957,7 +958,7 @@ test('manual lens captures only its viewport on request and translates into the 
   assert.equal(f.calls.some(call => ['capture_lens', 'translate', 'prepare_engine', 'take_pending_clipboard'].includes(call.command)), false);
   f.key('Enter', { metaKey: true });
   await until(() => f.byId('lens-status').textContent.startsWith('更新しました'));
-  assert.deepEqual({ ...f.calls.find(call => call.command === 'capture_lens').args.region }, { x: 1, y: 49, width: 638, height: 340 });
+  assert.deepEqual({ ...f.calls.find(call => call.command === 'capture_lens').args.region }, { x: 1, y: 49, width: 638, height: 340, bottomInset: 19 });
   const request = f.calls.find(call => call.command === 'translate');
   assert.equal(request.args.text, '画像の文字です。');
   assert.equal(request.args.target, 'en');
@@ -973,6 +974,35 @@ test('manual lens captures only its viewport on request and translates into the 
   assert.equal(f.window.localStorage.getItem('lens-target'), 'ja');
   assert.equal(f.window.localStorage.getItem('target-language'), 'en');
   assert.equal(f.calls.filter(call => call.command === 'capture_lens').length, 1);
+});
+
+test('clicking inside the lens toggles the overlay without interfering with text selection', async t => {
+  const f = await fixture(t, { lens: true });
+  f.click('lens-region');
+  assert.equal(f.byId('lens-original').getAttribute('aria-pressed'), 'false');
+  f.click('lens-refresh');
+  await until(() => f.byId('lens-status').textContent.startsWith('更新しました'));
+  const paragraph = f.byId('lens-translation').querySelector('.lens-block');
+  paragraph.click();
+  assert.equal(f.byId('lens-result').hidden, true);
+  assert.equal(f.byId('lens-original').textContent, '訳文');
+  f.click('lens-region');
+  assert.equal(f.byId('lens-result').hidden, false);
+  const selected = f.window.getSelection();
+  const range = f.window.document.createRange();
+  range.selectNodeContents(paragraph);
+  selected.removeAllRanges();
+  selected.addRange(range);
+  assert.equal(selected.toString(), paragraph.textContent);
+  paragraph.click();
+  assert.equal(f.byId('lens-result').hidden, false);
+  assert.equal(selected.toString(), paragraph.textContent);
+  selected.removeAllRanges();
+  paragraph.dispatchEvent(new f.window.MouseEvent('click', { button: 2, bubbles: true }));
+  f.click('lens-status');
+  assert.equal(f.byId('lens-result').hidden, false);
+  assert.equal(f.calls.filter(call => call.command === 'capture_lens').length, 1);
+  assert.equal(f.calls.filter(call => call.command === 'translate').length, 1);
 });
 
 test('lens permission failures, empty OCR and oversized regions leave a retryable transparent view', async t => {
@@ -1032,6 +1062,7 @@ test('lens ignores unchanged resize events and stops wheel overscroll without ca
   assert.equal(scroll(), false);
   paragraph.scrollTop = 100;
   assert.equal(scroll(), true);
+  assert.equal(f.byId('lens-result').hidden, false);
   assert.equal(f.calls.some(call => call.command === 'cancel_operation'), false);
 });
 
@@ -1128,12 +1159,12 @@ test('Wayland lens uses OS selection and preserves results when the portal resto
   await until(() => f.byId('lens-status').textContent.startsWith('更新しました'));
   assert.equal(f.calls.some(call => call.command === 'cancel_operation'), false);
   assert.equal(f.calls.find(call => call.command === 'translate').args.text, 'Selected image text.');
-  f.click('lens-original');
+  f.click('lens-region');
   assert.equal(f.byId('lens-result').hidden, false);
   assert.equal(f.byId('lens-source').hidden, false);
   assert.equal(f.byId('lens-source').textContent, 'Selected image text.');
   assert.equal(f.byId('lens-translation').hidden, true);
-  f.click('lens-original');
+  f.click('lens-source');
   assert.equal(f.byId('lens-translation').hidden, false);
 });
 
@@ -1155,9 +1186,9 @@ test('automatic lens waits for stable frames, skips unchanged images and reuses 
     { kind: 'changed' }, { kind: 'text', text: 'Second image' },
   ] });
   assert.equal(f.byId('lens-auto').getAttribute('aria-pressed'), 'true');
-  assert.equal(f.lensDelay(), 200);
+  assert.equal(f.lensDelay(), 120);
   await f.tickLens();
-  assert.equal(f.lensDelay(), 200);
+  assert.equal(f.lensDelay(), 120);
   await f.tickLens();
   assert.equal(f.calls.filter(call => call.command === 'translate').length, 0);
   await f.tickLens();
@@ -1177,6 +1208,25 @@ test('automatic lens waits for stable frames, skips unchanged images and reuses 
   await f.tickLens();
   assert.equal(f.calls.filter(call => call.command === 'translate').length, 2);
   assert.equal(f.byId('lens-source').textContent, 'Second image');
+});
+
+test('lens distinguishes waiting from OCR and ignores late progress after moving', async t => {
+  const options = { lens: true, autoLens: true, captureResults: [{ kind: 'changed' }] };
+  const f = await fixture(t, options);
+  await f.tickLens();
+  assert.match(f.byId('lens-status').textContent, /画面が止まるのを待っています/);
+  options.holdCapture = true;
+  await f.tickLens();
+  const channel = f.calls.filter(call => call.command === 'capture_lens').at(-1).args.onEvent;
+  channel.onmessage({ kind: 'reading' });
+  assert.equal(f.byId('lens-status').textContent, '文字を読み取り中…');
+  f.moveLens();
+  const message = f.byId('lens-status').textContent;
+  channel.onmessage({ kind: 'reading' });
+  assert.equal(f.byId('lens-status').textContent, message);
+  f.finishCapture('Obsolete image');
+  await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(f.calls.some(call => call.command === 'translate'), false);
 });
 
 test('automatic lens stops on toggle/close, resumes on reopen and retranslates for a new target', async t => {

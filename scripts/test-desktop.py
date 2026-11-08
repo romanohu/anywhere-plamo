@@ -219,6 +219,19 @@ def lens_checks():
     click('lens-original')
     assert not js("return document.getElementById('lens-result').hidden")
     check('original/translation toggle reveals the underlying image')
+    paragraph = js("return document.querySelector('.lens-block').getBoundingClientRect().toJSON()")
+    x, y = round(paragraph['x'] + 10), round(paragraph['y'] + paragraph['height'] / 2)
+    subprocess.run(['xdotool', 'mousemove', '--window', native_window, str(x), str(y),
+                    'mousedown', '1', 'mousemove', '--sync', '--window', native_window, str(x + 70), str(y),
+                    'mouseup', '1'], env=env, check=True)
+    assert js("return !!getSelection().toString() && !document.getElementById('lens-result').hidden")
+    js('getSelection().removeAllRanges()')
+    time.sleep(.6)  # Start a separate click, outside the native double-click interval.
+    subprocess.run(['xdotool', 'mousemove', '--window', native_window, str(x), str(y), 'click', '1'], env=env, check=True)
+    assert js("return document.getElementById('lens-result').hidden"), js("return getSelection().toString()")
+    subprocess.run(['xdotool', 'mousemove', '--window', native_window, '650', '320', 'click', '1'], env=env, check=True)
+    assert not js("return document.getElementById('lens-result').hidden")
+    check('clicking text or empty lens space toggles the overlay, while dragging still selects text')
 
     # Updating with the translated overlay visible must read the image behind it.
     source('japanese')
@@ -289,9 +302,16 @@ def lens_checks():
     # Count real IPC, without replacing capture, OCR, or translation results.
     js("""window.lensCalls=[]; const nativeInvoke=window.__TAURI__.core.invoke;
       window.__TAURI__.core={...window.__TAURI__.core,invoke:(command,args)=>{
-        const entry={command,args};
+        const entry={command,args,started:performance.now()};
         if(command==='capture_lens'||command==='translate') window.lensCalls.push(entry);
-        return nativeInvoke(command,args).then(result=>{entry.kind=result?.kind;entry.result=result;return result;});
+        if(command==='capture_lens') {
+          const receive=args.onEvent.onmessage;
+          args.onEvent.onmessage=event=>{
+            receive(event);
+            if(event.kind==='reading') {entry.reading=performance.now();entry.readingStatus=document.getElementById('lens-status').textContent;}
+          };
+        }
+        return nativeInvoke(command,args).then(result=>{entry.kind=result?.kind;entry.result=result;entry.finished=performance.now();return result;});
       }};""")
     events = WORK / 'lens-window-events.log'
     with events.open('w') as output:
@@ -388,6 +408,23 @@ def lens_checks():
     assert js("return document.getElementById('lens-region').getBoundingClientRect().y") == layout['region']['y']
     check('scroll gestures and changes behind the language bar do not move the lens or trigger translation')
 
+    footer = js("return document.querySelector('.lens-footer').getBoundingClientRect().toJSON()")
+    assert footer['height'] == 18 and footer['y'] == layout['region']['bottom'], footer
+    captures = js("return lensCalls.filter(call=>call.command==='capture_lens').length")
+    source('layout-footer', bar=[origin_x + 10, origin_y + round(footer['y']) + 1])
+    time.sleep(1.5)
+    kinds = js("return lensCalls.filter(call=>call.command==='capture_lens').slice(arguments[0]).filter(call=>call.kind).map(call=>call.kind)", captures)
+    assert len(kinds) >= 2 and all(kind == 'unchanged' for kind in kinds), kinds
+    assert js("return lensCalls.filter(call=>call.command==='translate').length") == translations
+    assert js("return lensCalls.filter(call=>call.command==='capture_lens').at(-1).args.region.bottomInset") == 19
+    check('the 18px footer excludes changes behind it from OCR and automatic updates', footer)
+    source('layout-bottom', bar=[origin_x + 10, origin_y + round(footer['y']) - 30])
+    wait("document.getElementById('lens-source').textContent.includes('Footer edge text') && document.getElementById('lens-status').textContent === '自動更新中'", 30)
+    check('text immediately above the footer remains readable', text('lens-source'))
+    desktop_image('lens-footer.png')
+    source('layout')
+    wait("document.getElementById('lens-source').textContent.includes('This paragraph') && !document.getElementById('lens-source').textContent.includes('Footer edge text') && document.getElementById('lens-status').textContent === '自動更新中'", 30)
+
     subprocess.run(['xdotool', 'windowsize', '--sync', native_window, '950', '440'], env=env, check=True)
     wait("document.getElementById('lens-source').textContent.includes('This paragraph') && document.getElementById('lens-status').textContent === '自動更新中'", 30)
     widths = js("return [...document.querySelectorAll('.lens-block')].map(node=>node.getBoundingClientRect().width)")
@@ -440,6 +477,23 @@ def lens_checks():
     assert short['width'] < 80 and short['height'] < 40, short
     assert abs(short['center'] - (blocks[0]['x'] + blocks[0]['width']/2) * vertical_layout['region']['width']) < 1, short
     check('short translations stay centered and their background shrinks to the rendered text', short)
+
+    subprocess.run(['xdotool', 'windowsize', '--sync', native_window, '1000', '600'], env=env, check=True)
+    target('ja')
+    source('english')
+    wait("document.getElementById('lens-source').textContent.includes('Local translation') && document.getElementById('lens-status').textContent === '自動更新中'", 30)
+    js('window.motionStart=lensCalls.length')
+    source('animated')
+    wait("lensCalls.slice(motionStart).some(call=>call.reading)", 10)
+    motion = js("""const calls=lensCalls.slice(motionStart).filter(call=>call.command==='capture_lens');
+      const changed=calls.filter(call=>call.kind==='changed'), reading=calls.find(call=>call.reading);
+      return {changedFrames:changed.length,waitingMs:reading.reading-changed[0].finished,status:reading.readingStatus};""")
+    assert motion['changedFrames'] >= 3 and motion['waitingMs'] < 2500, motion
+    assert motion['status'] == '文字を読み取り中…', motion
+    check('a large lens starts OCR despite continuous small animation and reports the reading phase', motion)
+    source('english')
+    wait("document.getElementById('lens-source').textContent.includes('Local translation') && document.getElementById('lens-status').textContent === '自動更新中'", 30)
+    desktop_image('lens-large.png')
     print('ALL LENS DESKTOP CHECKS PASSED', flush=True)
 
 env = os.environ.copy()

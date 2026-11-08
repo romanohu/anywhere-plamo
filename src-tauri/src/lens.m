@@ -88,6 +88,7 @@ static NSString *LensWait(dispatch_semaphore_t semaphore, LensCancelled cancelle
 
 // Rust calls this on a worker. Only the AppKit coordinate conversion uses the main thread.
 char *plamo_lens_capture(void *viewPointer, double x, double y, double width, double height,
+                         double bottomInset,
                          const char *path, LensCancelled cancelled, const void *context) {
     @autoreleasepool {
         if (cancelled(context)) return LensResponse(@{@"error": @"CANCELLED"});
@@ -98,6 +99,7 @@ char *plamo_lens_capture(void *viewPointer, double x, double y, double width, do
         __block CGRect source = CGRectZero;
         __block CGDirectDisplayID displayID = 0;
         __block CGFloat scale = 1.0;
+        __block double captureHeight = height;
         dispatch_sync(dispatch_get_main_queue(), ^{
             // Use the actual webview, not its parent (which may include titlebar insets).
             NSView *view = (__bridge NSView *)viewPointer;
@@ -107,9 +109,13 @@ char *plamo_lens_capture(void *viewPointer, double x, double y, double width, do
             // start at that visible content area, not at the full NSView bounds.
             NSRect viewport = NSIntersectionRect(view.bounds,
                 [view convertRect:window.contentLayoutRect fromView:nil]);
+            // Keep the footer outside the capture even if the DOM viewport is taller
+            // than AppKit's visible content area.
+            captureHeight = MIN(height, floor(NSHeight(viewport) - y - bottomInset));
+            if (captureHeight < 16.0) return;
             NSRect region = NSMakeRect(NSMinX(viewport) + x,
-                                       view.isFlipped ? NSMinY(viewport) + y : NSMaxY(viewport) - y - height,
-                                       width, height);
+                                       view.isFlipped ? NSMinY(viewport) + y : NSMaxY(viewport) - y - captureHeight,
+                                       width, captureHeight);
             if (!NSContainsRect(viewport, region)) return;
             NSRect screenRect = [window convertRectToScreen:[view convertRect:region toView:nil]];
             for (NSScreen *screen in NSScreen.screens) {
@@ -118,7 +124,7 @@ char *plamo_lens_capture(void *viewPointer, double x, double y, double width, do
                 displayID = [screen.deviceDescription[@"NSScreenNumber"] unsignedIntValue];
                 scale = screen.backingScaleFactor;
                 source = CGRectMake(NSMinX(screenRect) - NSMinX(screen.frame),
-                                    NSMaxY(screen.frame) - NSMaxY(screenRect), width, height);
+                                    NSMaxY(screen.frame) - NSMaxY(screenRect), width, captureHeight);
                 break;
             }
         });
@@ -157,9 +163,9 @@ char *plamo_lens_capture(void *viewPointer, double x, double y, double width, do
         SCStreamConfiguration *configuration = [SCStreamConfiguration new];
         configuration.sourceRect = source;
         // Bound memory use while retaining Retina detail for ordinary lens sizes.
-        scale = MIN(scale, 4096.0 / MAX(width, height));
+        scale = MIN(scale, 4096.0 / MAX(width, captureHeight));
         configuration.width = (size_t)ceil(width * scale);
-        configuration.height = (size_t)ceil(height * scale);
+        configuration.height = (size_t)ceil(captureHeight * scale);
         configuration.pixelFormat = kCVPixelFormatType_32BGRA;
         configuration.minimumFrameInterval = CMTimeMake(1, 5);
         configuration.queueDepth = 3;
@@ -218,7 +224,7 @@ char *plamo_lens_capture(void *viewPointer, double x, double y, double width, do
         if (![data writeToFile:[NSString stringWithUTF8String:path] atomically:NO]) {
             return LensResponse(@{@"error": @"読み取り画像を保存できませんでした。"});
         }
-        return LensResponse(@{});
+        return LensResponse(@{@"height": @(captureHeight)});
     }
 }
 

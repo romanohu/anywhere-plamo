@@ -14,6 +14,6 @@ body.lens-mode { position: fixed; inset: 0; }
 .lens-selection #lens-translation { height: 100%; overflow: auto; overscroll-behavior: none; }
 .lens-selection .lens-block { width: fit-content; max-width: 100%; margin-bottom: 8px; }
 #lens-source { height: 100%; overflow: auto; overscroll-behavior: none; padding: 8px; white-space: pre-wrap; background: color-mix(in srgb, var(--surface) 80%, transparent); }
-.lens-footer { flex-shrink: 0; padding: 6px 12px; font-size: 12px; background: var(--surface); }
+.lens-footer { flex-shrink: 0; padding: 2px 10px; font-size: 11px; line-height: 14px; background: var(--surface); }
 .lens-footer span { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .lens-footer .is-error { color: var(--error); }

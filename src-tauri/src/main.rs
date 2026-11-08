@@ -31,6 +31,7 @@ pub enum ProgressEvent {
     Download { received: u64, total: u64 },
     Verifying,
     Loading,
+    Reading,
     Token { text: String },
 }
 
@@ -440,9 +441,10 @@ async fn open_lens(app: tauri::AppHandle) -> Result<(), String> {
 async fn capture_lens(
     window: tauri::WebviewWindow,
     state: tauri::State<'_, AppState>,
-    region: lens::Region,
+    region: lens::CaptureArea,
     automatic: Option<bool>,
     reset: Option<bool>,
+    on_event: Channel<ProgressEvent>,
 ) -> Result<lens::CaptureResult, String> {
     if window.label() != "lens" {
         return Err("OCRレンズから実行してください。".into());
@@ -461,6 +463,9 @@ async fn capture_lens(
         &state.ocr_runtime,
         &operation.token,
         automatic.unwrap_or(false).then_some(&state.lens_watch),
+        || {
+            let _ = on_event.send(ProgressEvent::Reading);
+        },
     )
     .await
 }
