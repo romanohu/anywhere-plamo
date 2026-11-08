@@ -335,17 +335,30 @@ async fn recognize(
         .flat_map(|line| line.text.chars())
         .filter(|ch| ch.is_alphabetic() && cjk(*ch))
         .count();
-    if japanese * 2 > letters {
+    if japanese * 3 > letters {
         // Page/sparse segmentation often splits wide Japanese prose at ruby.
         // A single-column pass separates the small annotations from body lines.
-        let prose = recognize_page(runtime, &file.path, cancel, "6", "jpn").await?;
-        if let Some(result) = group_prose(
-            prose.into_iter().flat_map(|block| block.lines).collect(),
-            (width as f64 * scale).floor(),
-            (height as f64 * scale).floor(),
-        ) {
-            check_text_limit(&result)?;
-            return Ok(result);
+        for (path, width, height) in [
+            (
+                file.path.as_path(),
+                (width as f64 * scale).floor(),
+                (height as f64 * scale).floor(),
+            ),
+            (path, width as f64, height as f64),
+        ] {
+            let prose = recognize_page(runtime, path, cancel, "6", "jpn").await?;
+            if let Some(result) = group_prose(
+                prose.into_iter().flat_map(|block| block.lines).collect(),
+                width,
+                height,
+            ) {
+                // Resampling can make Tesseract drop an entire body line. Retry
+                // at the original resolution before accepting a partial page.
+                if preserves_body_lines(&blocks, &result) {
+                    check_text_limit(&result)?;
+                    return Ok(result);
+                }
+            }
         }
     }
     let sparse = recognize_page(runtime, &file.path, cancel, "11", "eng+jpn").await?;
@@ -430,33 +443,59 @@ async fn recognize(
     Ok(if result.is_empty() { blocks } else { result })
 }
 
+fn preserves_body_lines(original: &[TextBlock], candidate: &[TextBlock]) -> bool {
+    original.iter().all(|block| {
+        block
+            .lines
+            .iter()
+            .zip(&block.regions)
+            .all(|(line, region)| {
+                if line.width < line.height * 4.0
+                    || line.text.chars().count() < 12
+                    || line.max_gap > line.height * 2.0
+                    || !line
+                        .text
+                        .chars()
+                        .any(|ch| ch.is_ascii_alphabetic() || matches!(ch as u32, 0x3400..=0x9fff))
+                {
+                    return true;
+                }
+                let center = region.y + region.height / 2.0;
+                candidate
+                    .iter()
+                    .flat_map(|block| &block.regions)
+                    .any(|next| {
+                        center >= next.y - region.height / 4.0
+                            && center <= next.y + next.height + region.height / 4.0
+                            && (region.x + region.width).min(next.x + next.width)
+                                - region.x.max(next.x)
+                                >= region.width.min(next.width) / 2.0
+                    })
+            })
+    })
+}
+
 fn group_prose(mut lines: Vec<OcrLine>, width: f64, height: f64) -> Option<Vec<TextBlock>> {
     // Weight by text length so numerous short ruby annotations cannot set the
     // body font size. Do not apply this single-column treatment to balloons.
     let mut sizes: Vec<_> = lines
         .iter()
-        .flat_map(|line| std::iter::repeat_n(line.height, line.text.chars().count()))
+        .flat_map(|line| {
+            let count = line.text.chars().count();
+            // Some fonts include ruby in the body's line box. Japanese character
+            // widths keep those tall boxes from inflating the paragraph spacing.
+            let size = line.height.min(line.width / count.max(1) as f64 * 1.2);
+            std::iter::repeat_n(size, count)
+        })
         .collect();
     sizes.sort_by(f64::total_cmp);
     let size = *sizes.get(sizes.len() / 2)?;
-    let annotations = lines
-        .iter()
-        .filter(|line| {
-            line.height < size * 0.65
-                && line.text.chars().any(cjk)
-                && lines.iter().any(|body| {
-                    body.height >= size * 0.8
-                        && body.x <= line.x
-                        && body.right() >= line.right()
-                        && body.y >= line.bottom()
-                        && body.y - line.bottom() < size
-                })
-        })
-        .count();
-    if annotations < 2 {
-        return None;
-    }
-    lines.retain(|line| line.height >= size * 0.65);
+    lines.retain(|line| {
+        line.height >= size * 0.85
+            || line.text.chars().any(|ch| {
+                ch.is_alphanumeric() && !matches!(ch as u32, 0x3040..=0x30ff | 0xff65..=0xff9f)
+            })
+    });
     let left = lines
         .iter()
         .map(|line| line.x)
@@ -467,7 +506,7 @@ fn group_prose(mut lines: Vec<OcrLine>, width: f64, height: f64) -> Option<Vec<T
         .count()
         < 2
         || lines.iter().any(|line| {
-            line.x - left > size * 1.5 || line.max_gap > size * 2.0 || line.height > size * 1.5
+            line.x - left > size * 1.5 || line.max_gap > size * 2.0 || line.height > size * 3.0
         })
     {
         return None;
@@ -650,10 +689,10 @@ async fn recognize_page(
         return Err("文字を認識できませんでした。範囲を変えて再試行してください。".into());
     }
     let text = String::from_utf8(bytes).map_err(|_| "文字認識の結果を取得できませんでした。")?;
-    parse_tsv(&text)
+    parse_tsv(&text, segmentation == "6" && language == "jpn")
 }
 
-fn parse_tsv(tsv: &str) -> Result<Vec<TextBlock>, String> {
+fn parse_tsv(tsv: &str, use_line_bounds: bool) -> Result<Vec<TextBlock>, String> {
     let invalid = "文字認識の位置情報を取得できませんでした。";
     let mut size = None;
     let mut blocks: Vec<TextBlock> = Vec::new();
@@ -738,7 +777,9 @@ fn parse_tsv(tsv: &str) -> Result<Vec<TextBlock>, String> {
             row.height = bottom - row.y;
             // Japanese word boxes can extend above/below the actual glyphs.
             // The line box preserves the distinction between ruby and body text.
-            if let Some((_, top, height)) = line_bounds.filter(|(id, _, _)| *id == fields[4]) {
+            if let Some((_, top, height)) =
+                line_bounds.filter(|(id, _, _)| use_line_bounds && *id == fields[4])
+            {
                 row.y = top;
                 row.height = height;
             }
@@ -873,7 +914,8 @@ mod tests {
             "5\t1\t1\t1\t1\t1\t100\t80\t80\t20",
             "4\t1\t1\t1\t1\t0\t100\t80\t80\t20\t-1\t\n5\t1\t1\t1\t1\t1\t100\t75\t80\t35",
         );
-        let blocks = parse_tsv(&tsv).unwrap();
+        assert_eq!(parse_tsv(&tsv, false).unwrap()[0].lines[0].height, 35.0);
+        let blocks = parse_tsv(&tsv, true).unwrap();
         assert_eq!(blocks[0].lines[0].y, 80.0);
         assert_eq!(blocks[0].lines[0].height, 20.0);
         assert_eq!(blocks[0].regions[0].height, 20.0 / 800.0);
@@ -906,26 +948,32 @@ mod tests {
         );
         assert_eq!(blocks[0].regions.len(), 2);
         assert_eq!(blocks[1].text, "ここから次の段落です。");
+        assert!(preserves_body_lines(&blocks, &blocks));
+        assert!(!preserves_body_lines(&blocks, &blocks[1..]));
         let mut columns = lines.clone();
         columns[1].max_gap = 100.0;
         assert!(group_prose(columns, 700.0, 150.0).is_none());
         let mut separate = lines.clone();
         separate[3].x = 300.0;
         assert!(group_prose(separate, 1000.0, 150.0).is_none());
-        assert!(group_prose(
-            lines
-                .into_iter()
-                .filter(|line| line.height == 16.0)
-                .collect(),
-            700.0,
-            150.0
-        )
-        .is_none());
+        assert_eq!(
+            group_prose(
+                lines
+                    .into_iter()
+                    .filter(|line| line.height == 16.0)
+                    .collect(),
+                700.0,
+                150.0,
+            )
+            .unwrap()
+            .len(),
+            2
+        );
     }
 
     #[test]
     fn ocr_preserves_paragraph_positions_without_visual_line_breaks() {
-        let blocks = parse_tsv(&layout_tsv()).unwrap();
+        let blocks = parse_tsv(&layout_tsv(), false).unwrap();
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0].text, "Hello world.");
         assert_eq!(blocks[1].text, "画像の文字です。");
@@ -950,14 +998,14 @@ mod tests {
     #[test]
     fn ocr_rejects_invalid_geometry_and_oversized_text_but_accepts_empty_pages() {
         let tsv = layout_tsv();
-        assert!(parse_tsv("").is_err());
-        assert!(parse_tsv(&tsv.replace("1000\t800", "0\t800")).is_err());
-        assert!(parse_tsv(&tsv.replace("600\t400\t300", "900\t400\t300")).is_err());
-        assert!(parse_tsv(&tsv.replace("Hello", &"😀".repeat(6001)))
+        assert!(parse_tsv("", false).is_err());
+        assert!(parse_tsv(&tsv.replace("1000\t800", "0\t800"), false).is_err());
+        assert!(parse_tsv(&tsv.replace("600\t400\t300", "900\t400\t300"), false).is_err());
+        assert!(parse_tsv(&tsv.replace("Hello", &"😀".repeat(6001)), false)
             .unwrap_err()
             .contains("多すぎ"));
         let page = tsv.lines().take(2).collect::<Vec<_>>().join("\n");
-        assert!(parse_tsv(&page).unwrap().is_empty());
+        assert!(parse_tsv(&page, false).unwrap().is_empty());
     }
 
     #[test]
@@ -1027,8 +1075,8 @@ mod tests {
 
     #[test]
     fn clipping_the_capture_bottom_preserves_ocr_positions_in_the_lens() {
-        let blocks = parse_tsv(&layout_tsv()).unwrap();
-        let fitted = fit_capture_height(parse_tsv(&layout_tsv()).unwrap(), 0.9);
+        let blocks = parse_tsv(&layout_tsv(), false).unwrap();
+        let fitted = fit_capture_height(parse_tsv(&layout_tsv(), false).unwrap(), 0.9);
         for (before, after) in blocks.iter().zip(fitted) {
             assert_eq!((before.x, before.width), (after.x, after.width));
             assert_eq!(before.text, after.text);
@@ -1143,24 +1191,41 @@ mod tests {
     async fn bundled_ocr_keeps_ruby_prose_together_at_different_widths() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let runtime = root.join("resources/runtime");
-        // First two paragraphs of public-domain Rashomon, rendered with its ruby:
+        // Public-domain Rashomon, rendered with its ruby at narrow/wide widths:
         // https://www.aozora.gr.jp/cards/000879/files/127_15260.html
-        for (name, scale) in [("narrow", 1), ("wide", 1), ("narrow", 2), ("wide", 2)] {
+        for (name, scale) in [
+            ("narrow", 1.0),
+            ("wide", 1.0),
+            ("narrow", 1.5),
+            ("wide", 1.5),
+            ("narrow", 2.0),
+            ("wide", 2.0),
+            ("serif-wide", 1.0),
+            ("serif-wide", 1.5),
+            ("serif-wide", 2.0),
+            ("serif-large", 1.0),
+            ("serif-large", 1.5),
+            ("serif-large", 2.0),
+        ] {
             let image = image::open(root.join(format!("../tests/fixtures/ocr-ruby-{name}.png")))
                 .unwrap()
                 .to_rgb8();
             let image = image::imageops::resize(
                 &image,
-                image.width() * scale,
-                image.height() * scale,
-                image::imageops::FilterType::Nearest,
+                (image.width() as f64 * scale) as u32,
+                (image.height() as f64 * scale) as u32,
+                image::imageops::FilterType::Triangle,
             );
             let file = CaptureFile::new().unwrap();
             write_image(&file.path, image).unwrap();
             let blocks = recognize(&runtime, &file.path, &CancellationToken::new())
                 .await
                 .unwrap();
-            assert_eq!(blocks.len(), 2, "{name}: {blocks:?}");
+            assert_eq!(
+                blocks.len(),
+                if name == "wide" { 4 } else { 2 },
+                "{name} {scale}: {blocks:?}"
+            );
             assert!(
                 blocks[0].text.starts_with("ある日の暮方の事である"),
                 "{name}: {blocks:?}"
@@ -1173,7 +1238,11 @@ mod tests {
                 .any(|block| block.text.contains("らしょうもん")
                     || block.text.contains("すざくおおじ")));
             assert!(blocks[0].y + blocks[0].height < blocks[1].y);
-            assert!(blocks[1].regions.len() >= 3);
+            assert!(blocks[1].regions.len() >= 2);
+            if name == "wide" {
+                assert!(blocks[2].text.starts_with("何故かと云うと"));
+                assert!(blocks[3].text.starts_with("その代り"));
+            }
         }
     }
 
