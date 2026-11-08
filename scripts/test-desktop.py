@@ -354,17 +354,15 @@ def lens_checks():
       const paragraphs=[...document.querySelectorAll('.lens-block')].map(node=>{
         const rect=node.getBoundingClientRect();return {x:rect.x-region.x,y:rect.y-region.y,width:rect.width,height:rect.height,
           scrolls:node.scrollHeight>node.clientHeight+1,whiteSpace:getComputedStyle(node).whiteSpace};
-      }); const backdrops=[...document.querySelectorAll('.lens-backdrop')].map(node=>node.getBoundingClientRect().toJSON());
-      return {capture,region:region.toJSON(),paragraphs,backdrops};""")
+      }); return {capture,region:region.toJSON(),paragraphs};""")
     assert len(layout['capture']['blocks']) == len(layout['paragraphs']) == 2, layout
     assert layout['capture']['blocks'][0]['text'] == 'This paragraph continues on the next line.', layout
     for block, paragraph in zip(layout['capture']['blocks'], layout['paragraphs']):
         assert abs(paragraph['x'] + 5 - block['x'] * layout['region']['width']) < 1, layout
         assert abs(paragraph['y'] + 3 - block['y'] * layout['region']['height']) < 1, layout
         assert not paragraph['scrolls'] and paragraph['whiteSpace'] == 'normal', layout
-    for block, paragraph, backdrop in zip(layout['capture']['blocks'], layout['paragraphs'], layout['backdrops']):
-        assert abs(backdrop['width'] - max(block['width'] * layout['region']['width'] + 10, paragraph['width'])) < 1, layout
-        assert abs(backdrop['height'] - max(block['height'] * layout['region']['height'] + 6, paragraph['height'])) < 1, layout
+        assert paragraph['width'] <= block['width'] * layout['region']['width'] + 11, layout
+    assert js("return [...document.getElementById('lens-translation').children].every(node=>node.matches('.lens-block'))")
     check('soft-wrapped OCR paragraphs are joined and translations follow their source positions', layout)
     desktop_image('lens-layout.png')
 
@@ -393,11 +391,9 @@ def lens_checks():
     subprocess.run(['xdotool', 'windowsize', '--sync', native_window, '950', '440'], env=env, check=True)
     wait("document.getElementById('lens-source').textContent.includes('This paragraph') && document.getElementById('lens-status').textContent === '自動更新中'", 30)
     widths = js("return [...document.querySelectorAll('.lens-block')].map(node=>node.getBoundingClientRect().width)")
-    assert abs(widths[0] - layout['paragraphs'][0]['width']) < 1, widths
-    assert widths[1] > layout['paragraphs'][1]['width'], widths
+    assert all(abs(width - before['width']) < 1 for width, before in zip(widths, layout['paragraphs'])), widths
     assert js("return [...document.querySelectorAll('.lens-block')].every(node=>node.scrollHeight<=node.clientHeight+1)")
-    assert js("return document.querySelector('.lens-backdrop').getBoundingClientRect().width") < 600
-    check('widening reflows longer text while short text and its backdrop stay compact', widths)
+    check('widening the lens keeps translations attached to their source instead of stretching the background', widths)
     desktop_image('lens-layout-wide.png')
 
     source('columns')
@@ -405,7 +401,15 @@ def lens_checks():
     blocks = js("return lensCalls.filter(call=>call.result?.kind==='text').at(-1).result.blocks")
     assert len(blocks) == 5 and all(blocks[i]['x'] + blocks[i]['width'] < blocks[i+1]['x'] for i in range(2)), blocks
     assert js("return document.querySelectorAll('.lens-block').length === 5 && [...document.querySelectorAll('.lens-block')].every(node=>node.textContent.trim())")
-    check('adjacent speech bubbles are recognized and translated independently', blocks)
+    bubble_layout = js("""const region=document.getElementById('lens-region').getBoundingClientRect();
+      return [...document.querySelectorAll('.lens-block')].map(node=>{const r=node.getBoundingClientRect();return {
+        x:r.x-region.x,y:r.y-region.y,width:r.width,height:r.height,fontSize:parseFloat(getComputedStyle(node).fontSize),
+        scrolls:node.scrollHeight>node.clientHeight+1,background:getComputedStyle(node).backgroundColor};});""")
+    for block, paragraph in zip(blocks, bubble_layout):
+        assert paragraph['width'] <= block['width'] * 948 + 11 and paragraph['fontSize'] >= 12, bubble_layout
+        assert not paragraph['scrolls'], bubble_layout
+    assert all(bubble_layout[i]['x'] + bubble_layout[i]['width'] + 8 < bubble_layout[i+1]['x'] for i in range(2)), bubble_layout
+    check('speech bubble translations wrap within their own column, including the rightmost bubble', bubble_layout)
     desktop_image('lens-columns.png')
 
     subprocess.run(['xdotool', 'windowsize', '--sync', native_window, '950', '520'], env=env, check=True)
@@ -415,11 +419,27 @@ def lens_checks():
     blocks = js("return lensCalls.filter(call=>call.result?.kind==='text').at(-1).result.blocks")
     assert len(blocks) == 2 and blocks[0]['x'] > blocks[1]['x'] + blocks[1]['width'], blocks
     assert js("return [...document.querySelectorAll('.lens-block')].every(node=>/[A-Za-z]/.test(node.textContent))")
-    # A narrow vertical source and a wide translation have an L-shaped backing.
-    shapes = js("return [...document.querySelectorAll('.lens-backdrop')].map(node=>getComputedStyle(node).clipPath)")
-    assert any(shape.count(',') == 5 for shape in shapes), shapes
-    check('vertical Japanese reads right-to-left and its backdrop leaves the empty corner clear', {'blocks': blocks, 'shapes': shapes})
+    vertical_layout = js("""const region=document.getElementById('lens-region').getBoundingClientRect();
+      return {region:region.toJSON(),paragraphs:[...document.querySelectorAll('.lens-block')].map(node=>{
+        const r=node.getBoundingClientRect();return {x:r.x-region.x,y:r.y-region.y,width:r.width,height:r.height,scrolls:node.scrollHeight>node.clientHeight+1};})};""")
+    for block, paragraph in zip(blocks, vertical_layout['paragraphs']):
+        region = vertical_layout['region']
+        assert abs(paragraph['x'] + paragraph['width']/2 - (block['x'] + block['width']/2) * region['width']) < 1, vertical_layout
+        assert abs(paragraph['y'] + paragraph['height']/2 - (block['y'] + block['height']/2) * region['height']) < 1, vertical_layout
+        assert paragraph['width'] <= 180 and paragraph['height'] > 40 and not paragraph['scrolls'], vertical_layout
+    assert js("return [...document.getElementById('lens-translation').children].every(node=>node.matches('.lens-block'))")
+    check('vertical text has a compact multiline translation centered on its source, without masking the remaining original', vertical_layout)
     desktop_image('lens-vertical.png')
+    # Exercise a short translation with the same tall OCR bounds in the real webview.
+    js("document.querySelector('.lens-block').textContent='Thanks.'")
+    click('lens-original')
+    click('lens-original')
+    short = js("""const r=document.querySelector('.lens-block').getBoundingClientRect();
+      const region=document.getElementById('lens-region').getBoundingClientRect();
+      return {center:r.x-region.x+r.width/2,width:r.width,height:r.height};""")
+    assert short['width'] < 80 and short['height'] < 40, short
+    assert abs(short['center'] - (blocks[0]['x'] + blocks[0]['width']/2) * vertical_layout['region']['width']) < 1, short
+    check('short translations stay centered and their background shrinks to the rendered text', short)
     print('ALL LENS DESKTOP CHECKS PASSED', flush=True)
 
 env = os.environ.copy()

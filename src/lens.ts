@@ -1,7 +1,8 @@
 import { invoke, isDesktop, onWindowHidden, progressChannel } from './backend';
 import type { AppStatus } from './backend';
 
-type TextBlock = { text: string; x: number; y: number; width: number; height: number };
+type TextRect = { x: number; y: number; width: number; height: number };
+type TextBlock = TextRect & { text: string; regions: TextRect[] };
 type CaptureResult = { kind: 'changed' } | { kind: 'unchanged' } | { kind: 'text'; text: string; blocks: TextBlock[] };
 
 export async function initLens(): Promise<void> {
@@ -30,7 +31,7 @@ export async function initLens(): Promise<void> {
   let generation = 0;
   let showingOriginal = false;
   let cancellation: Promise<void> | null = null;
-  const backdrops = new WeakMap<HTMLElement, { element: HTMLElement; width: number; height: number }>();
+  const placements = new WeakMap<HTMLElement, { left: number; width: number; top: number; height: number; fontSize: number; vertical: boolean }>();
 
   document.body.classList.add('lens-mode');
   document.title = 'Anywhere Plamo — OCRレンズ';
@@ -80,24 +81,29 @@ export async function initLens(): Promise<void> {
       paragraph.className = 'lens-block';
       paragraph.dir = 'auto';
       if (!selection) {
-        // Expand into free space, but leave neighbouring columns/paragraphs clear.
-        const right = Math.min(1, ...blocks.filter(other => other.x >= block.x + block.width
-          && other.y < block.y + block.height && other.y + other.height > block.y).map(other => other.x));
-        const bottom = Math.min(1, ...blocks.filter(other => other.y >= block.y + block.height
-          && other.x < right && other.x + other.width > block.x).map(other => other.y));
-        const left = Math.max(0, block.x * rect.width - 5);
+        const x = block.x * rect.width, sourceWidth = block.width * rect.width;
+        const sourceHeight = block.height * rect.height;
+        // Share gutters with neighbouring text instead of stretching to the window edge.
+        const neighbours = blocks.filter(other => other !== block && other.y < block.y + block.height && other.y + other.height > block.y);
+        const leftEdge = Math.max(0, ...neighbours.filter(other => other.x + other.width <= block.x)
+          .map(other => (other.x + other.width + block.x) * rect.width / 2 + 6));
+        const rightEdge = Math.min(rect.width, ...neighbours.filter(other => other.x >= block.x + block.width)
+          .map(other => (block.x + block.width + other.x) * rect.width / 2 - 6));
+        const vertical = block.regions.some(line => line.height * rect.height > line.width * rect.width * 1.8);
+        const desiredWidth = vertical ? Math.max(sourceWidth + 10, Math.min(180, Math.sqrt(sourceWidth * sourceHeight))) : sourceWidth + 10;
+        const width = Math.max(0, Math.min(desiredWidth, rightEdge - leftEdge));
+        const left = Math.max(leftEdge, Math.min(rightEdge - width, vertical ? x + (sourceWidth - width) / 2 : x - 5));
         const top = Math.max(0, block.y * rect.height - 3);
-        const height = Math.max(0, bottom * rect.height - top - 3);
-        const backdrop = document.createElement('div');
-        backdrop.className = 'lens-backdrop';
-        backdrop.setAttribute('aria-hidden', 'true');
-        Object.assign(backdrop.style, { left: `${left}px`, top: `${top}px` });
-        translation.append(backdrop);
-        backdrops.set(paragraph, { element: backdrop, width: Math.min(right * rect.width - left - 3, block.width * rect.width + 10), height: Math.min(height, block.height * rect.height + 6) });
+        const bottom = Math.min(rect.height, ...blocks.filter(other => other.y >= block.y + block.height
+          && other.x * rect.width < left + width && (other.x + other.width) * rect.width > left)
+          .map(other => (block.y + block.height + other.y) * rect.height / 2 - 6));
+        const sizes = block.regions.map(line => vertical ? line.width * rect.width : line.height * rect.height).sort((a, b) => a - b);
+        placements.set(paragraph, { left, width, top, height: Math.min(sourceHeight + 6, bottom - top), vertical,
+          fontSize: Math.max(12, Math.min(16, Math.round(sizes[Math.floor(sizes.length / 2)] * 1.3))) });
         Object.assign(paragraph.style, {
           position: 'absolute', left: `${left}px`, top: `${top}px`,
-          width: 'max-content', maxWidth: `${Math.max(0, right * rect.width - left - 3)}px`,
-          maxHeight: `${height}px`,
+          width: 'max-content', maxWidth: `${width}px`,
+          maxHeight: `${Math.max(0, bottom - top)}px`,
         });
       }
       translation.append(paragraph);
@@ -107,21 +113,16 @@ export async function initLens(): Promise<void> {
 
   function fitBlock(paragraph: HTMLElement): void {
     if (selection || !paragraph.getClientRects().length) return;
-    paragraph.style.fontSize = '16px';
-    for (let size = 15; size >= 12 && paragraph.scrollHeight > paragraph.clientHeight + 1; size--) {
+    const placement = placements.get(paragraph);
+    if (!placement) return;
+    paragraph.style.fontSize = `${placement.fontSize}px`;
+    for (let size = placement.fontSize - 1; size >= 12 && paragraph.scrollHeight > Math.min(placement.height, paragraph.clientHeight) + 1; size--) {
       paragraph.style.fontSize = `${size}px`;
     }
-    const backdrop = backdrops.get(paragraph);
-    if (backdrop) {
+    if (placement.vertical) {
       const { width, height } = paragraph.getBoundingClientRect();
-      const maxWidth = Math.max(width, backdrop.width), maxHeight = Math.max(height, backdrop.height);
-      const minWidth = Math.min(width, backdrop.width), minHeight = Math.min(height, backdrop.height);
-      // Union of the source and translation rectangles, without painting the empty
-      // corner of an L-shaped union (e.g. vertical source / horizontal translation).
-      const corner = width >= backdrop.width && height >= backdrop.height || width <= backdrop.width && height <= backdrop.height;
-      const points = corner ? `0 0, 100% 0, 100% 100%, 0 100%`
-        : `0 0, ${maxWidth}px 0, ${maxWidth}px ${minHeight}px, ${minWidth}px ${minHeight}px, ${minWidth}px ${maxHeight}px, 0 ${maxHeight}px`;
-      Object.assign(backdrop.element.style, { width: `${maxWidth}px`, height: `${maxHeight}px`, clipPath: `polygon(${points})` });
+      paragraph.style.left = `${placement.left + (placement.width - width) / 2}px`;
+      paragraph.style.top = `${placement.top + Math.max(0, (placement.height - height) / 2)}px`;
     }
   }
 

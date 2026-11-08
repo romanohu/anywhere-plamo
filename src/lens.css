@@ -9,11 +9,10 @@ body.lens-mode { position: fixed; inset: 0; }
 .lens-region { flex: 1; min-height: 0; position: relative; overflow: hidden; }
 .lens-result { position: absolute; inset: 0; overflow: hidden; }
 .lens-result p { margin: 0; overflow-wrap: anywhere; font-size: 16px; line-height: 1.45; user-select: text; }
-.lens-block { padding: 3px 5px; overflow: auto; overscroll-behavior: none; text-shadow: 0 0 2px var(--surface), 0 0 2px var(--surface); }
-.lens-backdrop { position: absolute; pointer-events: none; background: color-mix(in srgb, var(--surface) 80%, transparent); }
+.lens-block { padding: 3px 5px; overflow: auto; overscroll-behavior: none; background: color-mix(in srgb, var(--surface) 80%, transparent); border-radius: 2px; text-shadow: 0 0 2px var(--surface), 0 0 2px var(--surface); }
 .lens-block:empty { visibility: hidden; }
 .lens-selection #lens-translation { height: 100%; overflow: auto; overscroll-behavior: none; }
-.lens-selection .lens-block { width: fit-content; max-width: 100%; margin-bottom: 8px; background: color-mix(in srgb, var(--surface) 80%, transparent); }
+.lens-selection .lens-block { width: fit-content; max-width: 100%; margin-bottom: 8px; }
 #lens-source { height: 100%; overflow: auto; overscroll-behavior: none; padding: 8px; white-space: pre-wrap; background: color-mix(in srgb, var(--surface) 80%, transparent); }
 .lens-footer { flex-shrink: 0; padding: 6px 12px; font-size: 12px; background: var(--surface); }
 .lens-footer span { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }

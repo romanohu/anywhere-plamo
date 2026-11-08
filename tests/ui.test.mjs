@@ -35,8 +35,9 @@ async function fixture(t, options = {}) {
   let now = 0;
   if (options.manualClock) window.performance.now = () => now;
   const byId = id => window.document.getElementById(id);
-  const captureResult = result => result.kind !== 'text' || result.blocks ? result : {
-    ...result, blocks: result.text.trim() ? [{ text: result.text, x: .1, y: .2, width: .6, height: .1 }] : [],
+  const captureResult = result => result.kind !== 'text' ? result : {
+    ...result, blocks: (result.blocks ?? (result.text.trim() ? [{ text: result.text, x: .1, y: .2, width: .6, height: .1 }] : []))
+      .map(block => ({ ...block, regions: block.regions ?? [{ x: block.x, y: block.y, width: block.width, height: block.height }] })),
   };
   byId('lens-region').getBoundingClientRect = () => ({ x: 1, y: 49, width: 638, height: 340 });
   // JSDOM does not implement native dialog presentation. Its open state is enough for these tests.

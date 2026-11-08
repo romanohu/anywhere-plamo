@@ -39,6 +39,7 @@ pub struct TextBlock {
     y: f64,
     width: f64,
     height: f64,
+    regions: Vec<Region>,
     #[serde(skip)]
     lines: Vec<OcrLine>,
 }
@@ -71,6 +72,14 @@ impl OcrLine {
     fn vertical(&self) -> bool {
         self.height > self.width * 1.8 && self.text.chars().filter(|ch| cjk(*ch)).count() > 1
     }
+    fn region(&self, width: f64, height: f64) -> Region {
+        Region {
+            x: self.x / width,
+            y: self.y / height,
+            width: self.width / width,
+            height: self.height / height,
+        }
+    }
 }
 
 impl Watch {
@@ -94,7 +103,7 @@ impl Watch {
     }
 }
 
-#[derive(Clone, Copy, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 pub struct Region {
     x: f64,
     y: f64,
@@ -352,6 +361,10 @@ async fn recognize(
             y: y as f64 / height as f64,
             width: w as f64 / width as f64,
             height: h as f64 / height as f64,
+            regions: group
+                .iter()
+                .map(|line| line.region(width as f64 * scale, height as f64 * scale))
+                .collect(),
             lines: Vec::new(),
         });
     }
@@ -532,6 +545,7 @@ fn parse_tsv(tsv: &str) -> Result<Vec<TextBlock>, String> {
                 y: y / page_height,
                 width: width / page_width,
                 height: height / page_height,
+                regions: Vec::new(),
                 lines: Vec::new(),
             });
         } else {
@@ -570,8 +584,13 @@ fn parse_tsv(tsv: &str) -> Result<Vec<TextBlock>, String> {
             line = fields[4];
         }
     }
-    if size.is_none() {
-        return Err(invalid.into());
+    let (width, height) = size.ok_or(invalid)?;
+    for block in &mut blocks {
+        block.regions = block
+            .lines
+            .iter()
+            .map(|line| line.region(width, height))
+            .collect();
     }
     blocks.retain(|block| !block.text.is_empty() && block.width > 0.0 && block.height > 0.0);
     check_text_limit(&blocks)?;
@@ -694,6 +713,10 @@ mod tests {
         .unwrap();
         assert_eq!(result["kind"], "text");
         assert_eq!(result["blocks"][1]["text"], "画像の文字です。");
+        assert_eq!(
+            result["blocks"][0]["regions"][1],
+            serde_json::json!({"x": 0.1, "y": 0.15, "width": 0.08, "height": 0.025})
+        );
     }
 
     #[test]
@@ -864,6 +887,18 @@ mod tests {
                 text.iter().any(|block| block.text.contains(expected)),
                 "{name}: {text:?}"
             );
+            for block in &text {
+                assert!(!block.regions.is_empty());
+                assert!(
+                    block.regions.iter().all(|region| region.width > 0.0
+                        && region.height > 0.0
+                        && region.x >= 0.0
+                        && region.y >= 0.0
+                        && region.x + region.width <= 1.0
+                        && region.y + region.height <= 1.0),
+                    "{name}: {block:?}"
+                );
+            }
             if name == "columns" {
                 assert_eq!(text.len(), 5, "{text:?}");
                 assert_eq!(text[0].text, "Read this speech bubble. Keep its lines together. Local translation is useful.");
