@@ -21,6 +21,7 @@ export async function initLens(): Promise<void> {
   let auto = true;
   let visible = true;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let pollDelay = 200;
   let reset = true;
   let lastText = '';
   let lastTranslation = '';
@@ -62,7 +63,7 @@ export async function initLens(): Promise<void> {
 
   function schedule(): void {
     clearTimeout(timer);
-    if (ready && auto && visible && !busy && !cancellation) timer = setTimeout(() => { void update(true); }, 650);
+    if (ready && auto && visible && !busy && !cancellation) timer = setTimeout(() => { void update(true); }, pollDelay);
   }
 
   function saveAuto(): void {
@@ -73,6 +74,7 @@ export async function initLens(): Promise<void> {
     clearTimeout(timer);
     generation++;
     reset = true;
+    pollDelay = 200;
     lastText = '';
     lastTranslation = '';
     translation.textContent = '';
@@ -124,6 +126,8 @@ export async function initLens(): Promise<void> {
       });
       if (run !== generation) return;
       reset = false;
+      // Confirm a changed frame promptly; sample settled screens less often.
+      pollDelay = capture.kind === 'changed' ? 200 : 350;
       if (capture.kind === 'unchanged') return;
       if (capture.kind === 'changed') {
         translation.textContent = '';

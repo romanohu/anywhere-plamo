@@ -24,8 +24,9 @@ async function fixture(t, options = {}) {
   if (options.lens && !options.autoLens) window.localStorage.setItem('lens-auto', 'false');
   const lensTimers = new Map();
   let lensTimerId = 0;
+  let lensDelay;
   if (options.autoLens) {
-    window.setTimeout = callback => { const id = ++lensTimerId; lensTimers.set(id, callback); return id; };
+    window.setTimeout = (callback, delay) => { lensDelay = delay; const id = ++lensTimerId; lensTimers.set(id, callback); return id; };
     window.clearTimeout = id => lensTimers.delete(id);
   }
   if (options.preload !== undefined) window.localStorage.setItem('preload-model', String(options.preload));
@@ -149,6 +150,7 @@ async function fixture(t, options = {}) {
       pending.forEach(callback => callback());
       await new Promise(resolve => setTimeout(resolve, 5));
     },
+    lensDelay: () => lensDelay,
     showWindow() { listeners.get('window-shown')?.({ payload: null }); },
     moveLens() { listeners.get('lens-changed')?.({ payload: null }); },
     shortcutPressed(shortcut) { listeners.get('shortcut-pressed')?.({ payload: shortcut }); },
@@ -1087,12 +1089,15 @@ test('automatic lens waits for stable frames, skips unchanged images and reuses 
     { kind: 'changed' }, { kind: 'text', text: 'Second image' },
   ] });
   assert.equal(f.byId('lens-auto').getAttribute('aria-pressed'), 'true');
+  assert.equal(f.lensDelay(), 200);
   await f.tickLens();
+  assert.equal(f.lensDelay(), 200);
   await f.tickLens();
   assert.equal(f.calls.filter(call => call.command === 'translate').length, 0);
   await f.tickLens();
   assert.equal(f.byId('lens-source').textContent, 'First image');
   assert.equal(f.byId('lens-status').textContent, '自動更新中');
+  assert.equal(f.lensDelay(), 350);
   assert.equal(f.calls.find(call => call.command === 'capture_lens').args.automatic, true);
   assert.equal(f.calls.filter(call => call.command === 'capture_lens')[1].args.reset, false);
   await f.tickLens();

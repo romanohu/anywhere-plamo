@@ -288,11 +288,11 @@ def lens_checks():
 
     # Count real IPC, without replacing capture, OCR, or translation results.
     js("""window.lensCalls=[]; const nativeInvoke=window.__TAURI__.core.invoke;
-      window.__TAURI__.core.invoke=(command,args)=>{
+      window.__TAURI__.core={...window.__TAURI__.core,invoke:(command,args)=>{
         const entry={command,args};
         if(command==='capture_lens'||command==='translate') window.lensCalls.push(entry);
         return nativeInvoke(command,args).then(result=>{entry.kind=result?.kind;return result;});
-      };""")
+      }};""")
     events = WORK / 'lens-window-events.log'
     with events.open('w') as output:
         monitor = subprocess.Popen(['xev', '-id', native_window, '-event', 'structure'], env=env, stdout=output, stderr=output)
@@ -303,6 +303,7 @@ def lens_checks():
             assert 'Local translation' in text('lens-source'), text('lens-source')
             assert re.search('[ぁ-んァ-ン一-龯]', text('lens-translation'))
             translations = js("return lensCalls.filter(call=>call.command==='translate').length")
+            assert translations > 0, 'The native IPC observer is not attached'
             time.sleep(2.2)
             assert js("return lensCalls.filter(call=>call.command==='translate').length") == translations
             assert js("return lensCalls.filter(call=>call.command==='capture_lens').slice(-2).every(call=>call.kind==='unchanged')")

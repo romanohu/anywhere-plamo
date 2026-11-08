@@ -36,7 +36,7 @@ impl Watch {
                 Some(CaptureResult::Unchanged)
             }
             Some((previous, since))
-                if previous == hash && now.duration_since(since) >= Duration::from_millis(500) =>
+                if previous == hash && now.duration_since(since) >= Duration::from_millis(200) =>
             {
                 None
             }
@@ -325,19 +325,19 @@ mod tests {
             Some(CaptureResult::Changed)
         ));
         assert!(matches!(
-            watch.observe([1; 32], start + Duration::from_millis(400)),
+            watch.observe([1; 32], start + Duration::from_millis(199)),
             Some(CaptureResult::Changed)
         ));
         assert!(matches!(
-            watch.observe([2; 32], start + Duration::from_millis(450)),
+            watch.observe([2; 32], start + Duration::from_millis(200)),
             Some(CaptureResult::Changed)
         ));
         assert!(matches!(
-            watch.observe([2; 32], start + Duration::from_millis(650)),
+            watch.observe([2; 32], start + Duration::from_millis(399)),
             Some(CaptureResult::Changed)
         ));
         assert!(watch
-            .observe([2; 32], start + Duration::from_millis(950))
+            .observe([2; 32], start + Duration::from_millis(400))
             .is_none());
         watch.recognized = true;
         assert!(matches!(
