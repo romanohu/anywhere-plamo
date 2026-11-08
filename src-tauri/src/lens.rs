@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 #[cfg(any(target_os = "linux", test))]
 use std::{
     fs::File,
@@ -6,13 +6,49 @@ use std::{
 };
 use std::{
     path::{Path, PathBuf},
-    time::Duration,
+    sync::Mutex,
+    time::{Duration, Instant},
 };
 use tokio_util::sync::CancellationToken;
 
 #[cfg(target_os = "linux")]
 #[path = "lens_linux.rs"]
 mod linux;
+
+#[derive(Default)]
+pub struct Watch {
+    frame: Option<([u8; 32], Instant)>,
+    recognized: bool,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", content = "text", rename_all = "camelCase")]
+pub enum CaptureResult {
+    Changed,
+    Unchanged,
+    Text(String),
+}
+
+impl Watch {
+    fn observe(&mut self, hash: [u8; 32], now: Instant) -> Option<CaptureResult> {
+        match self.frame {
+            Some((previous, _)) if previous == hash && self.recognized => {
+                Some(CaptureResult::Unchanged)
+            }
+            Some((previous, since))
+                if previous == hash && now.duration_since(since) >= Duration::from_millis(500) =>
+            {
+                None
+            }
+            Some((previous, _)) if previous == hash => Some(CaptureResult::Changed),
+            _ => {
+                self.frame = Some((hash, now));
+                self.recognized = false;
+                Some(CaptureResult::Changed)
+            }
+        }
+    }
+}
 
 #[derive(Clone, Copy, Deserialize)]
 pub struct Region {
@@ -99,8 +135,12 @@ pub async fn capture(
     selection: bool,
     runtime: &Path,
     cancel: &CancellationToken,
-) -> Result<String, String> {
+    watch: Option<&Mutex<Watch>>,
+) -> Result<CaptureResult, String> {
     region.validate()?;
+    if watch.is_some() && selection {
+        return Err("Waylandでは「更新」で画面を選択してください。".into());
+    }
     if !ready(runtime) {
         return Err("文字認識エンジンが見つかりません。アプリを再インストールしてください。ソース版では npm run ocr:build を実行してください。".into());
     }
@@ -116,10 +156,42 @@ pub async fn capture(
             .map_err(|error| error.to_string())??;
     }
     #[cfg(target_os = "linux")]
-    linux::capture(&window, region, selection, &file.path, cancel).await?;
+    linux::capture(
+        &window,
+        region,
+        selection,
+        watch.is_some(),
+        &file.path,
+        cancel,
+    )
+    .await?;
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     return Err("このOSでは画面の読み取りに対応していません。".into());
-    recognize(runtime, &file.path, cancel).await
+    if cancel.is_cancelled() {
+        return Err("CANCELLED".into());
+    }
+    if let Some(watch) = watch {
+        use sha2::{Digest, Sha256};
+        let bytes = tokio::fs::read(&file.path)
+            .await
+            .map_err(|_| "読み取り画像を開けません。")?;
+        let hash = Sha256::digest(&bytes).into();
+        if let Some(result) = watch
+            .lock()
+            .map_err(|_| "画面の状態を取得できません。")?
+            .observe(hash, Instant::now())
+        {
+            return Ok(result);
+        }
+    }
+    let text = recognize(runtime, &file.path, cancel).await?;
+    if let Some(watch) = watch {
+        watch
+            .lock()
+            .map_err(|_| "画面の状態を取得できません。")?
+            .recognized = true;
+    }
+    Ok(CaptureResult::Text(text))
 }
 
 async fn recognize(
@@ -243,6 +315,41 @@ fn capture_macos(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn watch_waits_for_settled_frames_and_skips_recognized_images() {
+        let mut watch = Watch::default();
+        let start = Instant::now();
+        assert!(matches!(
+            watch.observe([1; 32], start),
+            Some(CaptureResult::Changed)
+        ));
+        assert!(matches!(
+            watch.observe([1; 32], start + Duration::from_millis(400)),
+            Some(CaptureResult::Changed)
+        ));
+        assert!(matches!(
+            watch.observe([2; 32], start + Duration::from_millis(450)),
+            Some(CaptureResult::Changed)
+        ));
+        assert!(matches!(
+            watch.observe([2; 32], start + Duration::from_millis(650)),
+            Some(CaptureResult::Changed)
+        ));
+        assert!(watch
+            .observe([2; 32], start + Duration::from_millis(950))
+            .is_none());
+        watch.recognized = true;
+        assert!(matches!(
+            watch.observe([2; 32], start + Duration::from_secs(10)),
+            Some(CaptureResult::Unchanged)
+        ));
+        assert!(matches!(
+            watch.observe([3; 32], start + Duration::from_secs(11)),
+            Some(CaptureResult::Changed)
+        ));
+        assert!(!watch.recognized);
+    }
 
     #[test]
     fn capture_requires_a_finite_bounded_region() {

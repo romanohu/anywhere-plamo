@@ -110,6 +110,7 @@ struct AppState {
     ocr_runtime: PathBuf,
     lens_open: AtomicBool,
     lens_bounds: Mutex<Option<LensBounds>>,
+    lens_watch: Mutex<lens::Watch>,
     engine: tokio::sync::Mutex<Option<engine::Engine>>,
     preparation: CancellationToken,
     operation: Mutex<Option<CancellationToken>>,
@@ -425,6 +426,7 @@ async fn open_lens(app: tauri::AppHandle) -> Result<(), String> {
         if let Some(main) = app.get_webview_window("main") {
             main.hide().map_err(|error| error.to_string())?;
         }
+        let _ = window.emit("window-shown", ());
         Ok(())
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -439,17 +441,26 @@ async fn capture_lens(
     window: tauri::WebviewWindow,
     state: tauri::State<'_, AppState>,
     region: lens::Region,
-) -> Result<String, String> {
+    automatic: Option<bool>,
+    reset: Option<bool>,
+) -> Result<lens::CaptureResult, String> {
     if window.label() != "lens" {
         return Err("OCRレンズから実行してください。".into());
     }
     let operation = state.begin("lens")?;
+    if reset.unwrap_or(false) {
+        *state
+            .lens_watch
+            .lock()
+            .map_err(|_| "画面の状態を取得できません。")? = lens::Watch::default();
+    }
     lens::capture(
         window,
         region,
         state.wayland,
         &state.ocr_runtime,
         &operation.token,
+        automatic.unwrap_or(false).then_some(&state.lens_watch),
     )
     .await
 }
@@ -706,6 +717,7 @@ fn main() {
                 ocr_runtime,
                 lens_open: AtomicBool::new(false),
                 lens_bounds: Mutex::new(None),
+                lens_watch: Mutex::new(lens::Watch::default()),
                 engine: tokio::sync::Mutex::new(None),
                 preparation: CancellationToken::new(),
                 operation: Mutex::new(None),
@@ -1027,6 +1039,7 @@ mod tests {
             ocr_runtime: PathBuf::new(),
             lens_open: AtomicBool::new(false),
             lens_bounds: Mutex::new(None),
+            lens_watch: Mutex::new(crate::lens::Watch::default()),
             engine: tokio::sync::Mutex::new(None),
             preparation: CancellationToken::new(),
             operation: Mutex::new(None),

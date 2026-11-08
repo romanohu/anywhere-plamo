@@ -21,6 +21,13 @@ async function fixture(t, options = {}) {
   console.on('jsdomError', error => errors.push(error));
   const dom = new JSDOM(html, { url: `http://localhost/${options.lens ? '?lens' : options.popup ? '?popup' : ''}`, runScripts: 'outside-only', virtualConsole: console });
   const { window } = dom;
+  if (options.lens && !options.autoLens) window.localStorage.setItem('lens-auto', 'false');
+  const lensTimers = new Map();
+  let lensTimerId = 0;
+  if (options.autoLens) {
+    window.setTimeout = callback => { const id = ++lensTimerId; lensTimers.set(id, callback); return id; };
+    window.clearTimeout = id => lensTimers.delete(id);
+  }
   if (options.preload !== undefined) window.localStorage.setItem('preload-model', String(options.preload));
   if (options.autoDirection !== undefined) window.localStorage.setItem('auto-direction', String(options.autoDirection));
   if (options.target) window.localStorage.setItem('target-language', options.target);
@@ -63,7 +70,7 @@ async function fixture(t, options = {}) {
           case 'capture_lens':
             if (options.captureError) throw options.captureError;
             if (options.holdCapture) return new Promise(resolve => { finishCapture = resolve; });
-            return options.ocrText ?? 'Text in an image.';
+            return options.captureResults?.shift() ?? { kind: 'text', text: options.ocrText ?? 'Text in an image.' };
           case 'set_shortcut_recording':
             if (args.recording && options.holdRecording) return new Promise(resolve => { finishRecording = resolve; });
             return;
@@ -136,7 +143,13 @@ async function fixture(t, options = {}) {
     finishCancellation() { finishCancellation(); },
     finishPending() { finishPending(); },
     finishRecording() { finishRecording(); },
-    finishCapture(text) { finishCapture(text); },
+    finishCapture(text) { finishCapture({ kind: 'text', text }); },
+    async tickLens() {
+      const pending = [...lensTimers.values()]; lensTimers.clear();
+      pending.forEach(callback => callback());
+      await new Promise(resolve => setTimeout(resolve, 5));
+    },
+    showWindow() { listeners.get('window-shown')?.({ payload: null }); },
     moveLens() { listeners.get('lens-changed')?.({ payload: null }); },
     shortcutPressed(shortcut) { listeners.get('shortcut-pressed')?.({ payload: shortcut }); },
     closeWindow() { listeners.get('window-hidden')?.({ payload: null }); },
@@ -1065,4 +1078,106 @@ test('missing OCR runtime is reported before capturing and can be retried after 
   f.state.ocrAvailable = true;
   f.click('lens-refresh');
   await until(() => f.byId('lens-status').textContent.startsWith('更新しました'));
+});
+
+test('automatic lens waits for stable frames, skips unchanged images and reuses identical OCR text', async t => {
+  const f = await fixture(t, { lens: true, autoLens: true, captureResults: [
+    { kind: 'changed' }, { kind: 'changed' }, { kind: 'text', text: 'First image' },
+    { kind: 'unchanged' }, { kind: 'changed' }, { kind: 'text', text: 'First image' },
+    { kind: 'changed' }, { kind: 'text', text: 'Second image' },
+  ] });
+  assert.equal(f.byId('lens-auto').getAttribute('aria-pressed'), 'true');
+  await f.tickLens();
+  await f.tickLens();
+  assert.equal(f.calls.filter(call => call.command === 'translate').length, 0);
+  await f.tickLens();
+  assert.equal(f.byId('lens-source').textContent, 'First image');
+  assert.equal(f.byId('lens-status').textContent, '自動更新中');
+  assert.equal(f.calls.find(call => call.command === 'capture_lens').args.automatic, true);
+  assert.equal(f.calls.filter(call => call.command === 'capture_lens')[1].args.reset, false);
+  await f.tickLens();
+  assert.equal(f.byId('lens-result').hidden, false);
+  await f.tickLens();
+  assert.equal(f.byId('lens-result').hidden, true);
+  await f.tickLens();
+  assert.equal(f.byId('lens-result').hidden, false);
+  assert.equal(f.calls.filter(call => call.command === 'translate').length, 1);
+  await f.tickLens();
+  await f.tickLens();
+  assert.equal(f.calls.filter(call => call.command === 'translate').length, 2);
+  assert.equal(f.byId('lens-source').textContent, 'Second image');
+});
+
+test('automatic lens stops on toggle/close, resumes on reopen and retranslates for a new target', async t => {
+  const f = await fixture(t, { lens: true, autoLens: true });
+  await f.tickLens();
+  f.click('lens-auto');
+  const count = f.calls.length;
+  await f.tickLens();
+  assert.equal(f.calls.length, count);
+  assert.equal(f.window.localStorage.getItem('lens-auto'), 'false');
+  f.click('lens-auto');
+  await f.tickLens();
+  f.byId('lens-target').value = 'en';
+  f.byId('lens-target').dispatchEvent(new f.window.Event('change'));
+  await f.tickLens();
+  assert.equal(f.calls.filter(call => call.command === 'translate').at(-1).args.target, 'en');
+  f.closeWindow();
+  const captures = f.calls.filter(call => call.command === 'capture_lens').length;
+  await f.tickLens();
+  assert.equal(f.calls.filter(call => call.command === 'capture_lens').length, captures);
+  f.showWindow();
+  await f.tickLens();
+  assert.equal(f.calls.filter(call => call.command === 'capture_lens').length, captures + 1);
+  assert.equal(f.calls.filter(call => call.command === 'capture_lens').at(-1).args.reset, true);
+});
+
+test('automatic lens serializes work and cancels stale results before resuming after movement', async t => {
+  const f = await fixture(t, { lens: true, autoLens: true, holdTranslation: true, holdCancellation: true });
+  await f.tickLens();
+  await f.tickLens();
+  assert.equal(f.calls.filter(call => call.command === 'capture_lens').length, 1);
+  f.moveLens();
+  f.send({ kind: 'token', text: 'obsolete' });
+  f.finish({ truncated: false });
+  await f.tickLens();
+  assert.equal(f.byId('lens-translation').textContent, '');
+  assert.equal(f.calls.filter(call => call.command === 'capture_lens').length, 1);
+  f.finishCancellation();
+  await new Promise(resolve => setTimeout(resolve, 5));
+  await f.tickLens();
+  assert.equal(f.calls.filter(call => call.command === 'capture_lens').length, 2);
+  f.click('lens-auto');
+  f.finish({ truncated: false });
+  f.finishCancellation();
+  await f.tickLens();
+  await f.tickLens();
+  assert.equal(f.calls.filter(call => call.command === 'capture_lens').length, 2);
+});
+
+test('automatic lens pauses on errors and never opens repeated Wayland selection dialogs', async t => {
+  const failed = await fixture(t, { lens: true, autoLens: true, captureError: '画面収録を許可してください。' });
+  await failed.tickLens();
+  await failed.tickLens();
+  assert.equal(failed.calls.filter(call => call.command === 'capture_lens').length, 1);
+  assert.equal(failed.byId('lens-auto').getAttribute('aria-pressed'), 'false');
+  assert.match(failed.byId('lens-status').textContent, /許可/);
+  const wayland = await fixture(t, { lens: true, autoLens: true, status: { lensUsesSelection: true, wayland: true } });
+  await wayland.tickLens();
+  assert.equal(wayland.byId('lens-auto').disabled, true);
+  assert.equal(wayland.calls.some(call => call.command === 'capture_lens'), false);
+  wayland.click('lens-refresh');
+  await until(() => wayland.calls.some(call => call.command === 'translate'));
+  assert.equal(wayland.calls.find(call => call.command === 'capture_lens').args.automatic, false);
+});
+
+test('automatic lens never treats a truncated translation as a complete cached result', async t => {
+  const f = await fixture(t, { lens: true, autoLens: true, truncated: true, captureResults: [
+    { kind: 'text', text: 'Long text' }, { kind: 'changed' }, { kind: 'text', text: 'Long text' },
+  ] });
+  await f.tickLens();
+  await f.tickLens();
+  await f.tickLens();
+  assert.equal(f.calls.filter(call => call.command === 'translate').length, 2);
+  assert.match(f.byId('lens-status').textContent, /上限/);
 });

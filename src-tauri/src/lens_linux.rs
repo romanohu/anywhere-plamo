@@ -32,6 +32,7 @@ pub async fn capture(
     window: &tauri::WebviewWindow,
     region: Region,
     selection: bool,
+    automatic: bool,
     path: &Path,
     cancel: &CancellationToken,
 ) -> Result<(), String> {
@@ -49,6 +50,30 @@ pub async fn capture(
     };
     if cancel.is_cancelled() {
         return Err("CANCELLED".into());
+    }
+    if automatic {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let id = match window
+            .window_handle()
+            .map_err(|error| error.to_string())?
+            .as_raw()
+        {
+            RawWindowHandle::Xlib(handle) => handle.window as u32,
+            RawWindowHandle::Xcb(handle) => handle.window.get(),
+            _ => return Err("この環境では「更新」で画面を選択してください。".into()),
+        };
+        let (x, y, width, height) = bounds.ok_or("Waylandでは手動更新を使ってください。")?;
+        let path = path.to_owned();
+        let token = cancel.clone();
+        return tauri::async_runtime::spawn_blocking(move || {
+            let image = capture_x11_underlying(id, x, y, width, height)?;
+            if token.is_cancelled() {
+                return Err("CANCELLED".into());
+            }
+            write_image(&path, image)
+        })
+        .await
+        .map_err(|error| error.to_string())?;
     }
     window.hide().map_err(|error| error.to_string())?;
     let restore = RestoreWindow { window };
@@ -142,6 +167,203 @@ fn capture_x11(x: i32, y: i32, width: u32, height: u32) -> Result<image::RgbImag
             channel(pixel, visual.blue_mask),
         ])
     }))
+}
+
+// Read the compositor's off-screen windows in stacking order, excluding the
+// lens and its WM frame. Unlike root screenshots this never hides the lens.
+fn capture_x11_underlying(
+    lens: u32,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+) -> Result<image::RgbImage, String> {
+    use x11rb::protocol::{
+        composite::ConnectionExt as _,
+        xproto::{AtomEnum, MapState, WindowClass},
+    };
+    let capture = || -> Result<image::RgbImage, Box<dyn std::error::Error>> {
+        let (connection, index) = x11rb::connect(None)?;
+        let screen = &connection.setup().roots[index];
+        let root = screen.root;
+        let geometry = connection.get_geometry(root)?.reply()?;
+        if x < 0
+            || y < 0
+            || x > i16::MAX as i32
+            || y > i16::MAX as i32
+            || width == 0
+            || height == 0
+            || width > 8192
+            || height > 8192
+            || x as u64 + width as u64 > geometry.width as u64
+            || y as u64 + height as u64 > geometry.height as u64
+        {
+            return Err("レンズ全体を画面内に置いてください。".into());
+        }
+        let compositor = connection
+            .intern_atom(false, format!("_NET_WM_CM_S{index}").as_bytes())?
+            .reply()?
+            .atom;
+        if connection.get_selection_owner(compositor)?.reply()?.owner == 0 {
+            return Err(
+                "自動更新にはX11のコンポジターが必要です。「更新」で手動翻訳できます。".into(),
+            );
+        }
+        let version = connection.composite_query_version(0, 4)?.reply()?;
+        if version.major_version == 0 && version.minor_version < 2 {
+            return Err("このX11環境では自動更新に対応していません。".into());
+        }
+        let mut excluded = lens;
+        loop {
+            let parent = connection.query_tree(excluded)?.reply()?.parent;
+            if parent == root {
+                break;
+            }
+            if parent == 0 {
+                return Err("レンズの位置を取得できません。".into());
+            }
+            excluded = parent;
+        }
+        let opacity_atom = connection
+            .intern_atom(false, b"_NET_WM_WINDOW_OPACITY")?
+            .reply()?
+            .atom;
+        let mut output = image::RgbImage::from_pixel(width, height, image::Rgb([255; 3]));
+        // Desktop environments normally provide a desktop window; bare X11 WMs
+        // may instead expose the wallpaper as a root pixmap.
+        let wallpaper_atom = connection
+            .intern_atom(false, b"_XROOTPMAP_ID")?
+            .reply()?
+            .atom;
+        let wallpaper = connection
+            .get_property(false, root, wallpaper_atom, AtomEnum::PIXMAP, 0, 1)?
+            .reply()?;
+        if let Some(pixmap) = wallpaper.value32().and_then(|mut values| values.next()) {
+            if let Ok((pixels, _)) = x11rb::image::Image::get(
+                &connection,
+                pixmap,
+                x as i16,
+                y as i16,
+                width as u16,
+                height as u16,
+            ) {
+                if let Some(visual) = screen
+                    .allowed_depths
+                    .iter()
+                    .flat_map(|depth| &depth.visuals)
+                    .find(|visual| {
+                        visual.visual_id == screen.root_visual
+                            && visual.red_mask != 0
+                            && visual.green_mask != 0
+                            && visual.blue_mask != 0
+                    })
+                {
+                    for (px, py, color) in output.enumerate_pixels_mut() {
+                        *color =
+                            image::Rgb(pixel_rgb(pixels.get_pixel(px as u16, py as u16), visual));
+                    }
+                }
+            }
+        }
+        for window in connection.query_tree(root)?.reply()?.children {
+            if window == excluded {
+                continue;
+            }
+            let Ok(attributes) = connection.get_window_attributes(window)?.reply() else {
+                continue;
+            };
+            if attributes.map_state != MapState::VIEWABLE
+                || attributes.class != WindowClass::INPUT_OUTPUT
+            {
+                continue;
+            }
+            let Ok(geometry) = connection.get_geometry(window)?.reply() else {
+                continue;
+            };
+            // Named pixmaps include the window border. Root child coordinates
+            // describe the outside corner, so no border offset is needed here.
+            let left = i32::from(geometry.x).max(x);
+            let top = i32::from(geometry.y).max(y);
+            let right = (i32::from(geometry.x)
+                + i32::from(geometry.width)
+                + 2 * i32::from(geometry.border_width))
+            .min(x + width as i32);
+            let bottom = (i32::from(geometry.y)
+                + i32::from(geometry.height)
+                + 2 * i32::from(geometry.border_width))
+            .min(y + height as i32);
+            if left >= right || top >= bottom {
+                continue;
+            }
+            let visual = screen
+                .allowed_depths
+                .iter()
+                .flat_map(|depth| &depth.visuals)
+                .find(|visual| {
+                    visual.visual_id == attributes.visual
+                        && visual.red_mask != 0
+                        && visual.green_mask != 0
+                        && visual.blue_mask != 0
+                })
+                .ok_or("この画面の色形式には対応していません。")?;
+            let pixmap = connection.generate_id()?;
+            connection
+                .composite_name_window_pixmap(window, pixmap)?
+                .check()?;
+            let pixels = x11rb::image::Image::get(
+                &connection,
+                pixmap,
+                (left - i32::from(geometry.x)) as i16,
+                (top - i32::from(geometry.y)) as i16,
+                (right - left) as u16,
+                (bottom - top) as u16,
+            );
+            // Release even when a concurrent resize makes the read fail.
+            connection.free_pixmap(pixmap)?.check()?;
+            let (pixels, _) = pixels?;
+            let opacity = connection
+                .get_property(false, window, opacity_atom, AtomEnum::CARDINAL, 0, 1)?
+                .reply()?
+                .value32()
+                .and_then(|mut values| values.next())
+                .unwrap_or(u32::MAX) as f64
+                / u32::MAX as f64;
+            let alpha_mask = if geometry.depth == 32 {
+                !(visual.red_mask | visual.green_mask | visual.blue_mask)
+            } else {
+                0
+            };
+            for py in top..bottom {
+                for px in left..right {
+                    let pixel = pixels.get_pixel((px - left) as u16, (py - top) as u16);
+                    let rgb = pixel_rgb(pixel, visual);
+                    let alpha = if alpha_mask == 0 {
+                        1.0
+                    } else {
+                        pixel_channel(pixel, alpha_mask) as f64 / 255.0
+                    };
+                    let destination = output.get_pixel_mut((px - x) as u32, (py - y) as u32);
+                    for (channel, value) in destination.0.iter_mut().zip(rgb) {
+                        // XRender colors are premultiplied by per-pixel alpha.
+                        *channel = (value as f64 * opacity
+                            + *channel as f64 * (1.0 - alpha * opacity))
+                            .clamp(0.0, 255.0) as u8;
+                    }
+                }
+            }
+        }
+        Ok(output)
+    };
+    capture().map_err(|error| format!("画面を自動取得できません: {error}"))
+}
+
+fn pixel_channel(pixel: u32, mask: u32) -> u8 {
+    (((pixel & mask) >> mask.trailing_zeros()) as u64 * 255
+        / (mask >> mask.trailing_zeros()) as u64) as u8
+}
+
+fn pixel_rgb(pixel: u32, visual: &x11rb::protocol::xproto::Visualtype) -> [u8; 3] {
+    [visual.red_mask, visual.green_mask, visual.blue_mask].map(|mask| pixel_channel(pixel, mask))
 }
 
 fn portal_screenshot(cancel: &CancellationToken) -> Result<PathBuf, String> {

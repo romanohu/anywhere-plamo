@@ -20,7 +20,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--app', type=Path, default=ROOT / 'src-tauri/target/debug/anywhere-plamo')
-parser.add_argument('--lens', action='store_true', help='Test the real manual OCR lens with the bundled OCR runtime and a prepared model')
+parser.add_argument('--lens', action='store_true', help='Test manual and automatic OCR with the bundled runtime and a prepared model')
 parser.add_argument('--work-dir', type=Path, default=ROOT / '.runtime-build/desktop-test')
 args = parser.parse_args()
 if sys.platform != 'linux':
@@ -171,6 +171,7 @@ def lens_checks():
         raise AssertionError('Image source did not become ready')
 
     bounds = source('english')
+    js("localStorage.setItem('lens-auto','false')")
     click('lens-button')
     select_window('lens')
     wait("!document.getElementById('lens-refresh').disabled")
@@ -284,6 +285,65 @@ def lens_checks():
     updated()
     check('Escape returns to the main window and reopening the lens remains usable')
     desktop_image('lens-final.png')
+
+    # Count real IPC, without replacing capture, OCR, or translation results.
+    js("""window.lensCalls=[]; const nativeInvoke=window.__TAURI__.core.invoke;
+      window.__TAURI__.core.invoke=(command,args)=>{
+        const entry={command,args};
+        if(command==='capture_lens'||command==='translate') window.lensCalls.push(entry);
+        return nativeInvoke(command,args).then(result=>{entry.kind=result?.kind;return result;});
+      };""")
+    events = WORK / 'lens-window-events.log'
+    with events.open('w') as output:
+        monitor = subprocess.Popen(['xev', '-id', native_window, '-event', 'structure'], env=env, stdout=output, stderr=output)
+        try:
+            source('english')
+            click('lens-auto')
+            wait("document.getElementById('lens-status').textContent === '自動更新中'", 30)
+            assert 'Local translation' in text('lens-source'), text('lens-source')
+            assert re.search('[ぁ-んァ-ン一-龯]', text('lens-translation'))
+            translations = js("return lensCalls.filter(call=>call.command==='translate').length")
+            time.sleep(2.2)
+            assert js("return lensCalls.filter(call=>call.command==='translate').length") == translations
+            assert js("return lensCalls.filter(call=>call.command==='capture_lens').slice(-2).every(call=>call.kind==='unchanged')")
+            check('automatic mode translates without refresh and leaves unchanged text alone')
+
+            started = time.monotonic()
+            source('japanese')
+            wait("document.getElementById('lens-source').textContent.includes('画像') && document.getElementById('lens-status').textContent === '自動更新中'", 30)
+            check('automatic mode follows a changed background image while its own overlay remains visible', {'seconds': round(time.monotonic() - started, 3), 'ocr': text('lens-source'), 'translation': text('lens-translation')})
+            target('en')
+            wait("document.getElementById('lens-status').textContent === '自動更新中'", 30)
+            assert re.search('[A-Za-z]', text('lens-translation'))
+            time.sleep(.15)  # Allow the native compositor to paint the completed DOM.
+            desktop_image('lens-automatic.png')
+
+            source('blank')
+            wait("document.getElementById('lens-status').textContent.includes('文字が見つかりません')", 30)
+            assert js("return document.getElementById('lens-result').hidden")
+            source('english')
+            wait("document.getElementById('lens-source').textContent.includes('Local translation') && document.getElementById('lens-status').textContent === '自動更新中'", 30)
+            check('automatic mode clears empty regions and recovers when text returns')
+            assert window_visible('lens')
+        finally:
+            monitor.terminate()
+            monitor.wait(timeout=5)
+    assert 'UnmapNotify' not in events.read_text(), events.read_text()
+    check('automatic captures never unmap or flash the lens window')
+
+    click('lens-auto')
+    captures = js("return lensCalls.filter(call=>call.command==='capture_lens').length")
+    source('japanese')
+    time.sleep(1.5)
+    assert js("return lensCalls.filter(call=>call.command==='capture_lens').length") == captures
+    click('lens-auto')
+    wait("document.getElementById('lens-source').textContent.includes('画像') && document.getElementById('lens-status').textContent === '自動更新中'", 30)
+    invoke('hide_window')
+    select_window('main')
+    click('lens-button')
+    select_window('lens')
+    wait("document.getElementById('lens-source').textContent.includes('画像') && document.getElementById('lens-status').textContent === '自動更新中'", 30)
+    check('automatic mode stops and resumes, including after closing and reopening the lens')
     print('ALL LENS DESKTOP CHECKS PASSED', flush=True)
 
 env = os.environ.copy()
