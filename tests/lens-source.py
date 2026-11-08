@@ -25,6 +25,21 @@ marker = Gtk.Image()
 fixed.put(marker, 0, 0)
 window.add(fixed)
 window.connect("destroy", Gtk.main_quit)
+window.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.SCROLL_MASK)
+inputs = {'clicks': 0, 'scrolls': 0}
+
+
+def record_input(_window, _event, kind):
+    inputs[kind] += 1
+    temporary = state_file.with_suffix('.input.tmp')
+    temporary.write_text(json.dumps(inputs))
+    temporary.replace(state_file.with_suffix('.input.json'))
+    return False
+
+
+window.connect('button-press-event', record_input, 'clicks')
+window.connect('scroll-event', record_input, 'scrolls')
+state_file.with_suffix('.input.json').write_text(json.dumps(inputs))
 mode = None
 frame = 0
 

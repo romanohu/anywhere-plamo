@@ -23,6 +23,7 @@ const autoDirection = element<HTMLInputElement>('auto-direction');
 const shortcutPopup = element<HTMLInputElement>('shortcut-popup');
 const statusText = element<HTMLSpanElement>('translation-status');
 const message = element<HTMLDivElement>('message');
+const shortcutAction = element<HTMLSelectElement>('shortcut-action');
 const shortcutRecord = element<HTMLButtonElement>('shortcut-record');
 const shortcutSave = element<HTMLButtonElement>('shortcut-save');
 const shortcutReset = element<HTMLButtonElement>('shortcut-reset');
@@ -30,7 +31,7 @@ const shortcutMessage = element('shortcut-message');
 const mac = /Mac/.test(navigator.platform);
 const popup = new URLSearchParams(location.search).has('popup');
 const lens = new URLSearchParams(location.search).has('lens');
-let status: AppStatus = { modelReady: false, runtimeAvailable: false, shortcutAvailable: false, shortcut: '', defaultShortcut: '', shortcutSupported: false, shortcutPopup: false, wayland: false, resident: false, lensSupported: false, ocrAvailable: false, lensUsesSelection: false };
+let status: AppStatus = { modelReady: false, runtimeAvailable: false, shortcutAvailable: false, shortcut: '', defaultShortcut: '', shortcutSupported: false, shortcutPopup: false, wayland: false, resident: false, lensSupported: false, ocrAvailable: false, lensUsesSelection: false, lensShortcut: '', defaultLensShortcut: '', lensShortcutAvailable: false, lensPassthrough: false };
 let shortcutDraft = '';
 let recordingShortcut = false;
 let startingShortcut = false;
@@ -120,13 +121,24 @@ async function refreshStatus(): Promise<void> {
   downloadButton.disabled = !status.runtimeAvailable;
   element('download-message').textContent = !status.runtimeAvailable
     ? '翻訳エンジンが見つかりません。アプリを再インストールしてください。' : '';
-  if (!recordingShortcut && !savingShortcut) shortcutDraft = status.shortcut;
+  if (!recordingShortcut && !savingShortcut) shortcutDraft = currentShortcut().binding;
   renderShortcut();
   updateControls();
   prepareEngine();
 }
 
+function currentShortcut(): { binding: string; default: string; available: boolean } {
+  return shortcutAction.value === 'lens'
+    ? { binding: status.lensShortcut, default: status.defaultLensShortcut, available: status.lensShortcutAvailable }
+    : { binding: status.shortcut, default: status.defaultShortcut, available: status.shortcutAvailable };
+}
+
 function renderShortcut(): void {
+  const current = currentShortcut();
+  const forLens = shortcutAction.value === 'lens';
+  shortcutAction.disabled = savingShortcut || startingShortcut;
+  element('selection-shortcut-options').hidden = forLens;
+  shortcutRecord.setAttribute('aria-label', forLens ? 'レンズのショートカットを変更' : '翻訳ショートカットを変更');
   shortcutPopup.disabled = !isDesktop || savingPopup;
   if (!savingPopup) shortcutPopup.checked = status.shortcutPopup;
   shortcutRecord.disabled = !status.shortcutSupported || savingShortcut;
@@ -138,21 +150,21 @@ function renderShortcut(): void {
       return key.replace(/^Key([A-Z])$/, '$1').replace(/^Digit([0-9])$/, '$1');
     }).join(' + ');
   shortcutSave.hidden = shortcutReset.hidden = !status.shortcutSupported;
-  shortcutSave.disabled = savingShortcut || recordingShortcut || (shortcutDraft === status.shortcut && status.shortcutAvailable);
-  shortcutReset.disabled = savingShortcut || recordingShortcut || (shortcutDraft === status.defaultShortcut && status.shortcut === status.defaultShortcut && status.shortcutAvailable);
+  shortcutSave.disabled = savingShortcut || recordingShortcut || (shortcutDraft === current.binding && current.available);
+  shortcutReset.disabled = savingShortcut || recordingShortcut || (shortcutDraft === current.default && current.binding === current.default && current.available);
   element('shortcut-description').textContent = status.shortcutSupported
-    ? '他のアプリで選択した文章を翻訳します。'
-    : isDesktop ? 'OSのキーボード設定で、次のコマンドにキーを割り当ててください。' : 'デスクトップアプリで設定できます。';
-  element('shortcut-note').textContent = !status.shortcutSupported && isDesktop ? 'anywhere-plamo --translate-selection'
+    ? forLens ? 'レンズ越しに背後のアプリを操作できます。同じキーで解除します。' : '他のアプリで選択した文章を翻訳します。'
+    : forLens ? 'この環境ではクリック透過を利用できません。' : isDesktop ? 'OSのキーボード設定で、次のコマンドにキーを割り当ててください。' : 'デスクトップアプリで設定できます。';
+  element('shortcut-note').textContent = forLens ? '' : !status.shortcutSupported && isDesktop ? 'anywhere-plamo --translate-selection'
     : mac ? 'macOSのアクセシビリティ許可が必要です。' : '';
   element('shortcut-help').hidden = !status.shortcutSupported;
 }
 
 function openSettings(): void {
   loadPreferences();
-  shortcutDraft = status.shortcut;
+  shortcutDraft = currentShortcut().binding;
   stopShortcutRecording();
-  shortcutMessage.textContent = status.shortcutSupported && !status.shortcutAvailable ? 'このキーを登録できませんでした。別のキーを設定してください。' : '';
+  shortcutMessage.textContent = status.shortcutSupported && !currentShortcut().available ? 'このキーを登録できませんでした。別のキーを設定してください。' : '';
   renderShortcut();
   dialog.showModal();
   if (isDesktop) void refreshStatus().catch(showError);
@@ -173,8 +185,8 @@ async function saveShortcut(value = shortcutDraft): Promise<void> {
   shortcutMessage.textContent = '';
   renderShortcut();
   try {
-    status = await invoke<AppStatus>('set_shortcut', { shortcut: value });
-    shortcutDraft = status.shortcut;
+    status = await invoke<AppStatus>('set_shortcut', { shortcut: value, lens: shortcutAction.value === 'lens' });
+    shortcutDraft = currentShortcut().binding;
     shortcutMessage.textContent = '保存しました';
   } catch (error) {
     shortcutMessage.textContent = String(error);
@@ -415,7 +427,13 @@ element('setup-open').addEventListener('click', openSettings);
 element('settings-close').addEventListener('click', () => dialog.close());
 dialog.addEventListener('close', () => {
   stopShortcutRecording();
-  shortcutDraft = status.shortcut;
+  shortcutDraft = currentShortcut().binding;
+  renderShortcut();
+});
+shortcutAction.addEventListener('change', () => {
+  stopShortcutRecording();
+  shortcutDraft = currentShortcut().binding;
+  shortcutMessage.textContent = status.shortcutSupported && !currentShortcut().available ? 'このキーを登録できませんでした。別のキーを設定してください。' : '';
   renderShortcut();
 });
 shortcutRecord.addEventListener('click', async () => {
@@ -450,7 +468,7 @@ dialog.addEventListener('focusin', event => {
   renderShortcut();
 });
 shortcutSave.addEventListener('click', () => { void saveShortcut(); });
-shortcutReset.addEventListener('click', () => { void saveShortcut(status.defaultShortcut); });
+shortcutReset.addEventListener('click', () => { void saveShortcut(currentShortcut().default); });
 shortcutPopup.addEventListener('change', async () => {
   savingPopup = true;
   shortcutMessage.textContent = '';

@@ -110,6 +110,7 @@ struct AppState {
     binary: PathBuf,
     ocr_runtime: PathBuf,
     lens_open: AtomicBool,
+    lens_passthrough: AtomicBool,
     lens_bounds: Mutex<Option<LensBounds>>,
     lens_watch: Mutex<lens::Watch>,
     engine: tokio::sync::Mutex<Option<engine::Engine>>,
@@ -120,6 +121,7 @@ struct AppState {
     download: tokio::sync::Mutex<()>,
     pending: Mutex<PendingRequests>,
     shortcut: Mutex<shortcut::State>,
+    lens_shortcut: Mutex<shortcut::State>,
     shortcut_recording: Mutex<Option<String>>,
     shortcut_popup: AtomicBool,
     settings: PathBuf,
@@ -240,11 +242,19 @@ struct AppStatus {
     lens_supported: bool,
     ocr_available: bool,
     lens_uses_selection: bool,
+    lens_shortcut: String,
+    default_lens_shortcut: String,
+    lens_shortcut_available: bool,
+    lens_passthrough: bool,
 }
 
 #[tauri::command]
 fn get_status(state: tauri::State<'_, AppState>) -> AppStatus {
     let shortcut = state.shortcut.lock().expect("shortcut state poisoned");
+    let lens_shortcut = state
+        .lens_shortcut
+        .lock()
+        .expect("lens shortcut state poisoned");
     AppStatus {
         model_ready: model::ready(&state.directory),
         runtime_available: state.binary.is_file(),
@@ -258,6 +268,10 @@ fn get_status(state: tauri::State<'_, AppState>) -> AppStatus {
         lens_supported: cfg!(any(target_os = "macos", target_os = "linux")),
         ocr_available: lens::ready(&state.ocr_runtime),
         lens_uses_selection: state.wayland,
+        lens_shortcut: shortcut::label(lens_shortcut.binding),
+        default_lens_shortcut: shortcut::label(shortcut::default_lens()),
+        lens_shortcut_available: lens_shortcut.available,
+        lens_passthrough: state.lens_passthrough.load(Ordering::Relaxed),
     }
 }
 
@@ -266,19 +280,46 @@ fn set_shortcut(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     shortcut: String,
+    lens: Option<bool>,
 ) -> Result<AppStatus, String> {
     let next = shortcut::parse(&shortcut)?;
+    // A failed re-registration must not strand an input-transparent window.
+    if lens.unwrap_or(false) && state.lens_passthrough.load(Ordering::Relaxed) {
+        apply_lens_passthrough(&app, false)?;
+    }
     {
-        let mut current = state
+        // Keep both bindings locked in the same order when checking conflicts/saving.
+        let mut selection = state
             .shortcut
             .lock()
             .map_err(|_| "ショートカットの状態を取得できません。")?;
+        let mut lens_shortcut = state
+            .lens_shortcut
+            .lock()
+            .map_err(|_| "ショートカットの状態を取得できません。")?;
+        let (current, other) = if lens.unwrap_or(false) {
+            (&mut *lens_shortcut, &*selection)
+        } else {
+            (&mut *selection, &*lens_shortcut)
+        };
         if !current.supported {
             return Err(shortcut::UNAVAILABLE.into());
         }
+        if next == other.binding {
+            return Err("もう一方のショートカットと異なるキーを選んでください。".into());
+        }
         let pending = shortcut::PendingSave::new(
             &state.settings,
-            next,
+            if lens.unwrap_or(false) {
+                other.binding
+            } else {
+                next
+            },
+            if lens.unwrap_or(false) {
+                next
+            } else {
+                other.binding
+            },
             state.shortcut_popup.load(Ordering::Relaxed),
         )?;
         current.change(
@@ -294,6 +335,11 @@ fn set_shortcut(
             || pending.commit(),
         )?;
     }
+    if lens.unwrap_or(false) {
+        if let Some(window) = app.get_webview_window("lens") {
+            let _ = window.emit("lens-shortcut-changed", ());
+        }
+    }
     Ok(get_status(state))
 }
 
@@ -308,7 +354,17 @@ fn set_shortcut_popup(
             .shortcut
             .lock()
             .map_err(|_| "ショートカットの状態を取得できません。")?;
-        shortcut::PendingSave::new(&state.settings, shortcut.binding, enabled)?.commit()?;
+        let lens_shortcut = state
+            .lens_shortcut
+            .lock()
+            .map_err(|_| "ショートカットの状態を取得できません。")?;
+        shortcut::PendingSave::new(
+            &state.settings,
+            shortcut.binding,
+            lens_shortcut.binding,
+            enabled,
+        )?
+        .commit()?;
         state.shortcut_popup.store(enabled, Ordering::Relaxed);
     }
     Ok(get_status(state))
@@ -394,6 +450,39 @@ fn cancel_operation(window: tauri::WebviewWindow, state: tauri::State<'_, AppSta
     state.cancel(window.label());
 }
 
+fn apply_lens_passthrough(app: &tauri::AppHandle, enabled: bool) -> Result<bool, String> {
+    let state = app.state::<AppState>();
+    if enabled
+        && (!state.lens_open.load(Ordering::Relaxed)
+            || !state.lens_shortcut.lock().is_ok_and(|key| key.available))
+    {
+        return Err(
+            "クリック透過には、設定で有効なレンズ用ショートカットを登録してください。".into(),
+        );
+    }
+    let window = app
+        .get_webview_window("lens")
+        .ok_or("レンズを開いてください。")?;
+    window
+        .set_ignore_cursor_events(enabled)
+        .map_err(|error| error.to_string())?;
+    if let Err(error) = window.set_focusable(!enabled) {
+        let _ = window.set_ignore_cursor_events(state.lens_passthrough.load(Ordering::Relaxed));
+        return Err(error.to_string());
+    }
+    state.lens_passthrough.store(enabled, Ordering::Relaxed);
+    let _ = window.emit("lens-passthrough-changed", enabled);
+    Ok(enabled)
+}
+
+#[tauri::command]
+fn set_lens_passthrough(window: tauri::WebviewWindow, enabled: bool) -> Result<bool, String> {
+    if window.label() != "lens" {
+        return Err("OCRレンズから実行してください。".into());
+    }
+    apply_lens_passthrough(window.app_handle(), enabled)
+}
+
 #[tauri::command]
 async fn open_lens(app: tauri::AppHandle) -> Result<(), String> {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -418,6 +507,7 @@ async fn open_lens(app: tauri::AppHandle) -> Result<(), String> {
         let window = app
             .get_webview_window("lens")
             .ok_or("レンズを開けませんでした。")?;
+        apply_lens_passthrough(&app, false)?;
         window.show().map_err(|error| error.to_string())?;
         app.state::<AppState>()
             .lens_open
@@ -623,6 +713,7 @@ fn hide_window(
         state.close_popup();
     }
     if window.label() == "lens" {
+        apply_lens_passthrough(window.app_handle(), false)?;
         state.lens_open.store(false, Ordering::Relaxed);
         state.cancel("lens");
     }
@@ -682,6 +773,7 @@ fn main() {
             translate,
             cancel_operation,
             open_lens,
+            set_lens_passthrough,
             capture_lens,
             read_clipboard,
             write_clipboard,
@@ -721,6 +813,7 @@ fn main() {
                 binary,
                 ocr_runtime,
                 lens_open: AtomicBool::new(false),
+                lens_passthrough: AtomicBool::new(false),
                 lens_bounds: Mutex::new(None),
                 lens_watch: Mutex::new(lens::Watch::default()),
                 engine: tokio::sync::Mutex::new(None),
@@ -732,6 +825,11 @@ fn main() {
                 pending: Mutex::new(PendingRequests::default()),
                 shortcut: Mutex::new(shortcut::State {
                     binding: shortcut::load(&settings),
+                    available: false,
+                    supported: false,
+                }),
+                lens_shortcut: Mutex::new(shortcut::State {
+                    binding: shortcut::load_lens(&settings),
                     available: false,
                     supported: false,
                 }),
@@ -781,7 +879,11 @@ fn main() {
                                             state.shortcut.try_lock().is_ok_and(|current| {
                                                 current.available && current.binding == key
                                             });
-                                        if active {
+                                        let lens_active =
+                                            state.lens_shortcut.try_lock().is_ok_and(|current| {
+                                                current.available && current.binding == key
+                                            });
+                                        if active || lens_active {
                                             let recording = state
                                                 .shortcut_recording
                                                 .lock()
@@ -793,6 +895,23 @@ fn main() {
                                                     "shortcut-pressed",
                                                     shortcut::label(key),
                                                 );
+                                            } else if lens_active {
+                                                if state.lens_open.load(Ordering::Relaxed) {
+                                                    let enabled = !state
+                                                        .lens_passthrough
+                                                        .load(Ordering::Relaxed);
+                                                    match apply_lens_passthrough(&handle, enabled) {
+                                                        Ok(false) => show_window(&handle, "lens"),
+                                                        Ok(true) => {}
+                                                        Err(error) => {
+                                                            let _ = handle.emit_to(
+                                                                "lens",
+                                                                "lens-error",
+                                                                error,
+                                                            );
+                                                        }
+                                                    }
+                                                }
                                             } else if !["main", "popup", "lens"].iter().any(
                                                 |label| {
                                                     handle.get_webview_window(label).is_some_and(
@@ -815,6 +934,17 @@ fn main() {
                 shortcut.supported = installed;
                 shortcut.available =
                     installed && app.global_shortcut().register(shortcut.binding).is_ok();
+                let mut lens_shortcut = state
+                    .lens_shortcut
+                    .lock()
+                    .expect("lens shortcut state poisoned");
+                lens_shortcut.supported = installed;
+                lens_shortcut.available = installed
+                    && lens_shortcut.binding != shortcut.binding
+                    && app
+                        .global_shortcut()
+                        .register(lens_shortcut.binding)
+                        .is_ok();
             }
             handle_launch(app.handle(), &std::env::args().collect::<Vec<_>>());
             Ok(())
@@ -829,6 +959,7 @@ fn main() {
                     state.close_popup();
                 }
                 if window.label() == "lens" {
+                    let _ = apply_lens_passthrough(window.app_handle(), false);
                     state.lens_open.store(false, Ordering::Relaxed);
                     state.cancel("lens");
                 }
@@ -1043,6 +1174,7 @@ mod tests {
             binary: PathBuf::new(),
             ocr_runtime: PathBuf::new(),
             lens_open: AtomicBool::new(false),
+            lens_passthrough: AtomicBool::new(false),
             lens_bounds: Mutex::new(None),
             lens_watch: Mutex::new(crate::lens::Watch::default()),
             engine: tokio::sync::Mutex::new(None),
@@ -1054,6 +1186,11 @@ mod tests {
             pending: Mutex::new(PendingRequests::default()),
             shortcut: Mutex::new(super::shortcut::State {
                 binding: super::shortcut::default(),
+                available: false,
+                supported: false,
+            }),
+            lens_shortcut: Mutex::new(super::shortcut::State {
+                binding: super::shortcut::default_lens(),
                 available: false,
                 supported: false,
             }),

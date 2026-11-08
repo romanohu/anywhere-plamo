@@ -72,26 +72,30 @@
         <button class="text-button" id="lens-auto" aria-pressed="true" disabled>自動</button>
         <button class="text-button" id="lens-original" aria-pressed="false" disabled>原文</button>
         <button class="button small" id="lens-refresh" title="⌘+Enter" disabled>更新</button>
+        <button class="text-button" id="lens-passthrough" aria-label="クリック透過" aria-pressed="false" disabled>透過</button>
         <button class="icon-button" id="lens-close" aria-label="レンズを閉じる" title="Esc"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
       </div>
       <div class="lens-region" id="lens-region">
         <div class="lens-result" id="lens-result" hidden><div id="lens-translation" dir="auto"></div><p id="lens-source" dir="auto" hidden></p></div>
       </div>
-      <div class="lens-footer"><span id="lens-status" role="status" aria-live="polite">読み取りたい範囲に枠を合わせて「更新」</span></div>
+      <div class="lens-footer"><span id="lens-status" role="status" aria-live="polite">読み取りたい範囲に枠を合わせて「更新」</span><span id="lens-passthrough-hint" role="status" hidden></span></div>
     </section>
 
     <dialog id="settings-dialog" aria-labelledby="settings-title">
       <div class="dialog-header"><h2 id="settings-title">設定</h2><button class="icon-button" id="settings-close" aria-label="閉じる"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
       <section class="settings-section">
         <h3>ショートカット</h3>
+        <select id="shortcut-action" aria-label="ショートカットの機能"><option value="selection">選択した文章を翻訳</option><option value="lens">レンズのクリック透過</option></select>
         <p class="setting-description" id="shortcut-description">他のアプリで選択した文章を翻訳します。</p>
         <button class="shortcut-box" id="shortcut-record" aria-label="翻訳ショートカットを変更" aria-describedby="shortcut-help shortcut-message"><span id="shortcut-display">Ctrl + Shift + J</span></button>
         <div class="shortcut-actions"><span class="setting-description" id="shortcut-help">押してキーを入力</span><button class="text-button" id="shortcut-reset">既定に戻す</button><button class="button small" id="shortcut-save" disabled>保存</button></div>
         <p class="setting-description" id="shortcut-message" role="status" aria-live="polite"></p>
         <p class="setting-description" id="shortcut-note"></p>
-        <label class="setting-toggle"><input type="checkbox" id="auto-direction" />選択した文章の日英を自動切替</label>
-        <label class="setting-toggle"><input type="checkbox" id="shortcut-popup" aria-describedby="shortcut-popup-description" />別ウィンドウで翻訳</label>
-        <p class="setting-description" id="shortcut-popup-description">翻訳後、外側をクリックすると閉じます。</p>
+        <div id="selection-shortcut-options">
+          <label class="setting-toggle"><input type="checkbox" id="auto-direction" />選択した文章の日英を自動切替</label>
+          <label class="setting-toggle"><input type="checkbox" id="shortcut-popup" aria-describedby="shortcut-popup-description" />別ウィンドウで翻訳</label>
+          <p class="setting-description" id="shortcut-popup-description">翻訳後、外側をクリックすると閉じます。</p>
+        </div>
       </section>
       <section class="settings-section">
         <h3>翻訳モデル</h3>

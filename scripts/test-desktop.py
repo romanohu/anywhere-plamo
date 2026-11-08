@@ -233,6 +233,38 @@ def lens_checks():
     assert not js("return document.getElementById('lens-result').hidden")
     check('clicking text or empty lens space toggles the overlay, while dragging still selects text')
 
+    assert invoke('get_status')['lensShortcutAvailable']
+    native_key = invoke('get_status')['lensShortcut'].replace('Ctrl', 'ctrl').replace('Shift', 'shift').replace('Alt', 'alt').replace('Key', '')
+    inputs = state.with_suffix('.input.json')
+    before = json.loads(inputs.read_text())
+    click('lens-passthrough')
+    wait("document.getElementById('lens-passthrough').getAttribute('aria-pressed') === 'true'")
+    assert invoke('get_status')['lensPassthrough']
+    subprocess.run(['xdotool', 'mousemove', '--window', native_window, str(x), str(y), 'click', '1', 'click', '5'], env=env, check=True)
+    for _ in range(100):
+        received = json.loads(inputs.read_text())
+        if received['clicks'] > before['clicks'] and received['scrolls'] > before['scrolls']:
+            break
+        time.sleep(.02)
+    assert received['clicks'] > before['clicks'] and received['scrolls'] > before['scrolls'], received
+    assert not js("return document.getElementById('lens-result').hidden")
+    desktop_image('lens-passthrough.png')
+    subprocess.run(['xdotool', 'key', '--clearmodifiers', native_key], env=env, check=True)
+    wait("document.getElementById('lens-passthrough').getAttribute('aria-pressed') === 'false'")
+    assert not invoke('get_status')['lensPassthrough']
+    subprocess.run(['xdotool', 'mousemove', '--window', native_window, '650', '320', 'click', '1'], env=env, check=True)
+    assert js("return document.getElementById('lens-result').hidden")
+    assert json.loads(inputs.read_text()) == received
+    click('lens-original')
+    check('native passthrough forwards clicks and scrolls, and the global shortcut restores lens interaction', received)
+
+    subprocess.run(['xdotool', 'key', '--clearmodifiers', native_key], env=env, check=True)
+    wait("document.getElementById('lens-passthrough').getAttribute('aria-pressed') === 'true'")
+    invoke('open_lens')
+    wait("document.getElementById('lens-passthrough').getAttribute('aria-pressed') === 'false'")
+    assert not invoke('get_status')['lensPassthrough']
+    check('reopening the lens always restores interactive mode')
+
     source('japanese')
     target('ja')
     click('lens-refresh')
@@ -337,6 +369,8 @@ def lens_checks():
             assert js("return lensCalls.filter(call=>call.command==='capture_lens').slice(-2).every(call=>call.kind==='unchanged')")
             check('automatic mode translates without refresh and leaves unchanged text alone')
 
+            subprocess.run(['xdotool', 'key', '--clearmodifiers', native_key], env=env, check=True)
+            wait("document.getElementById('lens-passthrough').getAttribute('aria-pressed') === 'true'")
             started = time.monotonic()
             source('japanese')
             target('en')
@@ -345,6 +379,11 @@ def lens_checks():
             assert re.search('[A-Za-z]', text('lens-translation'))
             time.sleep(.15)  # Allow the native compositor to paint the completed DOM.
             desktop_image('lens-automatic.png')
+            assert invoke('get_status')['lensPassthrough']
+            assert not js("return document.getElementById('lens-passthrough-hint').hidden")
+            subprocess.run(['xdotool', 'key', '--clearmodifiers', native_key], env=env, check=True)
+            wait("document.getElementById('lens-passthrough').getAttribute('aria-pressed') === 'false'")
+            check('OCR and translation continue while the lens passes input through')
 
             source('blank')
             wait("document.getElementById('lens-status').textContent.includes('文字が見つかりません')", 30)
@@ -612,6 +651,7 @@ try:
     check('copy writes the actual OS clipboard')
     screenshot('translation-ja.png')
     if status['shortcutSupported']:
+        invoke('set_shortcut', {'shortcut': status['defaultLensShortcut'], 'lens': True})
         click('settings-button')
         if status['shortcut'] != status['defaultShortcut']:
             click('shortcut-reset')
@@ -619,14 +659,14 @@ try:
         subprocess.run(['xdotool', 'windowfocus', '--sync', window_id()], env=env, check=True)
         click('shortcut-record')
         wait("document.getElementById('shortcut-record').getAttribute('aria-pressed') === 'true'")
-        subprocess.run(['xdotool', 'key', 'ctrl+shift+j'], env=env, check=True)
+        subprocess.run(['xdotool', 'key', '--clearmodifiers', 'ctrl+shift+j'], env=env, check=True)
         wait("document.getElementById('shortcut-record').getAttribute('aria-pressed') === 'false'")
         assert text('shortcut-display') == 'Ctrl + Shift + J'
         assert js("return document.getElementById('source').value") == 'Hello, world.'
         check('the currently registered shortcut can be recorded without triggering translation')
         click('shortcut-record')
         wait("document.getElementById('shortcut-record').getAttribute('aria-pressed') === 'true'")
-        subprocess.run(['xdotool', 'key', 'ctrl+alt+t'], env=env, check=True)
+        subprocess.run(['xdotool', 'key', '--clearmodifiers', 'ctrl+alt+t'], env=env, check=True)
         wait("document.getElementById('shortcut-display').textContent === 'Ctrl + Alt + T'")
         click('shortcut-save')
         wait("document.getElementById('shortcut-message').textContent === '保存しました'")
@@ -636,6 +676,26 @@ try:
         assert json.loads(settings_path.read_text())['shortcut'] == status['shortcut']
         check('record and save a custom global shortcut through the UI', status['shortcut'])
         screenshot('settings-shortcut.png')
+
+        js("const action=document.getElementById('shortcut-action');action.value='lens';action.dispatchEvent(new Event('change'))")
+        click('shortcut-record')
+        wait("document.getElementById('shortcut-record').getAttribute('aria-pressed') === 'true'")
+        subprocess.run(['xdotool', 'key', '--clearmodifiers', 'ctrl+alt+l'], env=env, check=True)
+        wait("document.getElementById('shortcut-display').textContent === 'Ctrl + Alt + L'")
+        click('shortcut-save')
+        wait("document.getElementById('shortcut-message').textContent === '保存しました'")
+        status = invoke('get_status')
+        assert status['lensShortcut'] == 'Ctrl+Alt+KeyL' and status['lensShortcutAvailable'], status
+        assert json.loads(settings_path.read_text())['lensShortcut'] == 'Ctrl+Alt+KeyL'
+        try:
+            invoke('set_shortcut', {'shortcut': status['shortcut'], 'lens': True})
+            raise RuntimeError('Duplicate shortcut was accepted')
+        except RuntimeError as error:
+            assert '異なるキー' in str(error)
+        assert invoke('get_status')['lensShortcut'] == 'Ctrl+Alt+KeyL'
+        screenshot('settings-lens-shortcut.png')
+        check('configure the lens shortcut independently and reject a collision with selection translation')
+        js("const action=document.getElementById('shortcut-action');action.value='selection';action.dispatchEvent(new Event('change'))")
         try:
             invoke('set_shortcut', {'shortcut': 'KeyJ'})
         except RuntimeError as error:
@@ -754,7 +814,7 @@ try:
         subprocess.run(['xdotool', 'windowfocus', '--sync', window, 'key', 'ctrl+shift+j'], env=env, check=True)
         time.sleep(0.3)
         assert js("return document.getElementById('source').value") == 'Waiting for the new shortcut.'
-        subprocess.run(['xdotool', 'key', 'ctrl+alt+t'], env=env, check=True)
+        subprocess.run(['xdotool', 'key', '--clearmodifiers', 'ctrl+alt+t'], env=env, check=True)
         wait("document.getElementById('source').value === 'Please open the window.'")
         output = translated()
         assert invoke('read_clipboard') == sentinel
@@ -794,7 +854,7 @@ try:
                 break
             time.sleep(0.05)
         assert json.loads(selection_state.read_text())['selected'] == japanese_selection
-        subprocess.run(['xdotool', 'key', 'ctrl+alt+t'], env=env, check=True)
+        subprocess.run(['xdotool', 'key', '--clearmodifiers', 'ctrl+alt+t'], env=env, check=True)
         wait("document.getElementById('source').value === " + json.dumps(japanese_selection))
         translated()
         assert js("return document.getElementById('target').value") == 'en'
@@ -806,6 +866,7 @@ try:
         assert invoke('get_status')['shortcutPopup']
         saved_settings = json.loads(settings_path.read_text())
         assert saved_settings['shortcutPopup'] and saved_settings['shortcut'] == 'Ctrl+Alt+KeyT'
+        assert saved_settings['lensShortcut'] == 'Ctrl+Alt+KeyL'
         click('settings-close')
         check('enable the optional selection popup without changing the global shortcut')
         click('edit-source')
@@ -866,7 +927,7 @@ try:
                 break
             time.sleep(0.05)
         assert json.loads(selection_state.read_text())['selected'] == ''
-        subprocess.run(['xdotool', 'key', 'ctrl+alt+t'], env=env, check=True)
+        subprocess.run(['xdotool', 'key', '--clearmodifiers', 'ctrl+alt+t'], env=env, check=True)
         wait("!document.getElementById('message').hidden")
         assert '選択した文字' in text('message')
         assert js("return document.getElementById('source').value") == japanese_selection
@@ -908,6 +969,7 @@ try:
         select_window('main')
         status = invoke('get_status')
         assert status['shortcut'] == 'Ctrl+Alt+KeyT' and status['shortcutAvailable'], status
+        assert status['lensShortcut'] == 'Ctrl+Alt+KeyL' and status['lensShortcutAvailable'], status
         click('settings-button')
         wait("document.getElementById('shortcut-display').textContent === 'Ctrl + Alt + T'")
         check('custom shortcut is registered and displayed after restarting the app')
@@ -921,6 +983,8 @@ try:
         assert json.loads(settings_path.read_text())['shortcut'] == status['defaultShortcut']
         assert json.loads(settings_path.read_text())['shortcutPopup']
         check('restore the default shortcut through the UI')
+        invoke('set_shortcut', {'shortcut': status['defaultLensShortcut'], 'lens': True})
+        assert json.loads(settings_path.read_text())['lensShortcut'] == status['defaultLensShortcut']
         click('shortcut-popup')
         wait("!document.getElementById('shortcut-popup').checked && !document.getElementById('shortcut-popup').disabled")
         assert not invoke('get_status')['shortcutPopup']

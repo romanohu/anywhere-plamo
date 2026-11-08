@@ -11,6 +11,10 @@ export interface AppStatus {
   lensSupported: boolean;
   ocrAvailable: boolean;
   lensUsesSelection: boolean;
+  lensShortcut: string;
+  defaultLensShortcut: string;
+  lensShortcutAvailable: boolean;
+  lensPassthrough: boolean;
 }
 
 export type ProgressEvent =

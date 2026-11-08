@@ -77,6 +77,7 @@ h3 { font-size: 12px; margin: 0 0 8px; font-weight: 650; }
 .shortcut-box { width: 100%; color: var(--ink); background: var(--result); border: 1px solid var(--line); border-radius: 5px; padding: 10px 12px; font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; font-size: 13px; text-align: left; overflow-wrap: anywhere; }
 .shortcut-box:hover:not(:disabled), .shortcut-box[aria-pressed="true"] { border-color: var(--accent); }
 .shortcut-box:disabled { opacity: 1; user-select: all; }
+#shortcut-action { max-width: 100%; }
 .shortcut-actions { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
 .shortcut-actions .setting-description { flex: 1; margin: 0; font-size: 11px; }
 .shortcut-actions .text-button { font-size: 11px; }

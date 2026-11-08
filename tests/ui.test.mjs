@@ -50,6 +50,7 @@ async function fixture(t, options = {}) {
     modelReady: options.modelReady ?? true, runtimeAvailable: true,
     shortcutAvailable: true, wayland: false, resident: true,
     shortcut: 'Ctrl+Shift+KeyJ', defaultShortcut: 'Ctrl+Shift+KeyJ', shortcutSupported: true, shortcutPopup: false,
+    lensShortcut: 'Ctrl+Shift+KeyL', defaultLensShortcut: 'Ctrl+Shift+KeyL', lensShortcutAvailable: true, lensPassthrough: false,
     lensSupported: !!options.lens, ocrAvailable: true, lensUsesSelection: false,
     ...options.status,
   };
@@ -73,6 +74,11 @@ async function fixture(t, options = {}) {
         switch (command) {
           case 'get_status': return { ...state };
           case 'open_lens': return;
+          case 'set_lens_passthrough':
+            if (options.passthroughError) throw options.passthroughError;
+            state.lensPassthrough = args.enabled;
+            listeners.get('lens-passthrough-changed')?.({ payload: args.enabled });
+            return args.enabled;
           case 'capture_lens':
             if (options.captureError) throw options.captureError;
             if (options.holdCapture) return new Promise(resolve => { finishCapture = resolve; });
@@ -82,8 +88,8 @@ async function fixture(t, options = {}) {
             return;
           case 'set_shortcut':
             if (options.shortcutError) throw options.shortcutError;
-            state.shortcut = args.shortcut;
-            state.shortcutAvailable = true;
+            if (args.lens) { state.lensShortcut = args.shortcut; state.lensShortcutAvailable = true; }
+            else { state.shortcut = args.shortcut; state.shortcutAvailable = true; }
             return { ...state };
           case 'set_shortcut_popup':
             if (options.popupError) throw options.popupError;
@@ -161,6 +167,8 @@ async function fixture(t, options = {}) {
     },
     lensDelay: () => lensDelay,
     showWindow() { listeners.get('window-shown')?.({ payload: null }); },
+    passthrough(enabled) { state.lensPassthrough = enabled; listeners.get('lens-passthrough-changed')?.({ payload: enabled }); },
+    lensShortcutChanged() { listeners.get('lens-shortcut-changed')?.({ payload: null }); },
     moveLens() { listeners.get('lens-changed')?.({ payload: null }); },
     shortcutPressed(shortcut) { listeners.get('shortcut-pressed')?.({ payload: shortcut }); },
     closeWindow() { listeners.get('window-hidden')?.({ payload: null }); },
@@ -1360,4 +1368,62 @@ test('automatic lens never treats a truncated translation as a complete cached r
   await f.tickLens();
   assert.equal(f.calls.filter(call => call.command === 'translate').length, 2);
   assert.match(f.byId('lens-status').textContent, /上限/);
+});
+
+test('lens shortcut settings save independently and can be reset', async t => {
+  const f = await fixture(t);
+  f.click('settings-button');
+  const action = f.byId('shortcut-action');
+  action.value = 'lens'; action.dispatchEvent(new f.window.Event('change'));
+  assert.equal(f.byId('shortcut-display').textContent, 'Ctrl + Shift + L');
+  assert.equal(f.byId('selection-shortcut-options').hidden, true);
+  await f.record();
+  f.key('KeyL', { ctrlKey: true, altKey: true });
+  f.click('shortcut-save');
+  await until(() => f.byId('shortcut-message').textContent === '保存しました');
+  assert.equal(f.state.shortcut, 'Ctrl+Shift+KeyJ');
+  assert.equal(f.calls.find(call => call.command === 'set_shortcut').args.lens, true);
+  f.click('shortcut-reset');
+  await until(() => f.state.lensShortcut === f.state.defaultLensShortcut);
+  action.value = 'selection'; action.dispatchEvent(new f.window.Event('change'));
+  assert.equal(f.byId('shortcut-display').textContent, 'Ctrl + Shift + J');
+  assert.equal(f.byId('selection-shortcut-options').hidden, false);
+});
+
+test('native passthrough events update the recovery hint without cancelling OCR', async t => {
+  const f = await fixture(t, { lens: true, autoLens: true, holdCapture: true });
+  await f.tickLens();
+  f.click('lens-passthrough');
+  await until(() => f.byId('lens-passthrough').getAttribute('aria-pressed') === 'true');
+  assert.equal(f.byId('lens-passthrough-hint').hidden, false);
+  assert.match(f.byId('lens-passthrough-hint').textContent, /Ctrl \+ Shift \+ Lで解除/);
+  assert.equal(f.byId('lens-status').hidden, true);
+  f.finishCapture('This is an image.');
+  await until(() => f.byId('lens-status').textContent === '自動更新中');
+  assert.equal(f.byId('lens-passthrough-hint').hidden, false);
+  f.passthrough(false);
+  assert.equal(f.byId('lens-status').hidden, false);
+  assert.equal(f.byId('lens-passthrough').getAttribute('aria-pressed'), 'false');
+  assert.equal(f.calls.filter(call => call.command === 'set_lens_passthrough').length, 1);
+  assert.equal(f.calls.some(call => call.command === 'cancel_operation'), false);
+});
+
+for (const status of [{ lensShortcutAvailable: false }, { lensUsesSelection: true }]) {
+  test(`passthrough requires a working global recovery key ${JSON.stringify(status)}`, async t => {
+    const f = await fixture(t, { lens: true, status });
+    assert.equal(f.byId('lens-passthrough').disabled, true);
+    f.click('lens-passthrough');
+    assert.equal(f.calls.some(call => call.command === 'set_lens_passthrough'), false);
+  });
+}
+
+test('passthrough errors retain interactive mode and shortcut changes refresh the hint', async t => {
+  const f = await fixture(t, { lens: true, passthroughError: '透過を変更できませんでした。' });
+  f.click('lens-passthrough');
+  await until(() => f.byId('lens-status').textContent.includes('変更できません'));
+  assert.equal(f.byId('lens-passthrough').getAttribute('aria-pressed'), 'false');
+  assert.equal(f.byId('lens-passthrough-hint').hidden, true);
+  f.state.lensShortcut = 'Alt+KeyL';
+  f.lensShortcutChanged();
+  await until(() => f.byId('lens-passthrough').title.includes('Alt + L'));
 });

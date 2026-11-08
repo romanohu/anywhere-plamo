@@ -10,6 +10,8 @@ export async function initLens(): Promise<void> {
   const refresh = element<HTMLButtonElement>('lens-refresh');
   const automatic = element<HTMLButtonElement>('lens-auto');
   const original = element<HTMLButtonElement>('lens-original');
+  const passthroughButton = element<HTMLButtonElement>('lens-passthrough');
+  const passthroughHint = element('lens-passthrough-hint');
   const target = element<HTMLSelectElement>('lens-target');
   const region = element('lens-region');
   const result = element('lens-result');
@@ -22,6 +24,10 @@ export async function initLens(): Promise<void> {
   let selection = false;
   let auto = true;
   let visible = true;
+  let passthrough = false;
+  let passthroughAvailable = false;
+  let changingPassthrough = false;
+  let passthroughKey = '';
   let timer: ReturnType<typeof setTimeout> | undefined;
   let pollDelay = 120;
   let reset = true;
@@ -57,6 +63,14 @@ export async function initLens(): Promise<void> {
     automatic.disabled = !ready || selection;
     automatic.setAttribute('aria-pressed', String(auto));
     automatic.title = selection ? 'Waylandでは手動更新を使ってください' : '画面が変わると自動で翻訳';
+    passthroughButton.disabled = !passthroughAvailable || changingPassthrough;
+    passthroughButton.setAttribute('aria-pressed', String(passthrough));
+    passthroughButton.title = selection ? 'Waylandではクリック透過を利用できません'
+      : passthroughAvailable ? `クリック透過 · ${passthroughKey}で切替` : '設定でレンズ用ショートカットを登録してください';
+    passthroughHint.textContent = `${status.classList.contains('is-error') ? status.textContent : 'クリック透過中'} · ${passthroughKey}で解除`;
+    passthroughHint.title = passthroughHint.textContent;
+    passthroughHint.hidden = !passthrough;
+    status.hidden = passthrough;
     original.disabled = !(selection ? source.textContent : translation.textContent);
     original.textContent = showingOriginal ? '訳文' : '原文';
     original.setAttribute('aria-pressed', String(showingOriginal));
@@ -268,6 +282,14 @@ export async function initLens(): Promise<void> {
   }
 
   refresh.addEventListener('click', () => { void update(); });
+  passthroughButton.addEventListener('click', async () => {
+    if (!passthroughAvailable || changingPassthrough) return;
+    changingPassthrough = true;
+    render();
+    try { passthrough = await invoke<boolean>('set_lens_passthrough', { enabled: !passthrough }); }
+    catch (error) { message(String(error), true); }
+    finally { changingPassthrough = false; render(); }
+  });
   automatic.addEventListener('click', () => {
     auto = !auto;
     saveAuto();
@@ -317,11 +339,26 @@ export async function initLens(): Promise<void> {
     invalidate(instruction());
   });
   if (!isDesktop) { message('OCRレンズはMac・Linuxのデスクトップアプリで利用できます。'); return; }
+  const loadPassthrough = (app: AppStatus): void => {
+    passthrough = app.lensPassthrough;
+    passthroughAvailable = app.lensShortcutAvailable && !app.lensUsesSelection;
+    passthroughKey = app.lensShortcut.split('+').map(key => {
+      if (key === 'Super' && /Mac/.test(navigator.platform)) return '⌘';
+      if (key === 'Alt' && /Mac/.test(navigator.platform)) return 'Option';
+      return key.replace(/^Key([A-Z])$/, '$1').replace(/^Digit([0-9])$/, '$1');
+    }).join(' + ');
+  };
   try {
+    await window.__TAURI__!.event.listen<boolean>('lens-passthrough-changed', event => { passthrough = event.payload; render(); });
+    await window.__TAURI__!.event.listen<string>('lens-error', event => { message(event.payload, true); render(); });
+    await window.__TAURI__!.event.listen('lens-shortcut-changed', () => {
+      void invoke<AppStatus>('get_status').then(app => { loadPassthrough(app); render(); }).catch(error => message(String(error), true));
+    });
     await window.__TAURI__!.event.listen('lens-changed', moved);
     await onWindowHidden(() => { visible = false; invalidate(instruction()); });
     await window.__TAURI__!.event.listen('window-shown', () => { visible = true; invalidate(instruction()); });
     const app = await invoke<AppStatus>('get_status');
+    loadPassthrough(app);
     ready = app.lensSupported;
     selection = app.lensUsesSelection;
     result.classList.toggle('lens-selection', selection);
