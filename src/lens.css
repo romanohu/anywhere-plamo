@@ -2,9 +2,10 @@ html:has(.lens-mode), body.lens-mode { background: transparent; overflow: hidden
 body.lens-mode { position: fixed; inset: 0; }
 .lens-mode > .app { display: none; }
 .lens { height: 100%; display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--muted); }
-.lens-toolbar { display: flex; flex-shrink: 0; align-items: center; gap: 10px; padding: 6px 10px; background: var(--surface); }
-.lens-toolbar select { min-width: 0; flex: 1; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 4px; padding: 4px 6px; }
-.lens-toolbar button { flex-shrink: 0; }
+.lens-toolbar { display: flex; flex-shrink: 0; align-items: center; gap: 8px; padding: 3px 8px; background: var(--surface); }
+.lens-toolbar select { min-width: 0; flex: 1; height: 28px; font-size: 12px; line-height: 20px; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 4px; padding: 2px 6px; }
+.lens-toolbar button { flex-shrink: 0; height: 28px; padding-top: 2px; padding-bottom: 2px; line-height: 20px; }
+.lens-toolbar .icon-button { width: 28px; }
 .lens-toolbar #lens-auto[aria-pressed="true"] { color: var(--ink); background: var(--line); border-radius: 4px; }
 .lens-region { flex: 1; min-height: 0; position: relative; overflow: hidden; }
 .lens-result { position: absolute; inset: 0; overflow: hidden; }

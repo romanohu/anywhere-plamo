@@ -106,6 +106,10 @@ async function fixture(t, options = {}) {
             channels.push(channel);
             channel.onmessage({ kind: 'loading' });
             if (options.holdTranslation) return new Promise((resolve, reject) => { finishOperation = resolve; rejectOperation = reject; });
+            if (options.translationOutputs?.length) {
+              channel.onmessage({ kind: 'token', text: options.translationOutputs.shift() });
+              return { truncated: !!options.truncated };
+            }
             channel.onmessage({ kind: 'token', text: 'こんにちは、' });
             channel.onmessage({ kind: 'token', text: '世界。' });
             return { truncated: !!options.truncated };
@@ -1003,6 +1007,61 @@ test('clicking inside the lens toggles the overlay without interfering with text
   assert.equal(f.byId('lens-result').hidden, false);
   assert.equal(f.calls.filter(call => call.command === 'capture_lens').length, 1);
   assert.equal(f.calls.filter(call => call.command === 'translate').length, 1);
+});
+
+test('unchanged OCR translations are not overlaid or retried on every automatic update', async t => {
+  const f = await fixture(t, { lens: true, autoLens: true, translationOutputs: ['  UNREADABLE\nENGLISH. ', '日本語の訳文'], captureResults: [
+    { kind: 'text', text: 'Unreadable English.' }, { kind: 'unchanged' },
+    { kind: 'changed' }, { kind: 'text', text: 'Unreadable English.' },
+    { kind: 'changed' }, { kind: 'text', text: 'A readable sentence.' },
+  ] });
+  await f.tickLens();
+  assert.equal(f.byId('lens-translation').textContent, '');
+  assert.equal(f.byId('lens-result').hidden, true);
+  assert.equal(f.byId('lens-original').disabled, true);
+  assert.equal(f.byId('lens-status').textContent, '自動更新中');
+  await f.tickLens();
+  assert.equal(f.byId('lens-status').textContent, '自動更新中');
+  await f.tickLens();
+  await f.tickLens();
+  assert.equal(f.byId('lens-translation').textContent, '');
+  assert.equal(f.byId('lens-status').textContent, '自動更新中');
+  assert.equal(f.calls.filter(call => call.command === 'translate').length, 1);
+  await f.tickLens();
+  await f.tickLens();
+  assert.equal(f.byId('lens-status').textContent, '自動更新中');
+  assert.equal(f.byId('lens-translation').textContent, '日本語の訳文');
+});
+
+test('copied prefixes stay hidden until translated text arrives and unchanged blocks remain transparent', async t => {
+  const blocks = ['NASA launches a rocket.', '12345'].map((text, index) => ({ text, x: .1, y: .1 + index * .4, width: .5, height: .1 }));
+  const f = await fixture(t, { lens: true, holdTranslation: true, captureResults: [{ kind: 'text', text: blocks.map(block => block.text).join('\n\n'), blocks }] });
+  f.click('lens-refresh');
+  await until(() => f.calls.some(call => call.command === 'translate'));
+  f.send({ kind: 'token', text: 'NASA' });
+  assert.equal(f.byId('lens-result').hidden, true);
+  f.send({ kind: 'token', text: 'がロケットを打ち上げます。' });
+  assert.equal(f.byId('lens-result').hidden, false);
+  f.finish({ truncated: false });
+  await until(() => f.calls.filter(call => call.command === 'translate').length === 2);
+  f.send({ kind: 'token', text: '12345' });
+  f.finish({ truncated: false });
+  await until(() => f.byId('lens-refresh').textContent === '更新');
+  assert.match(f.byId('lens-status').textContent, /^更新しました/);
+  assert.equal(f.byId('lens-translation').textContent, 'NASAがロケットを打ち上げます。');
+  assert.equal(f.byId('lens-original').disabled, false);
+});
+
+test('Wayland keeps the captured original accessible even if the model copies every block', async t => {
+  const f = await fixture(t, { lens: true, ocrText: 'SOURCE', translationOutputs: ['source'], status: { lensUsesSelection: true, wayland: true } });
+  f.click('lens-refresh');
+  await until(() => f.byId('lens-status').textContent.startsWith('更新しました'));
+  assert.equal(f.byId('lens-result').hidden, true);
+  assert.equal(f.byId('lens-original').disabled, false);
+  f.click('lens-region');
+  assert.equal(f.byId('lens-result').hidden, false);
+  assert.equal(f.byId('lens-source').hidden, false);
+  assert.equal(f.byId('lens-source').textContent, 'SOURCE');
 });
 
 test('lens permission failures, empty OCR and oversized regions leave a retryable transparent view', async t => {

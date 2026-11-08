@@ -26,6 +26,7 @@ export async function initLens(): Promise<void> {
   let pollDelay = 120;
   let reset = true;
   let translations = new Map<string, string>();
+  const comparable = (text: string): string => text.normalize('NFKC').replace(/\s+/g, '').toLowerCase();
   const updateKey = /Mac/.test(navigator.platform) ? '⌘+Enter' : 'Ctrl+Enter';
   const instruction = (): string => selection ? '「更新」でOSの画面選択を開きます' : auto ? '枠内の文字を自動で翻訳します' : '読み取りたい範囲に枠を合わせて「更新」';
   let generation = 0;
@@ -56,12 +57,12 @@ export async function initLens(): Promise<void> {
     automatic.disabled = !ready || selection;
     automatic.setAttribute('aria-pressed', String(auto));
     automatic.title = selection ? 'Waylandでは手動更新を使ってください' : '画面が変わると自動で翻訳';
-    original.disabled = !translation.textContent;
+    original.disabled = !(selection ? source.textContent : translation.textContent);
     original.textContent = showingOriginal ? '訳文' : '原文';
     original.setAttribute('aria-pressed', String(showingOriginal));
     source.hidden = !selection || !showingOriginal;
     translation.hidden = selection && showingOriginal;
-    result.hidden = (!selection && showingOriginal) || !translation.textContent;
+    result.hidden = (!selection && showingOriginal) || !(selection && showingOriginal ? source.textContent : translation.textContent);
   }
 
   function schedule(): void {
@@ -211,19 +212,24 @@ export async function initLens(): Promise<void> {
       render();
       for (const [index, block] of capture.blocks.entries()) {
         const paragraph = paragraphs[index];
+        const input = comparable(block.text);
         const cached = nextTranslations.get(block.text) ?? translations.get(block.text);
         if (cached) {
-          paragraph.textContent = cached;
+          const same = comparable(cached) === input;
+          paragraph.textContent = same ? '' : cached;
           render();
           fitBlock(paragraph);
           nextTranslations.set(block.text, cached);
           continue;
         }
+        let output = '';
         const channel = progressChannel(event => {
           if (run !== generation || !busy) return;
           if (event.kind === 'loading') message('モデルを読み込み中…');
           if (event.kind === 'token') {
-            paragraph.textContent += event.text;
+            output += event.text;
+            // A copied prefix is not yet a translation; avoid flashing the OCR text.
+            paragraph.textContent = input.startsWith(comparable(output)) ? '' : output;
             message('翻訳中…');
             render();
             fitBlock(paragraph);
@@ -232,7 +238,11 @@ export async function initLens(): Promise<void> {
         const outcome = await invoke<{ truncated: boolean }>('translate', { text: block.text, target: target.value, onEvent: channel });
         if (run !== generation) return;
         truncated ||= outcome.truncated;
-        if (!outcome.truncated) nextTranslations.set(block.text, paragraph.textContent ?? '');
+        if (!outcome.truncated) nextTranslations.set(block.text, output);
+        const same = comparable(output) === input;
+        paragraph.textContent = same ? '' : output;
+        render();
+        fitBlock(paragraph);
       }
       translations = nextTranslations;
       message(truncated ? '訳文が上限に達しました。範囲を小さくして更新してください。' : watching ? '自動更新中' : `更新しました · ${updateKey}で再読取`);

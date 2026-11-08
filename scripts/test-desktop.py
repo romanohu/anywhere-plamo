@@ -233,6 +233,14 @@ def lens_checks():
     assert not js("return document.getElementById('lens-result').hidden")
     check('clicking text or empty lens space toggles the overlay, while dragging still selects text')
 
+    source('japanese')
+    target('ja')
+    click('lens-refresh')
+    wait("document.getElementById('lens-refresh').textContent === '更新' && document.getElementById('lens-status').textContent.startsWith('更新しました')", 30)
+    assert text('lens-translation') == '' and '画像' in text('lens-source')
+    assert js("return document.getElementById('lens-result').hidden")
+    check('a model response identical to the source leaves no duplicate text overlay or extra notice')
+
     # Updating with the translated overlay visible must read the image behind it.
     source('japanese')
     target('en')
@@ -331,10 +339,9 @@ def lens_checks():
 
             started = time.monotonic()
             source('japanese')
+            target('en')
             wait("document.getElementById('lens-source').textContent.includes('画像') && document.getElementById('lens-status').textContent === '自動更新中'", 30)
             check('automatic mode follows a changed background image while its own overlay remains visible', {'seconds': round(time.monotonic() - started, 3), 'ocr': text('lens-source'), 'translation': text('lens-translation')})
-            target('en')
-            wait("document.getElementById('lens-status').textContent === '自動更新中'", 30)
             assert re.search('[A-Za-z]', text('lens-translation'))
             time.sleep(.15)  # Allow the native compositor to paint the completed DOM.
             desktop_image('lens-automatic.png')
@@ -343,6 +350,7 @@ def lens_checks():
             wait("document.getElementById('lens-status').textContent.includes('文字が見つかりません')", 30)
             assert js("return document.getElementById('lens-result').hidden")
             source('english')
+            target('ja')
             wait("document.getElementById('lens-source').textContent.includes('Local translation') && document.getElementById('lens-status').textContent === '自動更新中'", 30)
             check('automatic mode clears empty regions and recovers when text returns')
             assert window_visible('lens')
@@ -357,6 +365,7 @@ def lens_checks():
     source('japanese')
     time.sleep(1.5)
     assert js("return lensCalls.filter(call=>call.command==='capture_lens').length") == captures
+    target('en')
     click('lens-auto')
     wait("document.getElementById('lens-source').textContent.includes('画像') && document.getElementById('lens-status').textContent === '自動更新中'", 30)
     invoke('hide_window')
@@ -395,7 +404,9 @@ def lens_checks():
     display.close()
     translations = js("return lensCalls.filter(call=>call.command==='translate').length")
     captures = js("return lensCalls.filter(call=>call.command==='capture_lens').length")
-    source('layout-bars', bar=[origin_x + 10, origin_y + 8])
+    toolbar = js("return document.querySelector('.lens-toolbar').getBoundingClientRect().toJSON()")
+    assert toolbar['height'] == 34 and toolbar['bottom'] == layout['region']['y'], toolbar
+    source('layout-bars', bar=[origin_x + 10, origin_y + 2])
     # Send actual X11 wheel events over the translated paragraph and the toolbar.
     for y in [8, round(layout['region']['y'] + layout['paragraphs'][0]['y'] + 10)]:
         subprocess.run(['xdotool', 'mousemove', '--window', native_window, '120', str(y),
