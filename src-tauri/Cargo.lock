@@ -54,6 +54,8 @@ dependencies = [
  "arboard",
  "cc",
  "core-foundation",
+ "dbus",
+ "image",
  "libc",
  "objc2",
  "objc2-app-kit",
@@ -72,6 +74,7 @@ dependencies = [
  "tokio-util",
  "uuid",
  "wl-clipboard-rs",
+ "x11rb",
 ]
 
 [[package]]

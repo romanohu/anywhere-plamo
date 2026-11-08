@@ -37,7 +37,7 @@ async function fixture(t, options = {}) {
     modelReady: options.modelReady ?? true, runtimeAvailable: true,
     shortcutAvailable: true, wayland: false, resident: true,
     shortcut: 'Ctrl+Shift+KeyJ', defaultShortcut: 'Ctrl+Shift+KeyJ', shortcutSupported: true, shortcutPopup: false,
-    lensSupported: !!options.lens,
+    lensSupported: !!options.lens, ocrAvailable: true, lensUsesSelection: false,
     ...options.status,
   };
   let clipboard = options.clipboard ?? 'Hello, world.';
@@ -922,8 +922,10 @@ test('OCR lens entry is available only on supported desktop main windows', async
   assert.equal(mac.byId('lens-button').hidden, false);
   mac.click('lens-button');
   await until(() => mac.calls.some(call => call.command === 'open_lens'));
-  const linux = await fixture(t);
-  assert.equal(linux.byId('lens-button').hidden, true);
+  const linux = await fixture(t, { status: { lensSupported: true, wayland: true } });
+  assert.equal(linux.byId('lens-button').hidden, false);
+  const unsupported = await fixture(t);
+  assert.equal(unsupported.byId('lens-button').hidden, true);
   const popup = await fixture(t, { popup: true, status: { lensSupported: true } });
   assert.equal(popup.byId('lens-button').hidden, true);
 });
@@ -1031,4 +1033,36 @@ test('Escape closes the lens, cancels pending OCR and never dispatches manual-wi
   assert.equal(f.calls.some(call => call.command === 'translate'), false);
   assert.equal(f.byId('lens-result').hidden, true);
   assert.equal(f.byId('settings-dialog').open, false);
+});
+
+
+test('Wayland lens uses OS selection and preserves results when the portal restores its window', async t => {
+  const f = await fixture(t, { lens: true, holdCapture: true, status: { lensUsesSelection: true, wayland: true } });
+  assert.match(f.byId('lens-status').textContent, /OSの画面選択/);
+  f.click('lens-refresh');
+  await until(() => f.calls.some(call => call.command === 'capture_lens'));
+  f.moveLens();
+  f.window.dispatchEvent(new f.window.Event('resize'));
+  f.finishCapture('Selected image text.');
+  await until(() => f.byId('lens-status').textContent.startsWith('更新しました'));
+  assert.equal(f.calls.some(call => call.command === 'cancel_operation'), false);
+  assert.equal(f.calls.find(call => call.command === 'translate').args.text, 'Selected image text.');
+  f.click('lens-original');
+  assert.equal(f.byId('lens-result').hidden, false);
+  assert.equal(f.byId('lens-source').hidden, false);
+  assert.equal(f.byId('lens-source').textContent, 'Selected image text.');
+  assert.equal(f.byId('lens-translation').hidden, true);
+  f.click('lens-original');
+  assert.equal(f.byId('lens-translation').hidden, false);
+});
+
+test('missing OCR runtime is reported before capturing and can be retried after setup', async t => {
+  const f = await fixture(t, { lens: true, status: { ocrAvailable: false } });
+  f.click('lens-refresh');
+  await until(() => f.byId('lens-status').textContent.includes('ocr:build'));
+  assert.equal(f.calls.some(call => call.command === 'capture_lens'), false);
+  assert.equal(f.byId('lens-refresh').disabled, false);
+  f.state.ocrAvailable = true;
+  f.click('lens-refresh');
+  await until(() => f.byId('lens-status').textContent.startsWith('更新しました'));
 });

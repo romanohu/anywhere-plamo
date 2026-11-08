@@ -1,6 +1,5 @@
 #import <AppKit/AppKit.h>
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
-#import <Vision/Vision.h>
 #import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
 #import <CoreGraphics/CoreGraphics.h>
@@ -8,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <stdbool.h>
 
 static char *LensResponse(NSDictionary *response) {
     NSData *data = [NSJSONSerialization dataWithJSONObject:response options:0 error:nil];
@@ -29,6 +29,9 @@ static NSError *LensError(NSString *message) {
 @property(nonatomic) CVPixelBufferRef image;
 @property(nonatomic, strong) NSError *error;
 @property(nonatomic) BOOL finished;
+@property(nonatomic) BOOL started;
+@property(nonatomic) BOOL stopping;
+- (void)stop:(SCStream *)stream;
 - (void)finish:(CVPixelBufferRef)image error:(NSError *)error;
 @end
 
@@ -49,6 +52,14 @@ static NSError *LensError(NSString *message) {
         dispatch_semaphore_signal(_ready);
     }
 }
+- (void)stop:(SCStream *)stream {
+    @synchronized (self) {
+        if (!_started || _stopping) return;
+        _stopping = YES;
+    }
+    // Retain the stream until its single stop request completes.
+    [stream stopCaptureWithCompletionHandler:^(NSError *error) { (void)stream; }];
+}
 - (void)stream:(SCStream *)stream didStopWithError:(NSError *)error {
     [self finish:NULL error:error];
 }
@@ -63,9 +74,23 @@ static NSError *LensError(NSString *message) {
 }
 @end
 
+typedef bool (*LensCancelled)(const void *);
+
+// Cancellation is polled on the calling worker, never from retained callbacks.
+static NSString *LensWait(dispatch_semaphore_t semaphore, LensCancelled cancelled, const void *context) {
+    CFAbsoluteTime deadline = CFAbsoluteTimeGetCurrent() + 10;
+    while (true) {
+        if (cancelled(context)) return @"CANCELLED";
+        if (!dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, 50 * NSEC_PER_MSEC))) return nil;
+        if (CFAbsoluteTimeGetCurrent() >= deadline) return @"画面の取得がタイムアウトしました。画面収録の許可を確認して再試行してください。";
+    }
+}
+
 // Rust calls this on a worker. Only the AppKit coordinate conversion uses the main thread.
-char *plamo_lens_capture(void *windowPointer, double x, double y, double width, double height) {
+char *plamo_lens_capture(void *windowPointer, double x, double y, double width, double height,
+                         const char *path, LensCancelled cancelled, const void *context) {
     @autoreleasepool {
+        if (cancelled(context)) return LensResponse(@{@"error": @"CANCELLED"});
         if (!CGPreflightScreenCaptureAccess() && !CGRequestScreenCaptureAccess()) {
             return LensResponse(@{@"error": @"画面収録を許可してください。「システム設定 → プライバシーとセキュリティ → 画面収録」でAnywhere Plamoを許可し、アプリを再起動してください。"});
         }
@@ -105,9 +130,8 @@ char *plamo_lens_capture(void *windowPointer, double x, double y, double width, 
                 contentError = error;
                 dispatch_semaphore_signal(available);
             }];
-        if (dispatch_semaphore_wait(available, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC))) {
-            return LensResponse(@{@"error": @"画面の取得がタイムアウトしました。画面収録の許可を確認して再試行してください。"});
-        }
+        NSString *waitError = LensWait(available, cancelled, context);
+        if (waitError) return LensResponse(@{@"error": waitError});
         if (!content || contentError) {
             return LensResponse(@{@"error": @"画面を取得できませんでした。画面収録の許可を確認し、アプリを再起動してください。"});
         }
@@ -144,37 +168,52 @@ char *plamo_lens_capture(void *windowPointer, double x, double y, double width, 
             return LensResponse(@{@"error": @"画面取得を開始できませんでした。もう一度更新してください。"});
         }
         [stream startCaptureWithCompletionHandler:^(NSError *startError) {
-            if (startError) [frame finish:NULL error:startError];
-            // Also stop a delayed start after the worker has timed out.
-            @synchronized (frame) {
-                if (frame.finished) [stream stopCaptureWithCompletionHandler:^(NSError *stopError) {}];
+            if (startError) {
+                [frame finish:NULL error:startError];
+                return;
             }
+            BOOL finished;
+            @synchronized (frame) {
+                frame.started = YES;
+                finished = frame.finished;
+            }
+            // A start may complete after cancellation or timeout.
+            if (finished) [frame stop:stream];
         }];
-        if (dispatch_semaphore_wait(frame.ready, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC))) {
-            [frame finish:NULL error:LensError(@"画面の取得がタイムアウトしました。もう一度更新してください。")];
-        }
-        // Capture only one frame. Keep the stream alive until stopping completes.
-        [stream stopCaptureWithCompletionHandler:^(NSError *stopError) { (void)stream; }];
+        waitError = LensWait(frame.ready, cancelled, context);
+        if (waitError) [frame finish:NULL error:LensError(waitError)];
+        [frame stop:stream];
+        if (waitError) return LensResponse(@{@"error": waitError});
         if (frame.error || !frame.image) {
-            return LensResponse(@{@"error": frame.error.localizedDescription ?: @"画面を読み取れませんでした。"});
+            return LensResponse(@{@"error": @"画面を読み取れませんでした。画面収録の許可を確認して再試行してください。"});
         }
-
-        VNRecognizeTextRequest *request = [VNRecognizeTextRequest new];
-        request.recognitionLevel = VNRequestTextRecognitionLevelAccurate;
-        request.automaticallyDetectsLanguage = YES;
-        request.usesLanguageCorrection = YES;
-        // Revision 3 includes Japanese on our minimum supported macOS 13.3.
-        request.revision = VNRecognizeTextRequestRevision3;
-        VNImageRequestHandler *handler = [[VNImageRequestHandler alloc] initWithCVPixelBuffer:frame.image options:@{}];
-        if (![handler performRequests:@[request] error:&error]) {
-            return LensResponse(@{@"error": @"文字を認識できませんでした。範囲を変えて再試行してください。"});
+        if (cancelled(context)) return LensResponse(@{@"error": @"CANCELLED"});
+        if (CVPixelBufferLockBaseAddress(frame.image, kCVPixelBufferLock_ReadOnly) != kCVReturnSuccess) {
+            return LensResponse(@{@"error": @"画面の画像を読み取れませんでした。"});
         }
-        NSMutableArray<NSString *> *lines = [NSMutableArray array];
-        for (VNRecognizedTextObservation *observation in request.results) {
-            NSString *text = [observation topCandidates:1].firstObject.string;
-            if (text.length) [lines addObject:text];
+        size_t pixelsWide = CVPixelBufferGetWidth(frame.image);
+        size_t pixelsHigh = CVPixelBufferGetHeight(frame.image);
+        size_t stride = CVPixelBufferGetBytesPerRow(frame.image);
+        const unsigned char *pixels = CVPixelBufferGetBaseAddress(frame.image);
+        NSString *header = [NSString stringWithFormat:@"P6\n%zu %zu\n255\n", pixelsWide, pixelsHigh];
+        NSMutableData *data = [[header dataUsingEncoding:NSASCIIStringEncoding] mutableCopy];
+        size_t offset = data.length;
+        [data increaseLengthBy:pixelsWide * pixelsHigh * 3];
+        unsigned char *output = (unsigned char *)data.mutableBytes + offset;
+        for (size_t row = 0; row < pixelsHigh; row++) {
+            for (size_t column = 0; column < pixelsWide; column++) {
+                const unsigned char *pixel = pixels + row * stride + column * 4;
+                *output++ = pixel[2];
+                *output++ = pixel[1];
+                *output++ = pixel[0];
+            }
         }
-        return LensResponse(@{@"text": [lines componentsJoinedByString:@"\n"]});
+        CVPixelBufferUnlockBaseAddress(frame.image, kCVPixelBufferLock_ReadOnly);
+        if (cancelled(context)) return LensResponse(@{@"error": @"CANCELLED"});
+        if (![data writeToFile:[NSString stringWithUTF8String:path] atomically:NO]) {
+            return LensResponse(@{@"error": @"読み取り画像を保存できませんでした。"});
+        }
+        return LensResponse(@{});
     }
 }
 

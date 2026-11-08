@@ -105,6 +105,8 @@ impl PendingRequests {
 struct AppState {
     directory: PathBuf,
     binary: PathBuf,
+    ocr_runtime: PathBuf,
+    lens_open: AtomicBool,
     engine: tokio::sync::Mutex<Option<engine::Engine>>,
     preparation: CancellationToken,
     operation: Mutex<Option<CancellationToken>>,
@@ -231,6 +233,8 @@ struct AppStatus {
     resident: bool,
     shortcut_popup: bool,
     lens_supported: bool,
+    ocr_available: bool,
+    lens_uses_selection: bool,
 }
 
 #[tauri::command]
@@ -246,7 +250,9 @@ fn get_status(state: tauri::State<'_, AppState>) -> AppStatus {
         wayland: state.wayland,
         resident: state.resident.load(Ordering::Relaxed),
         shortcut_popup: state.shortcut_popup.load(Ordering::Relaxed),
-        lens_supported: cfg!(target_os = "macos"),
+        lens_supported: cfg!(any(target_os = "macos", target_os = "linux")),
+        ocr_available: lens::ready(&state.ocr_runtime),
+        lens_uses_selection: state.wayland,
     }
 }
 
@@ -385,7 +391,7 @@ fn cancel_operation(window: tauri::WebviewWindow, state: tauri::State<'_, AppSta
 
 #[tauri::command]
 async fn open_lens(app: tauri::AppHandle) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         if app.get_webview_window("lens").is_none() {
             tauri::WebviewWindowBuilder::new(
@@ -404,16 +410,24 @@ async fn open_lens(app: tauri::AppHandle) -> Result<(), String> {
             .build()
             .map_err(|error| error.to_string())?;
         }
-        show_window(&app, "lens");
+        let window = app
+            .get_webview_window("lens")
+            .ok_or("レンズを開けませんでした。")?;
+        window.show().map_err(|error| error.to_string())?;
+        app.state::<AppState>()
+            .lens_open
+            .store(true, Ordering::Relaxed);
+        let _ = window.unminimize();
+        let _ = window.set_focus();
         if let Some(main) = app.get_webview_window("main") {
             main.hide().map_err(|error| error.to_string())?;
         }
         Ok(())
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = app;
-        Err("OCRレンズはMacで利用できます。".into())
+        Err("OCRレンズはMac・Linuxで利用できます。".into())
     }
 }
 
@@ -427,17 +441,14 @@ async fn capture_lens(
         return Err("OCRレンズから実行してください。".into());
     }
     let operation = state.begin("lens")?;
-    #[cfg(target_os = "macos")]
-    let native = window.ns_window().map_err(|error| error.to_string())? as usize;
-    #[cfg(not(target_os = "macos"))]
-    let native = 0;
-    let result = tauri::async_runtime::spawn_blocking(move || lens::capture(native, region))
-        .await
-        .map_err(|error| error.to_string())?;
-    if operation.token.is_cancelled() {
-        return Err("CANCELLED".into());
-    }
-    result
+    lens::capture(
+        window,
+        region,
+        state.wayland,
+        &state.ocr_runtime,
+        &operation.token,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -593,6 +604,7 @@ fn hide_window(
         state.close_popup();
     }
     if window.label() == "lens" {
+        state.lens_open.store(false, Ordering::Relaxed);
         state.cancel("lens");
     }
     if matches!(window.label(), "popup" | "lens") || state.resident.load(Ordering::Relaxed) {
@@ -676,12 +688,20 @@ fn main() {
             } else {
                 binary
             };
+            let ocr_runtime = app.path().resource_dir()?.join("resources/runtime");
+            let ocr_runtime = if cfg!(debug_assertions) && !lens::ready(&ocr_runtime) {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/runtime")
+            } else {
+                ocr_runtime
+            };
             let wayland = cfg!(target_os = "linux")
                 && (std::env::var("XDG_SESSION_TYPE").is_ok_and(|session| session == "wayland")
                     || std::env::var_os("WAYLAND_DISPLAY").is_some());
             app.manage(AppState {
                 directory,
                 binary,
+                ocr_runtime,
+                lens_open: AtomicBool::new(false),
                 engine: tokio::sync::Mutex::new(None),
                 preparation: CancellationToken::new(),
                 operation: Mutex::new(None),
@@ -788,6 +808,7 @@ fn main() {
                     state.close_popup();
                 }
                 if window.label() == "lens" {
+                    state.lens_open.store(false, Ordering::Relaxed);
                     state.cancel("lens");
                 }
                 if matches!(window.label(), "popup" | "lens")
@@ -804,6 +825,7 @@ fn main() {
                     window.app_handle().exit(0);
                 }
             } else if window.label() == "lens"
+                && !state.wayland
                 && matches!(
                     event,
                     tauri::WindowEvent::Moved(_)
@@ -980,6 +1002,8 @@ mod tests {
         AppState {
             directory: PathBuf::new(),
             binary: PathBuf::new(),
+            ocr_runtime: PathBuf::new(),
+            lens_open: AtomicBool::new(false),
             engine: tokio::sync::Mutex::new(None),
             preparation: CancellationToken::new(),
             operation: Mutex::new(None),

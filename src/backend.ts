@@ -9,6 +9,8 @@ export interface AppStatus {
   wayland: boolean;
   resident: boolean;
   lensSupported: boolean;
+  ocrAvailable: boolean;
+  lensUsesSelection: boolean;
 }
 
 export type ProgressEvent =

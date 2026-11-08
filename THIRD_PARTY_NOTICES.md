@@ -6,6 +6,8 @@ The MIT license in this repository covers Anywhere Plamo's original source code.
 | --- | --- | --- |
 | Tauri and its official plugins | MIT / Apache-2.0 | https://github.com/tauri-apps |
 | llama.cpp | MIT; vendored components retain their own notices | https://github.com/ggml-org/llama.cpp |
+| Tesseract / tessdata_fast (English, Japanese) | Apache-2.0 | https://github.com/tesseract-ocr |
+| Leptonica | BSD-2-Clause | https://github.com/DanBloomberg/leptonica |
 | PLaMo 3 Translate 0.8B GGUF (Q4_K_M) | [PLaMo Community License](https://plamo.preferredai.jp/info/plamo-community-license-ja) | https://huggingface.co/pfnet/plamo-3-translate-0.8b-GGUF |
 
 The model is downloaded separately from PFN's official distribution. It is not
@@ -25,6 +27,8 @@ The full model license governs; this summary does not replace it.
 
 `scripts/build-runtime.py` copies llama.cpp's LICENSE and the license/notice files
 under its vendor and ggml directories into the bundled runtime directory.
+`scripts/build-ocr.py` bundles Tesseract, Leptonica and the OCR language data with
+their upstream license texts.
 `scripts/collect-licenses.py` collects license texts for Rust dependencies into
 the same directory before release builds. Those notices must accompany the binary.
 

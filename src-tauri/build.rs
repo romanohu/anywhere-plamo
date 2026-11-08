@@ -10,7 +10,6 @@ fn main() {
         for framework in [
             "AppKit",
             "ScreenCaptureKit",
-            "Vision",
             "CoreMedia",
             "CoreVideo",
             "CoreGraphics",

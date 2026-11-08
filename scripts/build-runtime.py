@@ -75,6 +75,7 @@ def main():
                 shutil.copy2(file, target)
     (OUTPUT / "VERSION").write_text(f"llama.cpp {REVISION}\nbackend {options.backend}\n", encoding="utf-8")
     print(f"Runtime ready: {OUTPUT / 'llama-server'}")
+    subprocess.run(["python3", str(ROOT / "scripts/build-ocr.py")], check=True)
 
 
 if __name__ == "__main__":
