@@ -1,4 +1,8 @@
-"""Run the real Linux desktop app through tauri-driver (no mocked IPC)."""
+"""Run the real Linux desktop app through tauri-driver (no mocked IPC).
+
+--lens requires a compositing X11 desktop (also works with Xvfb + Openbox +
+xcompmgr), bundled OCR, and a downloaded model under --work-dir/app-data.
+"""
 import argparse
 import hashlib
 import json
@@ -16,6 +20,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--app', type=Path, default=ROOT / 'src-tauri/target/debug/anywhere-plamo')
+parser.add_argument('--lens', action='store_true', help='Test the real manual OCR lens with the bundled OCR runtime and a prepared model')
 parser.add_argument('--work-dir', type=Path, default=ROOT / '.runtime-build/desktop-test')
 args = parser.parse_args()
 if sys.platform != 'linux':
@@ -42,7 +47,7 @@ HTTP = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 SESSION = None
 WINDOWS = {}
 WINDOW_LABEL = 'main'
-WINDOW_TITLES = {'main': 'Anywhere Plamo', 'popup': 'Anywhere Plamo — 選択翻訳'}
+WINDOW_TITLES = {'main': 'Anywhere Plamo', 'popup': 'Anywhere Plamo — 選択翻訳', 'lens': 'Anywhere Plamo — OCRレンズ'}
 
 def request(method, path, body=None):
     req = urllib.request.Request(URL + path, data=None if body is None else json.dumps(body).encode(), headers={'Content-Type': 'application/json'}, method=method)
@@ -75,7 +80,7 @@ def select_window(label):
         for handle in request('GET', f'/session/{SESSION}/window/handles'):
             request('POST', f'/session/{SESSION}/window', {'handle': handle})
             wait("document.getElementById('source') !== null")
-            role = js("return new URLSearchParams(location.search).has('popup') ? 'popup' : 'main'")
+            role = js("const params = new URLSearchParams(location.search); return params.has('lens') ? 'lens' : params.has('popup') ? 'popup' : 'main'")
             WINDOWS[role] = handle
     assert label in WINDOWS, WINDOWS
     request('POST', f'/session/{SESSION}/window', {'handle': WINDOWS[label]})
@@ -143,6 +148,144 @@ def translated():
     output = text('translation')
     assert output.strip(), output
     return output
+def lens_checks():
+    global selection_source
+    status = invoke('get_status')
+    assert status['modelReady'] and status['ocrAvailable'] and status['lensSupported'], status
+    state = WORK / 'lens-source.json'
+    acknowledged = state.with_suffix('.ready.json')
+    acknowledged.unlink(missing_ok=True)
+    state.write_text(json.dumps({'mode': 'english'}))
+    selection_source = subprocess.Popen(['/usr/bin/python3', str(ROOT / 'tests/lens-source.py'), str(state)], env=env, stdout=log, stderr=log)
+
+    def source(mode):
+        temporary = state.with_suffix('.command')
+        temporary.write_text(json.dumps({'mode': mode}))
+        temporary.replace(state)
+        for _ in range(100):
+            if acknowledged.exists():
+                result = json.loads(acknowledged.read_text())
+                if result['mode'] == mode:
+                    return result
+            time.sleep(.05)
+        raise AssertionError('Image source did not become ready')
+
+    bounds = source('english')
+    click('lens-button')
+    select_window('lens')
+    wait("!document.getElementById('lens-refresh').disabled")
+    assert window_visible('lens') and not window_visible('main')
+    native_window = window_id()
+    subprocess.run(['xdotool', 'windowsize', '--sync', native_window, '700', '420',
+                    'windowmove', '--sync', native_window, str(bounds['x'] - 25), str(bounds['y'] - 90)], env=env, check=True)
+    time.sleep(.3)
+    assert js("return getComputedStyle(document.body).backgroundColor === 'rgba(0, 0, 0, 0)'")
+    assert js('return document.documentElement.scrollWidth <= innerWidth && document.documentElement.scrollHeight <= innerHeight')
+    check('open and position the transparent native lens over a separate image window')
+
+    def desktop_image(name):
+        import gi
+        gi.require_version('Gdk', '3.0')
+        from gi.repository import Gdk
+        Gdk.init([])
+        root = Gdk.get_default_root_window()
+        image = Gdk.pixbuf_get_from_window(root, 0, 0, root.get_width(), root.get_height())
+        assert image
+        image.savev(str(WORK / name), 'png', [], [])
+
+    def target(value):
+        js("const select=document.getElementById('lens-target');select.value=arguments[0];select.dispatchEvent(new Event('change',{bubbles:true}));", value)
+
+    def updated():
+        wait("document.getElementById('lens-refresh').textContent === '更新' && document.getElementById('lens-status').textContent !== '文字を読み取り中…'", 180)
+        assert text('lens-status').startswith('更新しました'), text('lens-status')
+        result = text('lens-translation')
+        assert result.strip()
+        return result
+
+    target('ja')
+    desktop_image('lens-transparent.png')
+    click('lens-refresh')
+    result = updated()
+    assert 'Local translation works offline.' in text('lens-source'), text('lens-source')
+    assert re.search('[ぁ-んァ-ン一-龯]', result), result
+    assert window_visible('lens'), 'The lens was not restored after capture'
+    check('capture English raster text and translate it into Japanese using the real model', {'ocr': text('lens-source'), 'translation': result})
+    desktop_image('lens-japanese.png')
+    click('lens-original')
+    assert js("return document.getElementById('lens-result').hidden")
+    desktop_image('lens-original.png')
+    click('lens-original')
+    assert not js("return document.getElementById('lens-result').hidden")
+    check('original/translation toggle reveals the underlying image')
+
+    # Updating with the translated overlay visible must read the image behind it.
+    source('japanese')
+    target('en')
+    click('lens-refresh')
+    result = updated()
+    assert '画像' in text('lens-source'), text('lens-source')
+    assert re.search('[A-Za-z]', result), result
+    check('refresh reads the changed Japanese image and translates into English', {'ocr': text('lens-source'), 'translation': result})
+    desktop_image('lens-english.png')
+    click('lens-refresh')
+    updated()
+    assert '画像' in text('lens-source'), 'The lens read its own English translation'
+    check('repeated refresh excludes the lens and its translated text')
+
+    subprocess.run(['xdotool', 'windowmove', '--sync', native_window, str(bounds['x'] - 15), str(bounds['y'] - 90)], env=env, check=True)
+    wait("document.getElementById('lens-translation').textContent === ''")
+    assert '範囲を変更' in text('lens-status'), text('lens-status')
+    subprocess.run(['xdotool', 'windowsize', '--sync', native_window, '720', '440'], env=env, check=True)
+    time.sleep(.2)
+    click('lens-refresh')
+    updated()
+    check('moving/resizing clears stale output and the new region can be refreshed')
+
+    source('blank')
+    click('lens-refresh')
+    wait("document.getElementById('lens-refresh').textContent === '更新'", 30)
+    assert '文字が見つかりません' in text('lens-status'), text('lens-status')
+    assert js("return document.getElementById('lens-result').hidden")
+    source('english')
+    target('ja')
+    subprocess.run(['xdotool', 'windowfocus', '--sync', native_window, 'key', '--clearmodifiers', 'ctrl+Return'], env=env, check=True)
+    updated()
+    check('empty regions are retryable and Ctrl+Enter refreshes the lens')
+
+    # Keep the shared model occupied so cancellation is deterministic even on fast CPUs.
+    select_window('main')
+    js("window.lensTestPending=window.__TAURI__.core.invoke('translate',{text:'The river flows through a quiet town. '.repeat(200),target:'ja',onEvent:new window.__TAURI__.core.Channel()}).catch(()=>{});")
+    time.sleep(.2)
+    select_window('lens')
+    click('lens-refresh')
+    wait("document.getElementById('lens-status').textContent === 'モデルを読み込み中…' || document.getElementById('lens-status').textContent === '翻訳中…'")
+    click('lens-refresh')
+    wait("document.getElementById('lens-refresh').textContent === '更新'")
+    assert text('lens-status') == '中断しました', text('lens-status')
+    select_window('main')
+    invoke('cancel_operation')
+    select_window('lens')
+    click('lens-refresh')
+    updated()
+    check('cancel a pending translation and successfully refresh again')
+
+    subprocess.run(['xdotool', 'windowfocus', '--sync', native_window, 'key', 'Escape'], env=env, check=True)
+    for _ in range(100):
+        if not window_visible('lens') and window_visible('main'):
+            break
+        time.sleep(.05)
+    assert not window_visible('lens') and window_visible('main')
+    select_window('main')
+    click('lens-button')
+    select_window('lens')
+    assert text('lens-translation') == ''
+    click('lens-refresh')
+    updated()
+    check('Escape returns to the main window and reopening the lens remains usable')
+    desktop_image('lens-final.png')
+    print('ALL LENS DESKTOP CHECKS PASSED', flush=True)
+
 env = os.environ.copy()
 env['XDG_DATA_HOME'] = str(DATA)
 env['XDG_CONFIG_HOME'] = str(WORK / 'app-config')
@@ -161,7 +304,7 @@ try:
             if driver.poll() is not None:
                 raise RuntimeError('Driver stopped: ' + (WORK / 'desktop.log').read_text())
             time.sleep(0.1)
-    value = request('POST', '/session', {'capabilities': {'alwaysMatch': {'browserName': 'wry', 'tauri:options': {'application': str(APP), 'args': ['--background']}}}})
+    value = request('POST', '/session', {'capabilities': {'alwaysMatch': {'browserName': 'wry', 'tauri:options': {'application': str(APP), 'args': [] if args.lens else ['--background']}}}})
     SESSION = value['sessionId']
     request('POST', f'/session/{SESSION}/timeouts', {'script': 30000})
     select_window('main')
@@ -169,6 +312,9 @@ try:
     wait("document.getElementById('model-tag').textContent === " + json.dumps('準備完了' if status['modelReady'] else '未準備'))
     assert status['runtimeAvailable'], status
     check('native application startup', status)
+    if args.lens:
+        lens_checks()
+        sys.exit(0)
     if status['resident']:
         visible = lambda: window_visible('main')
         app_pids = {pid for pid in owned_processes() if Path(f'/proc/{pid}/exe').resolve() == APP}

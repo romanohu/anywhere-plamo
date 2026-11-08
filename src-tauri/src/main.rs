@@ -102,11 +102,14 @@ impl PendingRequests {
     }
 }
 
+type LensBounds = (tauri::PhysicalPosition<i32>, tauri::PhysicalSize<u32>, f64);
+
 struct AppState {
     directory: PathBuf,
     binary: PathBuf,
     ocr_runtime: PathBuf,
     lens_open: AtomicBool,
+    lens_bounds: Mutex<Option<LensBounds>>,
     engine: tokio::sync::Mutex<Option<engine::Engine>>,
     preparation: CancellationToken,
     operation: Mutex<Option<CancellationToken>>,
@@ -702,6 +705,7 @@ fn main() {
                 binary,
                 ocr_runtime,
                 lens_open: AtomicBool::new(false),
+                lens_bounds: Mutex::new(None),
                 engine: tokio::sync::Mutex::new(None),
                 preparation: CancellationToken::new(),
                 operation: Mutex::new(None),
@@ -833,8 +837,26 @@ fn main() {
                         | tauri::WindowEvent::ScaleFactorChanged { .. }
                 )
             {
-                state.cancel("lens");
-                let _ = window.emit_to("lens", "lens-changed", ());
+                // X11 sends configure events when hiding/restoring or restacking too.
+                // Only a visible window's actual geometry change invalidates a capture.
+                if window.is_visible().unwrap_or(false) {
+                    if let (Ok(position), Ok(size), Ok(scale)) = (
+                        window.inner_position(),
+                        window.inner_size(),
+                        window.scale_factor(),
+                    ) {
+                        let current = (position, size, scale);
+                        let changed = state.lens_bounds.lock().is_ok_and(|mut bounds| {
+                            bounds
+                                .replace(current)
+                                .is_some_and(|previous| previous != current)
+                        });
+                        if changed {
+                            state.cancel("lens");
+                            let _ = window.emit_to("lens", "lens-changed", ());
+                        }
+                    }
+                }
             } else if window.label() == "popup"
                 && matches!(event, tauri::WindowEvent::Focused(false))
             {
@@ -1004,6 +1026,7 @@ mod tests {
             binary: PathBuf::new(),
             ocr_runtime: PathBuf::new(),
             lens_open: AtomicBool::new(false),
+            lens_bounds: Mutex::new(None),
             engine: tokio::sync::Mutex::new(None),
             preparation: CancellationToken::new(),
             operation: Mutex::new(None),
