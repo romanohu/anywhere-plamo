@@ -1,0 +1,11 @@
+html:has(.lens-mode), body.lens-mode { background: transparent; }
+.lens-mode > .app { display: none; }
+.lens { height: 100dvh; display: flex; flex-direction: column; border: 1px solid var(--muted); }
+.lens-toolbar { display: flex; align-items: center; gap: 10px; padding: 6px 10px; background: var(--surface); }
+.lens-toolbar select { min-width: 0; flex: 1; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 4px; padding: 4px 6px; }
+.lens-toolbar button { flex-shrink: 0; }
+.lens-region { flex: 1; min-height: 0; position: relative; background: rgb(128 128 128 / 5%); }
+.lens-result { position: absolute; inset: 0; overflow: auto; background: color-mix(in srgb, var(--surface) 94%, transparent); padding: 16px 20px; }
+.lens-result p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 16px; line-height: 1.8; user-select: text; }
+.lens-footer { padding: 6px 12px; font-size: 12px; background: var(--surface); }
+.lens-footer .is-error { color: var(--error); }

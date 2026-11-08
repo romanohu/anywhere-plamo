@@ -1,5 +1,6 @@
 import { invoke, isDesktop, onClipboardRequest, onShortcutPressed, onWindowHidden, progressChannel } from './backend';
 import type { AppStatus } from './backend';
+import { initLens } from './lens';
 
 function element<T extends HTMLElement>(id: string): T {
   const found = document.getElementById(id);
@@ -28,7 +29,8 @@ const shortcutReset = element<HTMLButtonElement>('shortcut-reset');
 const shortcutMessage = element('shortcut-message');
 const mac = /Mac/.test(navigator.platform);
 const popup = new URLSearchParams(location.search).has('popup');
-let status: AppStatus = { modelReady: false, runtimeAvailable: false, shortcutAvailable: false, shortcut: '', defaultShortcut: '', shortcutSupported: false, shortcutPopup: false, wayland: false, resident: false };
+const lens = new URLSearchParams(location.search).has('lens');
+let status: AppStatus = { modelReady: false, runtimeAvailable: false, shortcutAvailable: false, shortcut: '', defaultShortcut: '', shortcutSupported: false, shortcutPopup: false, wayland: false, resident: false, lensSupported: false };
 let shortcutDraft = '';
 let recordingShortcut = false;
 let startingShortcut = false;
@@ -111,6 +113,7 @@ function resetResult(): void {
 
 async function refreshStatus(): Promise<void> {
   status = await invoke<AppStatus>('get_status');
+  element('lens-button').hidden = !status.lensSupported || popup;
   element('setup-banner').hidden = status.modelReady && status.runtimeAvailable;
   element('model-tag').textContent = status.modelReady ? '準備完了' : '未準備';
   element('download-section').hidden = status.modelReady;
@@ -407,6 +410,7 @@ copyButton.addEventListener('click', async () => {
   } catch (error) { showError(error); }
 });
 element('settings-button').addEventListener('click', openSettings);
+element('lens-button').addEventListener('click', () => { void invoke('open_lens').catch(showError); });
 element('setup-open').addEventListener('click', openSettings);
 element('settings-close').addEventListener('click', () => dialog.close());
 dialog.addEventListener('close', () => {
@@ -477,6 +481,7 @@ element('license-link').addEventListener('click', async () => {
 });
 element('quit-button').addEventListener('click', () => { void invoke('quit_app').catch(showError); });
 document.addEventListener('keydown', event => {
+  if (lens) return;
   if (recordingShortcut) {
     if (startingShortcut) { event.preventDefault(); return; }
     if ((event.key === 'Tab' || event.key === 'Escape') && !event.ctrlKey && !event.altKey && !event.metaKey) {
@@ -550,4 +555,5 @@ async function init(): Promise<void> {
   } catch (error) { showError(error); }
 }
 
-void init();
+if (lens) void initLens();
+else void init();

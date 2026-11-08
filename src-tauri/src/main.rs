@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod engine;
+mod lens;
 mod model;
 mod protocol;
 mod selection;
@@ -108,6 +109,7 @@ struct AppState {
     preparation: CancellationToken,
     operation: Mutex<Option<CancellationToken>>,
     popup_operation: Mutex<Option<CancellationToken>>,
+    lens_operation: Mutex<Option<CancellationToken>>,
     download: tokio::sync::Mutex<()>,
     pending: Mutex<PendingRequests>,
     shortcut: Mutex<shortcut::State>,
@@ -133,10 +135,10 @@ impl Drop for Operation<'_> {
 
 impl AppState {
     fn operation(&self, label: &str) -> &Mutex<Option<CancellationToken>> {
-        if label == "popup" {
-            &self.popup_operation
-        } else {
-            &self.operation
+        match label {
+            "popup" => &self.popup_operation,
+            "lens" => &self.lens_operation,
+            _ => &self.operation,
         }
     }
 
@@ -228,6 +230,7 @@ struct AppStatus {
     wayland: bool,
     resident: bool,
     shortcut_popup: bool,
+    lens_supported: bool,
 }
 
 #[tauri::command]
@@ -243,6 +246,7 @@ fn get_status(state: tauri::State<'_, AppState>) -> AppStatus {
         wayland: state.wayland,
         resident: state.resident.load(Ordering::Relaxed),
         shortcut_popup: state.shortcut_popup.load(Ordering::Relaxed),
+        lens_supported: cfg!(target_os = "macos"),
     }
 }
 
@@ -377,6 +381,63 @@ async fn translate(
 #[tauri::command]
 fn cancel_operation(window: tauri::WebviewWindow, state: tauri::State<'_, AppState>) {
     state.cancel(window.label());
+}
+
+#[tauri::command]
+async fn open_lens(app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        if app.get_webview_window("lens").is_none() {
+            tauri::WebviewWindowBuilder::new(
+                &app,
+                "lens",
+                tauri::WebviewUrl::App("index.html?lens".into()),
+            )
+            .title("Anywhere Plamo — OCRレンズ")
+            .inner_size(640.0, 420.0)
+            .min_inner_size(400.0, 240.0)
+            .transparent(true)
+            .background_color(tauri::window::Color(0, 0, 0, 0))
+            .always_on_top(true)
+            .visible(false)
+            .center()
+            .build()
+            .map_err(|error| error.to_string())?;
+        }
+        show_window(&app, "lens");
+        if let Some(main) = app.get_webview_window("main") {
+            main.hide().map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        Err("OCRレンズはMacで利用できます。".into())
+    }
+}
+
+#[tauri::command]
+async fn capture_lens(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, AppState>,
+    region: lens::Region,
+) -> Result<String, String> {
+    if window.label() != "lens" {
+        return Err("OCRレンズから実行してください。".into());
+    }
+    let operation = state.begin("lens")?;
+    #[cfg(target_os = "macos")]
+    let native = window.ns_window().map_err(|error| error.to_string())? as usize;
+    #[cfg(not(target_os = "macos"))]
+    let native = 0;
+    let result = tauri::async_runtime::spawn_blocking(move || lens::capture(native, region))
+        .await
+        .map_err(|error| error.to_string())?;
+    if operation.token.is_cancelled() {
+        return Err("CANCELLED".into());
+    }
+    result
 }
 
 #[tauri::command]
@@ -531,9 +592,15 @@ fn hide_window(
     if window.label() == "popup" {
         state.close_popup();
     }
-    if window.label() == "popup" || state.resident.load(Ordering::Relaxed) {
+    if window.label() == "lens" {
+        state.cancel("lens");
+    }
+    if matches!(window.label(), "popup" | "lens") || state.resident.load(Ordering::Relaxed) {
         window.hide().map_err(|error| error.to_string())?;
         let _ = window.emit_to(window.label(), "window-hidden", ());
+        if window.label() == "lens" {
+            show(window.app_handle());
+        }
     }
     Ok(())
 }
@@ -583,6 +650,8 @@ fn main() {
             prepare_engine,
             translate,
             cancel_operation,
+            open_lens,
+            capture_lens,
             read_clipboard,
             write_clipboard,
             take_pending_clipboard,
@@ -617,6 +686,7 @@ fn main() {
                 preparation: CancellationToken::new(),
                 operation: Mutex::new(None),
                 popup_operation: Mutex::new(None),
+                lens_operation: Mutex::new(None),
                 download: tokio::sync::Mutex::new(()),
                 pending: Mutex::new(PendingRequests::default()),
                 shortcut: Mutex::new(shortcut::State {
@@ -682,11 +752,15 @@ fn main() {
                                                     "shortcut-pressed",
                                                     shortcut::label(key),
                                                 );
-                                            } else if !["main", "popup"].iter().any(|label| {
-                                                handle.get_webview_window(label).is_some_and(
-                                                    |window| window.is_focused().unwrap_or(false),
-                                                )
-                                            }) {
+                                            } else if !["main", "popup", "lens"].iter().any(
+                                                |label| {
+                                                    handle.get_webview_window(label).is_some_and(
+                                                        |window| {
+                                                            window.is_focused().unwrap_or(false)
+                                                        },
+                                                    )
+                                                },
+                                            ) {
                                                 translate_selection(&handle);
                                             }
                                         }
@@ -713,14 +787,32 @@ fn main() {
                 if window.label() == "popup" {
                     state.close_popup();
                 }
-                if window.label() == "popup" || state.resident.load(Ordering::Relaxed) {
+                if window.label() == "lens" {
+                    state.cancel("lens");
+                }
+                if matches!(window.label(), "popup" | "lens")
+                    || state.resident.load(Ordering::Relaxed)
+                {
                     api.prevent_close();
                     let _ = window.hide();
                     let _ = window.emit_to(window.label(), "window-hidden", ());
+                    if window.label() == "lens" {
+                        show(window.app_handle());
+                    }
                 } else {
                     // The hidden popup must not keep an app without a tray alive.
                     window.app_handle().exit(0);
                 }
+            } else if window.label() == "lens"
+                && matches!(
+                    event,
+                    tauri::WindowEvent::Moved(_)
+                        | tauri::WindowEvent::Resized(_)
+                        | tauri::WindowEvent::ScaleFactorChanged { .. }
+                )
+            {
+                state.cancel("lens");
+                let _ = window.emit_to("lens", "lens-changed", ());
             } else if window.label() == "popup"
                 && matches!(event, tauri::WindowEvent::Focused(false))
             {
@@ -747,6 +839,7 @@ fn main() {
             let state = app.state::<AppState>();
             state.cancel("main");
             state.cancel("popup");
+            state.cancel("lens");
             state.preparation.cancel();
             tauri::async_runtime::block_on(async {
                 *state.engine.lock().await = None;
@@ -891,6 +984,7 @@ mod tests {
             preparation: CancellationToken::new(),
             operation: Mutex::new(None),
             popup_operation: Mutex::new(None),
+            lens_operation: Mutex::new(None),
             download: tokio::sync::Mutex::new(()),
             pending: Mutex::new(PendingRequests::default()),
             shortcut: Mutex::new(super::shortcut::State {
@@ -940,6 +1034,27 @@ mod tests {
         drop(popup);
         state.finish_popup(request);
         assert!(!state.pending.lock().unwrap().popup.dismissible);
+    }
+
+    #[tokio::test]
+    async fn lens_cancellation_releases_the_engine_wait_without_affecting_other_windows() {
+        let state = state();
+        let main = state.begin("main").unwrap();
+        let popup = state.begin("popup").unwrap();
+        let lens = state.begin("lens").unwrap();
+        assert!(state.begin("lens").is_err());
+        let engine = state.engine.lock().await;
+        state.cancel("lens");
+        assert!(lens.token.is_cancelled());
+        assert!(!main.token.is_cancelled());
+        assert!(!popup.token.is_cancelled());
+        assert_eq!(
+            state.lock_engine(&lens.token).await.err().as_deref(),
+            Some("CANCELLED")
+        );
+        drop(lens);
+        assert!(state.begin("lens").is_ok());
+        drop(engine);
     }
 
     #[tokio::test]

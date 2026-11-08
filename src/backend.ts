@@ -8,6 +8,7 @@ export interface AppStatus {
   shortcutPopup: boolean;
   wayland: boolean;
   resident: boolean;
+  lensSupported: boolean;
 }
 
 export type ProgressEvent =

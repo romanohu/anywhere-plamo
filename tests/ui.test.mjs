@@ -19,7 +19,7 @@ async function fixture(t, options = {}) {
   const errors = [];
   const console = new VirtualConsole();
   console.on('jsdomError', error => errors.push(error));
-  const dom = new JSDOM(html, { url: `http://localhost/${options.popup ? '?popup' : ''}`, runScripts: 'outside-only', virtualConsole: console });
+  const dom = new JSDOM(html, { url: `http://localhost/${options.lens ? '?lens' : options.popup ? '?popup' : ''}`, runScripts: 'outside-only', virtualConsole: console });
   const { window } = dom;
   if (options.preload !== undefined) window.localStorage.setItem('preload-model', String(options.preload));
   if (options.autoDirection !== undefined) window.localStorage.setItem('auto-direction', String(options.autoDirection));
@@ -27,6 +27,7 @@ async function fixture(t, options = {}) {
   let now = 0;
   if (options.manualClock) window.performance.now = () => now;
   const byId = id => window.document.getElementById(id);
+  byId('lens-region').getBoundingClientRect = () => ({ x: 1, y: 49, width: 638, height: 340 });
   // JSDOM does not implement native dialog presentation. Its open state is enough for these tests.
   window.HTMLDialogElement.prototype.showModal = function () { this.open = true; };
   window.HTMLDialogElement.prototype.close = function () { this.open = false; this.dispatchEvent(new window.Event('close')); };
@@ -36,6 +37,7 @@ async function fixture(t, options = {}) {
     modelReady: options.modelReady ?? true, runtimeAvailable: true,
     shortcutAvailable: true, wayland: false, resident: true,
     shortcut: 'Ctrl+Shift+KeyJ', defaultShortcut: 'Ctrl+Shift+KeyJ', shortcutSupported: true, shortcutPopup: false,
+    lensSupported: !!options.lens,
     ...options.status,
   };
   let clipboard = options.clipboard ?? 'Hello, world.';
@@ -48,6 +50,7 @@ async function fixture(t, options = {}) {
   let finishCancellation;
   let finishPending;
   let finishRecording;
+  let finishCapture;
   const channels = [];
   const native = {
     core: {
@@ -56,6 +59,11 @@ async function fixture(t, options = {}) {
         calls.push({ command, args });
         switch (command) {
           case 'get_status': return { ...state };
+          case 'open_lens': return;
+          case 'capture_lens':
+            if (options.captureError) throw options.captureError;
+            if (options.holdCapture) return new Promise(resolve => { finishCapture = resolve; });
+            return options.ocrText ?? 'Text in an image.';
           case 'set_shortcut_recording':
             if (args.recording && options.holdRecording) return new Promise(resolve => { finishRecording = resolve; });
             return;
@@ -107,7 +115,7 @@ async function fixture(t, options = {}) {
   };
   if (!options.browser) window.__TAURI__ = native;
   window.eval(bundle);
-  await until(() => options.browser || calls.some(call => call.command === 'take_pending_clipboard'));
+  await until(() => options.browser || calls.some(call => call.command === (options.lens ? 'get_status' : 'take_pending_clipboard')));
   t.after(() => { dom.window.close(); assert.deepEqual(errors, []); });
   return {
     window, byId, calls, state, channels,
@@ -128,6 +136,8 @@ async function fixture(t, options = {}) {
     finishCancellation() { finishCancellation(); },
     finishPending() { finishPending(); },
     finishRecording() { finishRecording(); },
+    finishCapture(text) { finishCapture(text); },
+    moveLens() { listeners.get('lens-changed')?.({ payload: null }); },
     shortcutPressed(shortcut) { listeners.get('shortcut-pressed')?.({ payload: shortcut }); },
     closeWindow() { listeners.get('window-hidden')?.({ payload: null }); },
     request(text, selection = true) { pending = { text, selection, request: ++request }; listeners.get('clipboard-request')?.({ payload: null }); return request; },
@@ -906,3 +916,119 @@ for (const failure of ['read error', 'oversized input']) {
     assert.equal(f.byId('message').textContent, error);
   });
 }
+
+test('OCR lens entry is available only on supported desktop main windows', async t => {
+  const mac = await fixture(t, { status: { lensSupported: true } });
+  assert.equal(mac.byId('lens-button').hidden, false);
+  mac.click('lens-button');
+  await until(() => mac.calls.some(call => call.command === 'open_lens'));
+  const linux = await fixture(t);
+  assert.equal(linux.byId('lens-button').hidden, true);
+  const popup = await fixture(t, { popup: true, status: { lensSupported: true } });
+  assert.equal(popup.byId('lens-button').hidden, true);
+});
+
+test('manual lens captures only its viewport on request and translates into the selected language', async t => {
+  const f = await fixture(t, { lens: true, target: 'en', ocrText: '画像の文字です。' });
+  assert.equal(f.window.document.body.classList.contains('lens-mode'), true);
+  assert.equal(f.byId('lens').hidden, false);
+  assert.equal(f.byId('lens-target').value, 'en');
+  assert.equal(f.calls.some(call => ['capture_lens', 'translate', 'prepare_engine', 'take_pending_clipboard'].includes(call.command)), false);
+  f.key('Enter', { metaKey: true });
+  await until(() => f.byId('lens-status').textContent.startsWith('更新しました'));
+  assert.deepEqual({ ...f.calls.find(call => call.command === 'capture_lens').args.region }, { x: 1, y: 49, width: 638, height: 340 });
+  const request = f.calls.find(call => call.command === 'translate');
+  assert.equal(request.args.text, '画像の文字です。');
+  assert.equal(request.args.target, 'en');
+  assert.equal(f.byId('lens-translation').textContent, 'こんにちは、世界。');
+  assert.equal(f.byId('lens-result').hidden, false);
+  f.click('lens-original');
+  assert.equal(f.byId('lens-result').hidden, true);
+  f.click('lens-original');
+  assert.equal(f.byId('lens-result').hidden, false);
+  f.byId('lens-target').value = 'ja';
+  f.byId('lens-target').dispatchEvent(new f.window.Event('change'));
+  assert.equal(f.byId('lens-translation').textContent, '');
+  assert.equal(f.window.localStorage.getItem('lens-target'), 'ja');
+  assert.equal(f.window.localStorage.getItem('target-language'), 'en');
+  assert.equal(f.calls.filter(call => call.command === 'capture_lens').length, 1);
+});
+
+test('lens permission failures, empty OCR and oversized regions leave a retryable transparent view', async t => {
+  for (const options of [{ captureError: '画面収録を許可してください。' }, { ocrText: '   ' }, { ocrText: 'a'.repeat(12001) }]) {
+    const f = await fixture(t, { lens: true, ...options });
+    f.click('lens-refresh');
+    await until(() => f.calls.some(call => call.command === 'capture_lens') && f.byId('lens-refresh').textContent === '更新');
+    assert.equal(f.byId('lens-refresh').disabled, false);
+    assert.equal(f.byId('lens-result').hidden, true);
+    assert.equal(f.calls.some(call => call.command === 'translate'), false);
+    assert.match(f.byId('lens-status').textContent, /許可|見つかりません|多すぎ/);
+  }
+});
+
+test('lens checks model readiness on each update, including after a download in the main window', async t => {
+  const f = await fixture(t, { lens: true, modelReady: false });
+  f.click('lens-refresh');
+  await until(() => f.byId('lens-status').textContent.includes('準備してください'));
+  assert.equal(f.calls.some(call => call.command === 'capture_lens'), false);
+  f.state.modelReady = true;
+  f.click('lens-refresh');
+  await until(() => f.byId('lens-status').textContent.startsWith('更新しました'));
+});
+
+test('moving or resizing the lens discards late OCR without translating or refreshing automatically', async t => {
+  for (const resize of [false, true]) {
+    const f = await fixture(t, { lens: true, holdCapture: true });
+    f.click('lens-refresh');
+    await until(() => f.calls.some(call => call.command === 'capture_lens'));
+    if (resize) f.window.dispatchEvent(new f.window.Event('resize'));
+    else f.moveLens();
+    await until(() => f.calls.some(call => call.command === 'cancel_operation'));
+    f.finishCapture('Obsolete image text');
+    await until(() => f.byId('lens-refresh').textContent === '更新');
+    assert.equal(f.calls.some(call => call.command === 'translate'), false);
+    assert.equal(f.byId('lens-result').hidden, true);
+    assert.equal(f.calls.filter(call => call.command === 'capture_lens').length, 1);
+    assert.match(f.byId('lens-status').textContent, /範囲を変更/);
+  }
+});
+
+test('lens movement cancels streaming, ignores late tokens and waits for cancellation before another capture', async t => {
+  const f = await fixture(t, { lens: true, holdTranslation: true, holdCancellation: true });
+  f.click('lens-refresh');
+  await until(() => f.calls.some(call => call.command === 'translate'));
+  f.send({ kind: 'token', text: '<b>plain text</b>' });
+  assert.equal(f.byId('lens-translation').querySelector('b'), null);
+  f.moveLens();
+  f.send({ kind: 'token', text: 'stale' });
+  f.finish({ truncated: false });
+  await until(() => f.byId('lens-refresh').textContent === '中断中…');
+  assert.equal(f.byId('lens-refresh').disabled, true);
+  assert.equal(f.byId('lens-translation').textContent, '');
+  f.key('Enter', { metaKey: true });
+  assert.equal(f.calls.filter(call => call.command === 'capture_lens').length, 1);
+  f.finishCancellation();
+  await until(() => !f.byId('lens-refresh').disabled);
+  f.click('lens-refresh');
+  await until(() => f.calls.filter(call => call.command === 'translate').length === 2);
+  f.channels[0].onmessage({ kind: 'token', text: 'old request' });
+  assert.equal(f.byId('lens-translation').textContent, '');
+  f.send({ kind: 'token', text: 'new result' });
+  f.finish({ truncated: true });
+  await until(() => f.byId('lens-status').textContent.includes('上限'));
+  assert.equal(f.byId('lens-translation').textContent, 'new result');
+});
+
+test('Escape closes the lens, cancels pending OCR and never dispatches manual-window shortcuts', async t => {
+  const f = await fixture(t, { lens: true, holdCapture: true });
+  f.key('Enter', { metaKey: true });
+  await until(() => f.calls.some(call => call.command === 'capture_lens'));
+  f.key('Escape');
+  await until(() => f.calls.some(call => call.command === 'hide_window'));
+  f.closeWindow();
+  f.finishCapture('Old image');
+  await until(() => f.byId('lens-refresh').textContent === '更新');
+  assert.equal(f.calls.some(call => call.command === 'translate'), false);
+  assert.equal(f.byId('lens-result').hidden, true);
+  assert.equal(f.byId('settings-dialog').open, false);
+});
