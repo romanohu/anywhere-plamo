@@ -81,11 +81,16 @@
       <div class="lens-footer"><span id="lens-status" role="status" aria-live="polite">読み取りたい範囲に枠を合わせて「更新」</span><span id="lens-passthrough-hint" role="status" hidden></span></div>
     </section>
 
+    <section id="lens-select" aria-label="翻訳する範囲を選択" tabindex="-1" hidden>
+      <div id="lens-select-box" hidden></div>
+      <p id="lens-select-hint" role="status"></p>
+    </section>
+
     <dialog id="settings-dialog" aria-labelledby="settings-title">
       <div class="dialog-header"><h2 id="settings-title">設定</h2><button class="icon-button" id="settings-close" aria-label="閉じる"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
       <section class="settings-section">
         <h3>ショートカット</h3>
-        <select id="shortcut-action" aria-label="ショートカットの機能"><option value="selection">選択した文章を翻訳</option><option value="lens">レンズのクリック透過</option></select>
+        <select id="shortcut-action" aria-label="ショートカットの機能"><option value="selection">選択した文章を翻訳</option><option value="lensOpen">OCRレンズを開く／閉じる</option><option value="lens">レンズのクリック透過</option></select>
         <p class="setting-description" id="shortcut-description">他のアプリで選択した文章を翻訳します。</p>
         <button class="shortcut-box" id="shortcut-record" aria-label="翻訳ショートカットを変更" aria-describedby="shortcut-help shortcut-message"><span id="shortcut-display">Ctrl + Shift + J</span></button>
         <div class="shortcut-actions"><span class="setting-description" id="shortcut-help">押してキーを入力</span><button class="text-button" id="shortcut-reset">既定に戻す</button><button class="button small" id="shortcut-save" disabled>保存</button></div>

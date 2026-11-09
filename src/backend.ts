@@ -14,6 +14,9 @@ export interface AppStatus {
   lensShortcut: string;
   defaultLensShortcut: string;
   lensShortcutAvailable: boolean;
+  lensOpenShortcut: string;
+  defaultLensOpenShortcut: string;
+  lensOpenShortcutAvailable: boolean;
   lensPassthrough: boolean;
 }
 

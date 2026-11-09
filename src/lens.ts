@@ -19,6 +19,9 @@ export async function initLens(): Promise<void> {
   const source = element('lens-source');
   const status = element('lens-status');
   let ready = false;
+  let positioning = false;
+  let showAgain = false;
+  let selectedRefresh = false;
   let busy = false;
   let translating = false;
   let selection = false;
@@ -87,7 +90,9 @@ export async function initLens(): Promise<void> {
 
   function schedule(): void {
     clearTimeout(timer);
-    if (ready && auto && visible && !busy && !cancellation) timer = setTimeout(() => { void update(true); }, pollDelay);
+    if (ready && (auto || selectedRefresh) && visible && !busy && !cancellation && !positioning) timer = setTimeout(() => {
+      void update(!selectedRefresh);
+    }, pollDelay);
   }
 
   function saveAuto(): void {
@@ -167,9 +172,9 @@ export async function initLens(): Promise<void> {
   }
 
   async function update(background = false): Promise<void> {
-    if (!ready || cancellation || !visible) return;
+    if (!ready || cancellation || !visible || positioning) return;
     if (busy) {
-      if (!background) { auto = false; saveAuto(); invalidate('中断しました'); }
+      if (!background) { selectedRefresh = false; auto = false; saveAuto(); invalidate('中断しました'); }
       return;
     }
     clearTimeout(timer);
@@ -285,6 +290,7 @@ export async function initLens(): Promise<void> {
         message(detail === 'CANCELLED' ? '中断しました' : detail, detail !== 'CANCELLED');
       }
     } finally {
+      if (run === generation) selectedRefresh = false;
       busy = false;
       translating = false;
       render();
@@ -293,6 +299,8 @@ export async function initLens(): Promise<void> {
   }
 
   async function close(): Promise<void> {
+    showAgain = false;
+    selectedRefresh = false;
     visible = false;
     invalidate(instruction(), true);
     try { await invoke('hide_window'); } catch (error) { message(String(error), true); }
@@ -309,6 +317,7 @@ export async function initLens(): Promise<void> {
   });
   automatic.addEventListener('click', () => {
     auto = !auto;
+    if (!auto) selectedRefresh = false;
     saveAuto();
     if (auto || busy) invalidate(instruction());
     else { clearTimeout(timer); message('自動更新を停止しました'); render(); }
@@ -326,7 +335,7 @@ export async function initLens(): Promise<void> {
     invalidate(auto ? instruction() : '「更新」で選んだ言語に翻訳', true);
     try { localStorage.setItem('lens-target', target.value); } catch { /* Optional preference. */ }
   });
-  const moved = (): void => { if (!selection) invalidate(auto ? '範囲が決まると自動で翻訳します' : '範囲を変更しました。「更新」で再読取'); };
+  const moved = (): void => { if (!selection && !positioning) invalidate(auto ? '範囲が決まると自動で翻訳します' : '範囲を変更しました。「更新」で再読取'); };
   let viewport = [window.innerWidth, window.innerHeight];
   window.addEventListener('resize', () => {
     const current = [window.innerWidth, window.innerHeight];
@@ -365,6 +374,27 @@ export async function initLens(): Promise<void> {
       return key.replace(/^Key([A-Z])$/, '$1').replace(/^Digit([0-9])$/, '$1');
     }).join(' + ');
   };
+  const shown = async (): Promise<void> => {
+    if (!ready) return;
+    if (positioning) { showAgain = true; return; }
+    visible = true;
+    positioning = true;
+    invalidate(instruction(), true);
+    try {
+      const rect = region.getBoundingClientRect();
+      const selected = await invoke<boolean>('apply_lens_selection', { insets: {
+        left: rect.x, top: rect.y, right: innerWidth - rect.right, bottom: innerHeight - rect.bottom,
+      } });
+      // Allow native resize events and the webview layout to settle before capture.
+      if (selected) await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+      positioning = false;
+      if (selected && visible) selectedRefresh = true;
+      schedule();
+    } catch (error) { positioning = false; message(String(error), true); render(); }
+    finally {
+      if (showAgain) { showAgain = false; void shown(); }
+    }
+  };
   try {
     await window.__TAURI__!.event.listen<boolean>('lens-passthrough-changed', event => { passthrough = event.payload; render(); });
     await window.__TAURI__!.event.listen<string>('lens-error', event => { message(event.payload, true); render(); });
@@ -372,8 +402,8 @@ export async function initLens(): Promise<void> {
       void invoke<AppStatus>('get_status').then(app => { loadPassthrough(app); render(); }).catch(error => message(String(error), true));
     });
     await window.__TAURI__!.event.listen('lens-changed', moved);
-    await onWindowHidden(() => { visible = false; invalidate(instruction(), true); });
-    await window.__TAURI__!.event.listen('window-shown', () => { visible = true; invalidate(instruction()); });
+    await onWindowHidden(() => { visible = false; showAgain = false; selectedRefresh = false; invalidate(instruction(), true); });
+    await window.__TAURI__!.event.listen('window-shown', () => { void shown(); });
     const app = await invoke<AppStatus>('get_status');
     loadPassthrough(app);
     ready = app.lensSupported;
@@ -383,6 +413,6 @@ export async function initLens(): Promise<void> {
     message(instruction());
     if (!ready) message('この環境ではOCRレンズを利用できません。');
     render();
-    schedule();
+    await shown();
   } catch (error) { message(String(error), true); }
 }

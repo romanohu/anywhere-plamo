@@ -1,7 +1,7 @@
 """Run the real Linux desktop app through tauri-driver (no mocked IPC).
 
---lens requires a compositing X11 desktop (also works with Xvfb + Openbox +
-xcompmgr), bundled OCR, and a downloaded model under --work-dir/app-data.
+--lens requires a 1920x1200 compositing X11 desktop (also works with Xvfb +
+Openbox + xcompmgr), bundled OCR, and a downloaded model under --work-dir/app-data.
 """
 import argparse
 import hashlib
@@ -48,7 +48,7 @@ HTTP = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 SESSION = None
 WINDOWS = {}
 WINDOW_LABEL = 'main'
-WINDOW_TITLES = {'main': 'Anywhere Plamo', 'popup': 'Anywhere Plamo — 選択翻訳', 'lens': 'Anywhere Plamo — OCRレンズ'}
+WINDOW_TITLES = {'main': 'Anywhere Plamo', 'popup': 'Anywhere Plamo — 選択翻訳', 'lens': 'Anywhere Plamo — OCRレンズ', 'lens-select': 'Anywhere Plamo — 範囲選択'}
 
 def request(method, path, body=None):
     req = urllib.request.Request(URL + path, data=None if body is None else json.dumps(body).encode(), headers={'Content-Type': 'application/json'}, method=method)
@@ -81,7 +81,7 @@ def select_window(label):
         for handle in request('GET', f'/session/{SESSION}/window/handles'):
             request('POST', f'/session/{SESSION}/window', {'handle': handle})
             wait("document.getElementById('source') !== null")
-            role = js("const params = new URLSearchParams(location.search); return params.has('lens') ? 'lens' : params.has('popup') ? 'popup' : 'main'")
+            role = js("const params = new URLSearchParams(location.search); return params.has('lens-select') ? 'lens-select' : params.has('lens') ? 'lens' : params.has('popup') ? 'popup' : 'main'")
             WINDOWS[role] = handle
     assert label in WINDOWS, WINDOWS
     request('POST', f'/session/{SESSION}/window', {'handle': WINDOWS[label]})
@@ -111,7 +111,7 @@ def check(name, detail=None):
     REPORT.append({'check': name, 'detail': detail})
     print('PASS', name, json.dumps(detail, ensure_ascii=False) if detail is not None else '', flush=True)
 
-def screenshot(name):
+def screenshot(name, desktop=False):
     # WebKitWebDriver's snapshot can stall after focus moves to another app.
     # Capture the actual X11 window instead, including its visible rendering.
     import gi
@@ -121,13 +121,14 @@ def screenshot(name):
     Gdk.init([])
     native_window = window_id()
     subprocess.run(['xdotool', 'windowraise', native_window], env=env, check=True)
-    display = Gdk.Display.open(env['DISPLAY'])
-    window = GdkX11.X11Window.foreign_new_for_display(display, int(native_window))
+    display = Gdk.Display.get_default() if desktop else Gdk.Display.open(env['DISPLAY'])
+    window = display.get_default_screen().get_root_window() if desktop else GdkX11.X11Window.foreign_new_for_display(display, int(native_window))
     time.sleep(0.1)
     image = Gdk.pixbuf_get_from_window(window, 0, 0, window.get_width(), window.get_height())
     assert image, 'Could not capture the app window'
     image.savev(str(WORK / name), 'png', [], [])
-    display.close()
+    if not desktop:
+        display.close()
 
 def owned_processes():
     rows = subprocess.check_output(['ps', '-e', '-o', 'pid=,ppid='], text=True).splitlines()
@@ -157,7 +158,6 @@ def lens_checks():
     acknowledged = state.with_suffix('.ready.json')
     acknowledged.unlink(missing_ok=True)
     state.write_text(json.dumps({'mode': 'english'}))
-    selection_source = subprocess.Popen(['/usr/bin/python3', str(ROOT / 'tests/lens-source.py'), str(state)], env=env, stdout=log, stderr=log)
 
     def source(mode, **options):
         temporary = state.with_suffix('.command')
@@ -171,12 +171,101 @@ def lens_checks():
             time.sleep(.05)
         raise AssertionError('Image source did not become ready')
 
-    bounds = source('english')
     js("localStorage.setItem('lens-auto','false')")
-    click('lens-button')
+    current_key = status['lensOpenShortcut'].replace('Key', '').lower()
+    letter = 'P' if status['lensOpenShortcut'] == 'Ctrl+Alt+KeyO' else 'O'
+    open_key = 'ctrl+alt+' + letter.lower()
+    click('settings-button')
+    js("const action=document.getElementById('shortcut-action');action.value='lensOpen';action.dispatchEvent(new Event('change'))")
+    click('shortcut-record')
+    wait("document.getElementById('shortcut-record').getAttribute('aria-pressed') === 'true'")
+    subprocess.run(['xdotool', 'key', '--clearmodifiers', current_key], env=env, check=True)
+    wait("document.getElementById('shortcut-record').getAttribute('aria-pressed') === 'false'")
+    assert text('shortcut-display') == status['lensOpenShortcut'].replace('Key', '').replace('+', ' + ') and not window_visible('lens-select')
+    click('shortcut-record')
+    wait("document.getElementById('shortcut-record').getAttribute('aria-pressed') === 'true'")
+    subprocess.run(['xdotool', 'windowactivate', '--sync', window_id(), 'key', '--clearmodifiers', open_key], env=env, check=True)
+    wait("document.getElementById('shortcut-display').textContent === " + json.dumps('Ctrl + Alt + ' + letter))
+    click('shortcut-save')
+    wait("document.getElementById('shortcut-message').textContent === '保存しました'")
+    status = invoke('get_status')
+    assert status['lensOpenShortcut'] == 'Ctrl+Alt+Key' + letter and status['lensOpenShortcutAvailable']
+    for command in [
+        {'shortcut': status['shortcut'], 'lensOpen': True},
+        {'shortcut': status['lensShortcut'], 'lensOpen': True},
+        {'shortcut': status['lensOpenShortcut']},
+        {'shortcut': status['lensOpenShortcut'], 'lens': True},
+    ]:
+        try:
+            invoke('set_shortcut', command)
+            raise AssertionError('Duplicate lens shortcut was accepted')
+        except RuntimeError as error:
+            assert '異なるキー' in str(error)
+    invoke('set_shortcut_popup', {'enabled': status['shortcutPopup']})
+    settings = json.loads((MODEL.parent / 'settings.json').read_text())
+    assert settings['lensOpenShortcut'] == status['lensOpenShortcut']
+    assert settings['shortcut'] == status['shortcut'] and settings['lensShortcut'] == status['lensShortcut']
+    check('record the lens opening key without opening it, save a custom key and reject collisions in both directions')
+    click('settings-close')
+    selection_source = subprocess.Popen(['/usr/bin/python3', str(ROOT / 'tests/lens-source.py'), str(state)], env=env, stdout=log, stderr=log)
+    bounds = source('english')
+    source_window = subprocess.check_output(['xdotool', 'search', '--name', '^Anywhere Plamo OCR test source$'], env=env, text=True).strip()
+    subprocess.run(['xdotool', 'windowfocus', '--sync', source_window, 'key', '--clearmodifiers', open_key], env=env, check=True)
+    for _ in range(100):
+        if window_visible('lens-select'):
+            break
+        time.sleep(.05)
+    assert window_visible('lens-select') and not window_visible('lens')
+    select_window('lens-select')
+    subprocess.run(['xdotool', 'windowfocus', '--sync', window_id(), 'key', 'Escape'], env=env, check=True)
+    for _ in range(100):
+        if not window_visible('lens-select'):
+            break
+        time.sleep(.05)
+    assert not window_visible('lens-select') and not window_visible('lens') and not window_visible('main')
+    check('the global shortcut opens region selection and Escape cancels without starting OCR')
+
+    def choose_region():
+        for _ in range(100):
+            if window_visible('lens-select'):
+                break
+            time.sleep(.05)
+        assert window_visible('lens-select') and not window_visible('lens')
+        select_window('lens-select')
+        picker = window_id()
+        assert js("return document.getElementById('lens-select-box').hidden")
+        subprocess.run(['xdotool', 'mousemove', '--window', picker, str(bounds['x'] - 25), str(bounds['y'] - 40),
+                        'mousedown', '1', 'mousemove', '--sync', '--window', picker, str(bounds['x'] + 675), str(bounds['y'] + 280),
+                        'mouseup', '1'], env=env, check=True)
+        wait("!document.getElementById('lens-select-box').hidden")
+        screenshot('lens-region-selection.png', desktop=True)
+        subprocess.run(['xdotool', 'windowfocus', '--sync', picker, 'key', 'Return'], env=env, check=True)
+        for _ in range(100):
+            if window_visible('lens'):
+                break
+            time.sleep(.05)
+        assert window_visible('lens') and not window_visible('lens-select')
+        select_window('lens')
+        wait("document.getElementById('lens-region').getBoundingClientRect().width === 700")
+        wait("document.getElementById('lens-status').textContent.startsWith('更新しました') || document.getElementById('lens-status').textContent.startsWith('文字が見つかりませんでした')", 60)
+        screenshot('lens-selected-region.png', desktop=True)
+        viewport = js("return document.getElementById('lens-region').getBoundingClientRect().toJSON()")
+        from gi.repository import Gdk, GdkX11
+        native = GdkX11.X11Window.foreign_new_for_display(Gdk.Display.get_default(), int(window_id()))
+        _, x, y = native.get_origin()
+        assert abs(x + viewport['x'] - (bounds['x'] - 25)) <= 2, ((x, y), viewport, bounds)
+        assert abs(y + viewport['y'] - (bounds['y'] - 40)) <= 2, ((x, y), viewport, bounds)
+        assert text('lens-status').startswith('更新しました'), text('lens-status')
+
+    subprocess.run(['xdotool', 'key', '--clearmodifiers', open_key], env=env, check=True)
+    choose_region()
     select_window('lens')
     wait("!document.getElementById('lens-refresh').disabled")
     assert window_visible('lens') and not window_visible('main')
+    assert 'Local translation works offline.' in text('lens-source')
+    viewport = js("return document.getElementById('lens-region').getBoundingClientRect().toJSON()")
+    assert abs(viewport['width'] - 700) <= 1 and abs(viewport['height'] - 320) <= 1, viewport
+    check('dragging then Enter aligns the reading viewport exactly and starts translation in manual mode', viewport)
     native_window = window_id()
     subprocess.run(['xdotool', 'windowsize', '--sync', native_window, '700', '420',
                     'windowmove', '--sync', native_window, str(bounds['x'] - 25), str(bounds['y'] - 90)], env=env, check=True)
@@ -266,6 +355,38 @@ def lens_checks():
     assert not invoke('get_status')['lensPassthrough']
     check('reopening the lens always restores interactive mode')
 
+    click('lens-passthrough')
+    wait("document.getElementById('lens-passthrough').getAttribute('aria-pressed') === 'true'")
+    subprocess.run(['xdotool', 'windowfocus', '--sync', source_window, 'key', '--clearmodifiers', open_key], env=env, check=True)
+    for _ in range(100):
+        if not window_visible('lens'):
+            break
+        time.sleep(.05)
+    assert not window_visible('lens') and not window_visible('main')
+    assert not invoke('get_status')['lensPassthrough']
+    assert subprocess.check_output(['xdotool', 'getwindowfocus'], env=env, text=True).strip() == source_window
+    subprocess.run(['xdotool', 'key', '--clearmodifiers', open_key], env=env, check=True)
+    choose_region()
+    assert window_visible('lens') and window_id() == native_window
+    assert not invoke('get_status')['lensPassthrough']
+    check('the same key closes a click-through lens without taking focus, then selects a fresh area in the reused window')
+    result = subprocess.run([str(APP), '--toggle-lens'], env=env, capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+    for _ in range(100):
+        if not window_visible('lens'):
+            break
+        time.sleep(.05)
+    assert not window_visible('lens') and not window_visible('main')
+    result = subprocess.run([str(APP), '--toggle-lens'], env=env, capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+    for _ in range(100):
+        if window_visible('lens-select'):
+            break
+        time.sleep(.05)
+    choose_region()
+    assert window_id() == native_window
+    check('the OS shortcut command opens the same region selection flow through the single-instance app')
+
     source('japanese')
     target('ja')
     click('lens-refresh')
@@ -325,6 +446,7 @@ def lens_checks():
     updated()
     check('cancel a pending translation and successfully refresh again')
 
+    before_reopen = subprocess.check_output(['xdotool', 'getwindowgeometry', '--shell', native_window], env=env, text=True)
     subprocess.run(['xdotool', 'windowfocus', '--sync', native_window, 'key', 'Escape'], env=env, check=True)
     for _ in range(100):
         if not window_visible('lens') and window_visible('main'):
@@ -337,6 +459,7 @@ def lens_checks():
     assert text('lens-translation') == ''
     click('lens-refresh')
     updated()
+    assert subprocess.check_output(['xdotool', 'getwindowgeometry', '--shell', native_window], env=env, text=True) == before_reopen
     check('Escape returns to the main window and reopening the lens remains usable')
     desktop_image('lens-final.png')
 

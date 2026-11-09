@@ -51,7 +51,7 @@ pub async fn capture(
     if cancel.is_cancelled() {
         return Err("CANCELLED".into());
     }
-    if automatic {
+    if !selection {
         use raw_window_handle::{HasWindowHandle, RawWindowHandle};
         let id = match window
             .window_handle()
@@ -65,7 +65,7 @@ pub async fn capture(
         let (x, y, width, height) = bounds.ok_or("Waylandでは手動更新を使ってください。")?;
         let path = path.to_owned();
         let token = cancel.clone();
-        return tauri::async_runtime::spawn_blocking(move || {
+        let result = tauri::async_runtime::spawn_blocking(move || {
             let image = capture_x11_underlying(id, x, y, width, height)?;
             if token.is_cancelled() {
                 return Err("CANCELLED".into());
@@ -74,6 +74,12 @@ pub async fn capture(
         })
         .await
         .map_err(|error| error.to_string())?;
+        // Manual captures can use the same compositor image, avoiding GTK
+        // remapping/repositioning the freshly selected lens. Keep the hide-and-
+        // capture fallback for desktops without XComposite support.
+        if result.is_ok() || automatic || cancel.is_cancelled() {
+            return result;
+        }
     }
     window.hide().map_err(|error| error.to_string())?;
     let restore = RestoreWindow { window };

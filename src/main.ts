@@ -1,6 +1,7 @@
 import { invoke, isDesktop, onClipboardRequest, onShortcutPressed, onWindowHidden, progressChannel } from './backend';
 import type { AppStatus } from './backend';
 import { initLens } from './lens';
+import { initLensSelect } from './lens-select';
 
 function element<T extends HTMLElement>(id: string): T {
   const found = document.getElementById(id);
@@ -31,7 +32,8 @@ const shortcutMessage = element('shortcut-message');
 const mac = /Mac/.test(navigator.platform);
 const popup = new URLSearchParams(location.search).has('popup');
 const lens = new URLSearchParams(location.search).has('lens');
-let status: AppStatus = { modelReady: false, runtimeAvailable: false, shortcutAvailable: false, shortcut: '', defaultShortcut: '', shortcutSupported: false, shortcutPopup: false, wayland: false, resident: false, lensSupported: false, ocrAvailable: false, lensUsesSelection: false, lensShortcut: '', defaultLensShortcut: '', lensShortcutAvailable: false, lensPassthrough: false };
+const lensSelect = new URLSearchParams(location.search).has('lens-select');
+let status: AppStatus = { modelReady: false, runtimeAvailable: false, shortcutAvailable: false, shortcut: '', defaultShortcut: '', shortcutSupported: false, shortcutPopup: false, wayland: false, resident: false, lensSupported: false, ocrAvailable: false, lensUsesSelection: false, lensShortcut: '', defaultLensShortcut: '', lensShortcutAvailable: false, lensOpenShortcut: '', defaultLensOpenShortcut: '', lensOpenShortcutAvailable: false, lensPassthrough: false };
 let shortcutDraft = '';
 let recordingShortcut = false;
 let startingShortcut = false;
@@ -128,6 +130,7 @@ async function refreshStatus(): Promise<void> {
 }
 
 function currentShortcut(): { binding: string; default: string; available: boolean } {
+  if (shortcutAction.value === 'lensOpen') return { binding: status.lensOpenShortcut, default: status.defaultLensOpenShortcut, available: status.lensOpenShortcutAvailable };
   return shortcutAction.value === 'lens'
     ? { binding: status.lensShortcut, default: status.defaultLensShortcut, available: status.lensShortcutAvailable }
     : { binding: status.shortcut, default: status.defaultShortcut, available: status.shortcutAvailable };
@@ -136,9 +139,10 @@ function currentShortcut(): { binding: string; default: string; available: boole
 function renderShortcut(): void {
   const current = currentShortcut();
   const forLens = shortcutAction.value === 'lens';
+  const forLensOpen = shortcutAction.value === 'lensOpen';
   shortcutAction.disabled = savingShortcut || startingShortcut;
-  element('selection-shortcut-options').hidden = forLens;
-  shortcutRecord.setAttribute('aria-label', forLens ? 'レンズのショートカットを変更' : '翻訳ショートカットを変更');
+  element('selection-shortcut-options').hidden = forLens || forLensOpen;
+  shortcutRecord.setAttribute('aria-label', forLensOpen ? 'OCRレンズ呼び出しのショートカットを変更' : forLens ? 'レンズのショートカットを変更' : '翻訳ショートカットを変更');
   shortcutPopup.disabled = !isDesktop || savingPopup;
   if (!savingPopup) shortcutPopup.checked = status.shortcutPopup;
   shortcutRecord.disabled = !status.shortcutSupported || savingShortcut;
@@ -153,10 +157,10 @@ function renderShortcut(): void {
   shortcutSave.disabled = savingShortcut || recordingShortcut || (shortcutDraft === current.binding && current.available);
   shortcutReset.disabled = savingShortcut || recordingShortcut || (shortcutDraft === current.default && current.binding === current.default && current.available);
   element('shortcut-description').textContent = status.shortcutSupported
-    ? forLens ? 'レンズ越しに背後のアプリを操作できます。同じキーで解除します。' : '他のアプリで選択した文章を翻訳します。'
+    ? forLensOpen ? '範囲を囲み、Enterで翻訳します。同じキーでレンズを閉じます。' : forLens ? 'レンズ越しに背後のアプリを操作できます。同じキーで解除します。' : '他のアプリで選択した文章を翻訳します。'
     : forLens ? 'この環境ではクリック透過を利用できません。' : isDesktop ? 'OSのキーボード設定で、次のコマンドにキーを割り当ててください。' : 'デスクトップアプリで設定できます。';
-  element('shortcut-note').textContent = forLens ? '' : !status.shortcutSupported && isDesktop ? 'anywhere-plamo --translate-selection'
-    : mac ? 'macOSのアクセシビリティ許可が必要です。' : '';
+  element('shortcut-note').textContent = forLens ? '' : !status.shortcutSupported && isDesktop ? `anywhere-plamo --${forLensOpen ? 'toggle-lens' : 'translate-selection'}`
+    : mac && !forLensOpen ? 'macOSのアクセシビリティ許可が必要です。' : '';
   element('shortcut-help').hidden = !status.shortcutSupported;
 }
 
@@ -185,7 +189,7 @@ async function saveShortcut(value = shortcutDraft): Promise<void> {
   shortcutMessage.textContent = '';
   renderShortcut();
   try {
-    status = await invoke<AppStatus>('set_shortcut', { shortcut: value, lens: shortcutAction.value === 'lens' });
+    status = await invoke<AppStatus>('set_shortcut', { shortcut: value, lens: shortcutAction.value === 'lens', lensOpen: shortcutAction.value === 'lensOpen' });
     shortcutDraft = currentShortcut().binding;
     shortcutMessage.textContent = '保存しました';
   } catch (error) {
@@ -499,7 +503,7 @@ element('license-link').addEventListener('click', async () => {
 });
 element('quit-button').addEventListener('click', () => { void invoke('quit_app').catch(showError); });
 document.addEventListener('keydown', event => {
-  if (lens) return;
+  if (lens || lensSelect) return;
   if (recordingShortcut) {
     if (startingShortcut) { event.preventDefault(); return; }
     if ((event.key === 'Tab' || event.key === 'Escape') && !event.ctrlKey && !event.altKey && !event.metaKey) {
@@ -573,5 +577,6 @@ async function init(): Promise<void> {
   } catch (error) { showError(error); }
 }
 
-if (lens) void initLens();
+if (lensSelect) void initLensSelect();
+else if (lens) void initLens();
 else void init();
