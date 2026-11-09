@@ -266,7 +266,11 @@ fn get_status(state: tauri::State<'_, AppState>) -> AppStatus {
         wayland: state.wayland,
         resident: state.resident.load(Ordering::Relaxed),
         shortcut_popup: state.shortcut_popup.load(Ordering::Relaxed),
-        lens_supported: cfg!(any(target_os = "macos", target_os = "linux")),
+        lens_supported: cfg!(any(
+            target_os = "macos",
+            target_os = "linux",
+            target_os = "windows"
+        )),
         ocr_available: lens::ready(&state.ocr_runtime),
         lens_uses_selection: state.wayland,
         lens_shortcut: shortcut::label(lens_shortcut.binding),
@@ -486,7 +490,7 @@ fn set_lens_passthrough(window: tauri::WebviewWindow, enabled: bool) -> Result<b
 
 #[tauri::command]
 async fn open_lens(app: tauri::AppHandle) -> Result<(), String> {
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     {
         if app.get_webview_window("lens").is_none() {
             tauri::WebviewWindowBuilder::new(
@@ -508,6 +512,8 @@ async fn open_lens(app: tauri::AppHandle) -> Result<(), String> {
         let window = app
             .get_webview_window("lens")
             .ok_or("レンズを開けませんでした。")?;
+        #[cfg(windows)]
+        lens::windows::exclude_from_capture(&window)?;
         apply_lens_passthrough(&app, false)?;
         window.show().map_err(|error| error.to_string())?;
         app.state::<AppState>()
@@ -521,10 +527,10 @@ async fn open_lens(app: tauri::AppHandle) -> Result<(), String> {
         let _ = window.emit("window-shown", ());
         Ok(())
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         let _ = app;
-        Err("OCRレンズはMac・Linuxで利用できます。".into())
+        Err("このOSではOCRレンズを利用できません。".into())
     }
 }
 
@@ -793,10 +799,13 @@ fn main() {
                 .unwrap_or(
                     app.path()
                         .resource_dir()?
-                        .join("resources/runtime/llama-server"),
+                        .join("resources/runtime")
+                        .join(engine::EXECUTABLE),
                 );
             let binary = if cfg!(debug_assertions) && !binary.is_file() {
-                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/runtime/llama-server")
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("resources/runtime")
+                    .join(engine::EXECUTABLE)
             } else {
                 binary
             };

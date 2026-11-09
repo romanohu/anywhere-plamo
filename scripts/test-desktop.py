@@ -364,11 +364,21 @@ def lens_checks():
             assert 'Local translation' in text('lens-source'), text('lens-source')
             assert re.search('[ぁ-んァ-ン一-龯]', text('lens-translation'))
             translations = js("return lensCalls.filter(call=>call.command==='translate').length")
-            assert translations > 0, 'The native IPC observer is not attached'
+            assert js("return lensCalls.some(call=>call.command==='capture_lens')"), 'The native IPC observer is not attached'
             time.sleep(2.2)
             assert js("return lensCalls.filter(call=>call.command==='translate').length") == translations
             assert js("return lensCalls.filter(call=>call.command==='capture_lens').slice(-2).every(call=>call.kind==='unchanged')")
             check('automatic mode translates without refresh and leaves unchanged text alone')
+
+            source('layout')
+            wait("document.getElementById('lens-source').textContent.includes('This paragraph') && document.getElementById('lens-status').textContent === '自動更新中'", 30)
+            after_other_page = js("return lensCalls.filter(call=>call.command==='translate').length")
+            assert after_other_page > translations
+            started = time.monotonic()
+            source('english')
+            wait("document.getElementById('lens-source').textContent.includes('Local translation') && document.getElementById('lens-status').textContent === '自動更新中'", 30)
+            assert js("return lensCalls.filter(call=>call.command==='translate').length") == after_other_page
+            check('returning to an earlier image reuses its translation without model inference', {'seconds': round(time.monotonic() - started, 3)})
 
             subprocess.run(['xdotool', 'key', '--clearmodifiers', native_key], env=env, check=True)
             wait("document.getElementById('lens-passthrough').getAttribute('aria-pressed') === 'true'")

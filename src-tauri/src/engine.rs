@@ -14,6 +14,12 @@ use crate::{
     ProgressEvent,
 };
 
+pub const EXECUTABLE: &str = if cfg!(windows) {
+    "llama-server.exe"
+} else {
+    "llama-server"
+};
+
 pub struct Engine {
     child: Child,
     url: String,
@@ -60,6 +66,11 @@ impl Engine {
             .build()
             .map_err(|error| error.to_string())?;
         let mut command = Command::new(binary);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        }
         command
             .arg("--model")
             .arg(model)

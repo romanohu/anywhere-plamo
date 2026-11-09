@@ -31,7 +31,13 @@ export async function initLens(): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let pollDelay = 120;
   let reset = true;
-  let translations = new Map<string, string>();
+  const translations = new Map<string, string>();
+  const remember = (text: string, output: string): void => {
+    translations.delete(text);
+    translations.set(text, output);
+    // Session-only, bounded reuse when scrolling back to a previous paragraph.
+    if (translations.size > 256) translations.delete(translations.keys().next().value!);
+  };
   const comparable = (text: string): string => text.normalize('NFKC').replace(/\s+/g, '').toLowerCase();
   const updateKey = /Mac/.test(navigator.platform) ? '⌘+Enter' : 'Ctrl+Enter';
   const instruction = (): string => selection ? '「更新」でOSの画面選択を開きます' : auto ? '枠内の文字を自動で翻訳します' : '読み取りたい範囲に枠を合わせて「更新」';
@@ -141,12 +147,12 @@ export async function initLens(): Promise<void> {
     }
   }
 
-  function invalidate(text: string): void {
+  function invalidate(text: string, clearTranslations = false): void {
     clearTimeout(timer);
     generation++;
     reset = true;
     pollDelay = 120;
-    translations.clear();
+    if (clearTranslations) translations.clear();
     translation.textContent = '';
     source.textContent = '';
     showingOriginal = false;
@@ -269,7 +275,7 @@ export async function initLens(): Promise<void> {
         render();
         fitBlock(paragraph);
       }
-      translations = nextTranslations;
+      for (const [text, output] of nextTranslations) remember(text, output);
       message(truncated ? '訳文が上限に達しました。範囲を小さくして更新してください。' : watching ? '自動更新中' : `更新しました · ${updateKey}で再読取`);
     } catch (error) {
       if (run === generation) {
@@ -288,7 +294,7 @@ export async function initLens(): Promise<void> {
 
   async function close(): Promise<void> {
     visible = false;
-    invalidate(instruction());
+    invalidate(instruction(), true);
     try { await invoke('hide_window'); } catch (error) { message(String(error), true); }
   }
 
@@ -317,7 +323,7 @@ export async function initLens(): Promise<void> {
   });
   element('lens-close').addEventListener('click', () => { void close(); });
   target.addEventListener('change', () => {
-    invalidate(auto ? instruction() : '「更新」で選んだ言語に翻訳');
+    invalidate(auto ? instruction() : '「更新」で選んだ言語に翻訳', true);
     try { localStorage.setItem('lens-target', target.value); } catch { /* Optional preference. */ }
   });
   const moved = (): void => { if (!selection) invalidate(auto ? '範囲が決まると自動で翻訳します' : '範囲を変更しました。「更新」で再読取'); };
@@ -347,9 +353,9 @@ export async function initLens(): Promise<void> {
   document.addEventListener('visibilitychange', () => {
     if (!auto) return;
     visible = !document.hidden;
-    invalidate(instruction());
+    invalidate(instruction(), !visible);
   });
-  if (!isDesktop) { message('OCRレンズはMac・Linuxのデスクトップアプリで利用できます。'); return; }
+  if (!isDesktop) { message('OCRレンズはデスクトップアプリで利用できます。'); return; }
   const loadPassthrough = (app: AppStatus): void => {
     passthrough = app.lensPassthrough;
     passthroughAvailable = app.lensShortcutAvailable && !app.lensUsesSelection;
@@ -366,7 +372,7 @@ export async function initLens(): Promise<void> {
       void invoke<AppStatus>('get_status').then(app => { loadPassthrough(app); render(); }).catch(error => message(String(error), true));
     });
     await window.__TAURI__!.event.listen('lens-changed', moved);
-    await onWindowHidden(() => { visible = false; invalidate(instruction()); });
+    await onWindowHidden(() => { visible = false; invalidate(instruction(), true); });
     await window.__TAURI__!.event.listen('window-shown', () => { visible = true; invalidate(instruction()); });
     const app = await invoke<AppStatus>('get_status');
     loadPassthrough(app);
@@ -375,7 +381,7 @@ export async function initLens(): Promise<void> {
     result.classList.toggle('lens-selection', selection);
     if (selection) auto = false;
     message(instruction());
-    if (!ready) message('OCRレンズはMac・Linuxで利用できます。');
+    if (!ready) message('この環境ではOCRレンズを利用できません。');
     render();
     schedule();
   } catch (error) { message(String(error), true); }

@@ -1133,6 +1133,25 @@ test('lens ignores unchanged resize events and stops wheel overscroll without ca
   assert.equal(f.calls.some(call => call.command === 'cancel_operation'), false);
 });
 
+test('lens reuses earlier pages after scrolling back but refresh and language changes translate again', async t => {
+  const page = text => ({ kind: 'text', text, blocks: [{ text, x: .1, y: .1, width: .5, height: .1 }] });
+  const f = await fixture(t, { lens: true, autoLens: true,
+    captureResults: ['First page.', 'Second page.', 'First page.', 'First page.', 'First page.'].map(page) });
+  await f.tickLens();
+  await f.tickLens();
+  await f.tickLens();
+  assert.deepEqual(f.calls.filter(call => call.command === 'translate').map(call => call.args.text), ['First page.', 'Second page.']);
+  assert.equal(f.byId('lens-result').hidden, false);
+  f.click('lens-refresh');
+  await until(() => f.calls.filter(call => call.command === 'translate').length === 3 && f.byId('lens-status').textContent === '自動更新中');
+  f.byId('lens-target').value = 'en';
+  f.byId('lens-target').dispatchEvent(new f.window.Event('change'));
+  await f.tickLens();
+  const calls = f.calls.filter(call => call.command === 'translate');
+  assert.equal(calls.length, 4);
+  assert.equal(calls[3].args.target, 'en');
+});
+
 test('closing during a paragraph translation prevents remaining paragraphs and late tokens', async t => {
   const blocks = ['First', 'Second'].map((text, index) => ({ text, x: .1, y: .1 + index * .4, width: .5, height: .1 }));
   const f = await fixture(t, { lens: true, holdTranslation: true, captureResults: [{ kind: 'text', text: 'First\n\nSecond', blocks }] });

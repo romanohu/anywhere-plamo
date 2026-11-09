@@ -29,6 +29,8 @@ sudo apt install build-essential cmake pkg-config python3-venv libwebkit2gtk-4.1
 
 macOSではXcode Command Line ToolsとCMakeを用意してください。
 
+Windows 11 x64版は開発中で、実機動作は未確認です。Visual Studio Build Toolsの「C++によるデスクトップ開発」、WebView2、Visual C++再頒布可能パッケージを用意してください。以下の`npm run runtime:build`は`py -3.12 scripts/build-runtime.py`に置き換えます。CPUが既定で、Vulkan SDKを用意すれば`--backend vulkan`でGPU版をビルドできます。
+
 リポジトリのディレクトリで実行します。
 
 ```sh
@@ -39,7 +41,7 @@ npm run runtime:build
 npm run tauri dev
 ```
 
-推論エンジンとPaddleOCRの小型モデル・実行環境（日本語の縦書きを含む）は初回に取得・ビルドされます。配布版ではPythonのインストールは不要です。既存のソース版は `npm run ocr:build` でOCRデータを更新してください。翻訳の推論は既定でLinuxはCPU、macOSはMetalを使用します。OCRは両OSともCPUで動きます。
+推論エンジンとPaddleOCRの小型モデル・実行環境（日本語の縦書きを含む）は初回に取得・ビルドされます。配布版ではPythonのインストールは不要です。既存のソース版は `npm run ocr:build` でOCRデータを更新してください。翻訳の推論は既定でLinux・WindowsはCPU、macOSはMetalを使用します。OCRは各OSともCPUで動きます。
 
 配布用ファイルを作る場合:
 
@@ -49,6 +51,8 @@ npm run tauri build
 ```
 
 成果物は`src-tauri/target/release/bundle/`に生成されます。
+
+Windowsでは`py -3.12 scripts/collect-licenses.py`の後、`npm run tauri -- build --bundles nsis`でインストーラーを作ります。画面取得・選択翻訳・表示倍率を実機で確認してから配布してください。
 
 ## 使い方
 

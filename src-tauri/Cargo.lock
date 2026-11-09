@@ -74,6 +74,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "uuid",
+ "windows",
  "wl-clipboard-rs",
  "x11rb",
 ]
