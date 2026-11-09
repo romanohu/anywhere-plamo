@@ -2,6 +2,14 @@
 
 選択した文章をショートカットで翻訳する、Linux・macOS向けの非公式PLaMoクライアントです。PLaMo 3 Translate 0.8Bを端末上で動かし、モデル取得後はオフラインで翻訳できます。
 
+<table>
+  <tr><th>OCRレンズ</th><th>選択した文章の翻訳</th></tr>
+  <tr>
+    <td width="50%"><img src="docs/images/ocr-lens.gif" alt="OCRレンズで画像内の英文を日本語に翻訳するデモ" width="100%"></td>
+    <td width="50%"><img src="docs/images/selection-translation.gif" alt="Webページで選択した英文をショートカットで日本語に翻訳するデモ" width="100%"></td>
+  </tr>
+</table>
+
 ## セットアップ
 
 Mac（macOS 13.3以降）では[Releases](https://github.com/romanohu/anywhere-plamo/releases/latest)から、Apple Silicon用の`aarch64.dmg`またはIntel用の`x64.dmg`を取得し、アプリを「アプリケーション」へ移動してください。
