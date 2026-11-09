@@ -237,7 +237,7 @@ export async function initLens(): Promise<void> {
           continue;
         }
         let output = '';
-        const channel = progressChannel(event => {
+        const channel = () => progressChannel(event => {
           if (run !== generation || !busy) return;
           if (event.kind === 'loading') message('モデルを読み込み中…');
           if (event.kind === 'token') {
@@ -249,8 +249,19 @@ export async function initLens(): Promise<void> {
             fitBlock(paragraph);
           }
         });
-        const outcome = await invoke<{ truncated: boolean }>('translate', { text: block.text, target: target.value, onEvent: channel });
+        let outcome = await invoke<{ truncated: boolean }>('translate', { text: block.text, target: target.value, onEvent: channel() });
         if (run !== generation) return;
+        const letters = block.text.match(/[A-Za-z]/g) ?? [];
+        // The small translation model sometimes copies all-caps comic lettering.
+        // Retry once with sentence capitalization; keep the captured source intact.
+        if (!outcome.truncated && comparable(output) === input && target.value === 'ja'
+          && letters.length >= 8 && letters.filter(letter => letter === letter.toUpperCase()).length / letters.length > .8
+          && !/[ぁ-んァ-ン一-龯]/.test(block.text)) {
+          output = '';
+          const sentenceCase = block.text.toLowerCase().replace(/(^|[.!?]\s+)[a-z]/g, text => text.toUpperCase());
+          outcome = await invoke<{ truncated: boolean }>('translate', { text: sentenceCase, target: target.value, onEvent: channel() });
+          if (run !== generation) return;
+        }
         truncated ||= outcome.truncated;
         if (!outcome.truncated) nextTranslations.set(block.text, output);
         const same = comparable(output) === input;

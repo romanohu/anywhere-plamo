@@ -1427,3 +1427,37 @@ test('passthrough errors retain interactive mode and shortcut changes refresh th
   f.lensShortcutChanged();
   await until(() => f.byId('lens-passthrough').title.includes('Alt + L'));
 });
+
+
+test('lens retries copied uppercase lettering once without changing the captured source', async t => {
+  const text = 'IDO NOT!! 1 HATE THIS PLACE! IREALLY DO!';
+  const f = await fixture(t, { lens: true, ocrText: text, target: 'ja', holdTranslation: true });
+  f.click('lens-refresh');
+  await until(() => f.calls.some(call => call.command === 'translate'));
+  f.send({ kind: 'token', text });
+  f.finish({ truncated: false });
+  await until(() => f.calls.filter(call => call.command === 'translate').length === 2);
+  assert.equal(f.calls.filter(call => call.command === 'translate')[1].args.text, 'Ido not!! 1 hate this place! Ireally do!');
+  const requests = f.calls.filter(call => call.command === 'translate');
+  assert.notEqual(requests[0].args.onEvent, requests[1].args.onEvent, 'each native IPC attempt needs a fresh channel');
+  assert.equal(f.byId('lens-source').textContent, text);
+  f.send({ kind: 'token', text: 'ここは大嫌いです！' });
+  f.finish({ truncated: false });
+  await until(() => f.byId('lens-status').textContent.startsWith('更新しました'));
+  assert.equal(f.byId('lens-translation').textContent, 'ここは大嫌いです！');
+});
+
+test('lens never loops when the sentence-case retry is copied too', async t => {
+  const text = 'UPPERCASE LETTERING';
+  const f = await fixture(t, { lens: true, ocrText: text, target: 'ja', holdTranslation: true });
+  f.click('lens-refresh');
+  await until(() => f.calls.some(call => call.command === 'translate'));
+  f.send({ kind: 'token', text });
+  f.finish({ truncated: false });
+  await until(() => f.calls.filter(call => call.command === 'translate').length === 2);
+  f.send({ kind: 'token', text: text.toLowerCase() });
+  f.finish({ truncated: false });
+  await until(() => f.byId('lens-status').textContent.startsWith('更新しました'));
+  assert.equal(f.calls.filter(call => call.command === 'translate').length, 2);
+  assert.equal(f.byId('lens-translation').textContent, '');
+});

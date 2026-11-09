@@ -10,12 +10,12 @@ Mac版はアドホック署名のみで未公証です。初回起動がブロ�
 
 ### ソースから起動
 
-Node.js 24、Rust 1.90以上、Python 3.12以上、CMake、C/C++コンパイラと[TauriのOS別依存](https://v2.tauri.app/start/prerequisites/)が必要です。
+Node.js 24、Rust 1.90以上、Python 3.12または3.13、CMake、C/C++コンパイラと[TauriのOS別依存](https://v2.tauri.app/start/prerequisites/)が必要です。
 
 Ubuntu / Debianの追加パッケージ:
 
 ```sh
-sudo apt install build-essential cmake pkg-config libwebkit2gtk-4.1-dev \
+sudo apt install build-essential cmake pkg-config python3-venv libwebkit2gtk-4.1-dev \
   libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev
 ```
 
@@ -31,7 +31,7 @@ npm run runtime:build
 npm run tauri dev
 ```
 
-推論・OCRエンジンと日英のOCRデータ（日本語の縦書きを含む）は初回に取得・ビルドされます。既存のソース版は `npm run ocr:build` でOCRデータを更新してください。翻訳の推論は既定でLinuxはCPU、macOSはMetalを使用します。OCRは両OSともCPUで動きます。
+推論エンジンとPaddleOCRの小型モデル・実行環境（日本語の縦書きを含む）は初回に取得・ビルドされます。配布版ではPythonのインストールは不要です。既存のソース版は `npm run ocr:build` でOCRデータを更新してください。翻訳の推論は既定でLinuxはCPU、macOSはMetalを使用します。OCRは両OSともCPUで動きます。
 
 配布用ファイルを作る場合:
 
@@ -54,7 +54,7 @@ npm run tauri build
 
 「別ウィンドウで翻訳」をオンにすると、ショートカット翻訳を専用の小窓に表示します。翻訳後に外側をクリックすると閉じます。初期状態はオフです。
 
-「OCRレンズ」はMac・Linuxに対応しています（現在は`dev`ブランチのソース版）。Mac・X11では半透明の枠を移動・拡縮すると、画面の変化が落ち着いてから枠内を自動翻訳します。同じ画面は再処理しません。「自動」で停止・再開でき、オフにすると「更新」（`Ctrl+Enter`、Macは`⌘+Enter`）で手動翻訳できます。画像やPDF内の日本語・英語を、共通のTesseract OCRで端末内だけで読み取ります。「原文」で背後の画面に切り替え、`Esc`で通常画面に戻ります。
+「OCRレンズ」はMac・Linuxに対応しています（現在は`dev`ブランチのソース版）。Mac・X11では半透明の枠を移動・拡縮すると、画面の変化が落ち着いてから枠内を自動翻訳します。同じ画面は再処理しません。「自動」で停止・再開でき、オフにすると「更新」（`Ctrl+Enter`、Macは`⌘+Enter`）で手動翻訳できます。画像やPDF内の日本語・英語を、共通のPaddleOCRで端末内だけで読み取ります。小さなルビを除き、行を文章・吹き出し単位にまとめて翻訳します。「原文」で背後の画面に切り替え、`Esc`で通常画面に戻ります。
 
 Mac・X11では「透過」でレンズ越しに背後のアプリをクリック・スクロールできます。`Ctrl+Shift+L`（Macは`⌘+Shift+L`）で切り替え・解除でき、キーは「設定 → レンズのクリック透過」で変更できます。
 

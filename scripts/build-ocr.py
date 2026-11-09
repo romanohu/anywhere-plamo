@@ -1,84 +1,103 @@
-"""Build the offline OCR runtime for the host Linux/macOS architecture."""
+"""Bundle the offline PaddleOCR worker for the host Linux/macOS architecture."""
 import hashlib
-import os
+import json
 import pathlib
 import platform
 import shutil
 import subprocess
-import tarfile
+import sys
 import urllib.request
+import venv
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 WORK = ROOT / ".runtime-build"
 OUTPUT = ROOT / "src-tauri/resources/runtime"
-TESSERACT = "7e548e6eff172f38f97664afe7f7ce40db36c8d6"  # 5.5.4
-LEPTONICA = "13275a278eb55b5746e33f95fbf5a2c8f604b3ab"  # 1.87.0
-TESSDATA = "87416418657359cb625c412a48b6e1d6d41c29bd"
+PACKAGES = {"rapidocr": "3.10.0", "onnxruntime": "1.23.2", "opencv-python": "4.11.0.86",
+            "numpy": "2.2.6", "Pillow": "12.0.0", "pyinstaller": "6.22.0"}
+MODELS = {"det": "090f04abcd9d9a7498bc4ebf677e4cb9bdce1fe4197ddb7e529f1ef44e1ff94f",
+          "rec": "6f327246b50388f3c176ae304bd95767ea6dc0c9ae92153ef8cbe210b3c14884"}
 
 
 def download(name, url, checksum):
     path = WORK / name
     if not path.exists() or hashlib.sha256(path.read_bytes()).hexdigest() != checksum:
-        urllib.request.urlretrieve(url, path)
-    if hashlib.sha256(path.read_bytes()).hexdigest() != checksum:
-        raise SystemExit(f"Checksum mismatch: {name}")
+        temporary = path.with_suffix(path.suffix + ".part")
+        urllib.request.urlretrieve(url, temporary)
+        if hashlib.sha256(temporary.read_bytes()).hexdigest() != checksum:
+            raise SystemExit(f"Checksum mismatch: {name}")
+        temporary.replace(path)
     return path
 
 
 def main():
     if platform.system() not in {"Linux", "Darwin"}:
         raise SystemExit("Build OCR on Linux or macOS.")
-    if not shutil.which("cmake"):
-        raise SystemExit("CMake and a C/C++ compiler are required.")
+    if not (3, 12) <= sys.version_info[:2] <= (3, 13):
+        raise SystemExit("Build OCR with Python 3.12 or 3.13.")
     WORK.mkdir(exist_ok=True)
-    for project, owner, revision, checksum in [
-        ("tesseract", "tesseract-ocr", TESSERACT, "445603ab1d0a63df552e193a600d9d5c4021aff36e144f3091af149e5efb381a"),
-        ("leptonica", "DanBloomberg", LEPTONICA, "e72242133adf678e8584081a506ca3a665c8f6f6de8c3fe7b47d1d5fcf9a4ce4"),
-    ]:
-        archive = download(f"{project}.tar.gz", f"https://github.com/{owner}/{project}/archive/{revision}.tar.gz", checksum)
-        if not (WORK / f"{project}-{revision}").exists():
-            with tarfile.open(archive) as source:
-                source.extractall(WORK, filter="data")
-    common = ["-DCMAKE_BUILD_TYPE=Release", "-DBUILD_SHARED_LIBS=OFF"]
-    if platform.system() == "Darwin":
-        common += ["-DCMAKE_OSX_DEPLOYMENT_TARGET=13.3"]
-    prefix = WORK / "ocr-prefix"
-    parallel = str(min(os.cpu_count() or 2, 8))
-    lept = WORK / f"leptonica-{LEPTONICA}"
-    tess = WORK / f"tesseract-{TESSERACT}"
-    # PPM input keeps the executable independent of system image codecs.
-    subprocess.run(["cmake", "-S", str(lept), "-B", str(WORK / "ocr-leptonica"), *common,
-                    f"-DCMAKE_INSTALL_PREFIX={prefix}", "-DBUILD_PROG=OFF", "-DSW_BUILD=OFF",
-                    *[f"-DENABLE_{codec}=OFF" for codec in ("ZLIB", "PNG", "GIF", "JPEG", "TIFF", "WEBP", "OPENJPEG")]], check=True)
-    subprocess.run(["cmake", "--build", str(WORK / "ocr-leptonica"), "--parallel", parallel], check=True)
-    subprocess.run(["cmake", "--install", str(WORK / "ocr-leptonica")], check=True)
-    build = WORK / "ocr-tesseract"
-    subprocess.run(["cmake", "-S", str(tess), "-B", str(build), *common,
-                    f"-DCMAKE_PREFIX_PATH={prefix}", "-DENABLE_NATIVE=OFF", "-DOPENMP_BUILD=OFF",
-                    "-DBUILD_TRAINING_TOOLS=OFF", "-DBUILD_TESTS=OFF", "-DGRAPHICS_DISABLED=ON",
-                    "-DDISABLED_LEGACY_ENGINE=ON", "-DDISABLE_TIFF=ON", "-DDISABLE_CURL=ON",
-                    "-DDISABLE_ARCHIVE=ON"], check=True)
-    subprocess.run(["cmake", "--build", str(build), "--target", "tesseract",
-                    "--config", "Release", "--parallel", parallel], check=True)
-    data = OUTPUT / "tessdata"
-    data.mkdir(parents=True, exist_ok=True)
-    for name, checksum in [
-        ("eng.traineddata", "7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2"),
-        ("jpn.traineddata", "1f5de9236d2e85f5fdf4b3c500f2d4926f8d9449f28f5394472d9e8d83b91b4d"),
-        ("jpn_vert.traineddata", "bf1e2640954691797e2dc14f38533e601b59ee37958698ae0f0b81dc6f09c71b"),
-        ("LICENSE", "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"),
-    ]:
-        cached = download("tessdata-LICENSE" if name == "LICENSE" else name,
-                          f"https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/{TESSDATA}/{name}", checksum)
-        shutil.copy2(cached, data / name)
-    shutil.copy2(build / "bin/tesseract", OUTPUT / "tesseract")
-    if platform.system() == "Darwin":
-        subprocess.run(["codesign", "--force", "--sign", "-", str(OUTPUT / "tesseract")], check=True)
-    shutil.copy2(tess / "LICENSE", OUTPUT / "tesseract-LICENSE")
-    shutil.copy2(lept / "leptonica-license.txt", OUTPUT / "leptonica-LICENSE")
+    environment = WORK / "ocr-venv"
+    python = environment / "bin/python"
+    if not python.exists():
+        venv.EnvBuilder(with_pip=True).create(environment)
+    check = "import importlib.metadata as m,json; print(json.dumps({k:m.version(k) for k in " + repr(list(PACKAGES)) + "}))"
+    installed = subprocess.run([str(python), "-c", check], capture_output=True, text=True)
+    if installed.returncode or json.loads(installed.stdout) != PACKAGES:
+        subprocess.run([str(python), "-m", "pip", "install", *[f"{k}=={v}" for k, v in PACKAGES.items()]], check=True)
+    models = OUTPUT / "ocr-models"
+    models.mkdir(parents=True, exist_ok=True)
+    for task, checksum in MODELS.items():
+        name = f"PP-OCRv6_{task}_small.onnx"
+        cached = download(name, f"https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.10.0/onnx/PP-OCRv6/{task}/{name}", checksum)
+        shutil.copy2(cached, models / name)
+    package = pathlib.Path(subprocess.check_output(
+        [str(python), "-c", "import rapidocr,pathlib;print(pathlib.Path(rapidocr.__file__).parent)"], text=True).strip())
+    subprocess.run([str(python), "-m", "PyInstaller", "--noconfirm", "--clean", "--onedir",
+                    "--name", "ocr-worker", "--distpath", str(WORK / "ocr-dist"),
+                    "--workpath", str(WORK / "ocr-freeze"), "--specpath", str(WORK),
+                    "--add-data", f"{package / 'config.yaml'}:rapidocr",
+                    "--add-data", f"{package / 'default_models.yaml'}:rapidocr",
+                    "--collect-data", "onnxruntime",
+                    "--copy-metadata", "rapidocr", "--copy-metadata", "onnxruntime",
+                    str(ROOT / "scripts/ocr-worker.py")], check=True)
+    bundle = WORK / "ocr-dist/ocr-worker"
+    # Keep all dependency license files, including native libraries' notices.
+    subprocess.run([str(python), "-c", '''
+import importlib.metadata as m,json,pathlib,shutil,sys,sysconfig
+out=pathlib.Path(sys.argv[1]);out.mkdir(exist_ok=True)
+index=[]
+for dist in m.distributions():
+    name=dist.metadata['Name'];version=dist.version
+    index.append({'name':name,'version':version,'license':dist.metadata.get('License-Expression') or dist.metadata.get('License')})
+    for file in dist.files or []:
+        if any(part.lower().startswith(('license','copying','notice','model_licenses')) for part in file.parts):
+            source=pathlib.Path(dist.locate_file(file))
+            if source.is_file():
+                target=out/(name+'-'+version)/str(file);target.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(source,target)
+license=pathlib.Path(sysconfig.get_path('stdlib'))/'LICENSE.txt'
+if license.is_file(): shutil.copy2(license,out/'Python-LICENSE.txt')
+(out/'index.json').write_text(json.dumps(index,indent=2)+'\\n')
+''', str(bundle / "licenses")], check=True)
+    # Smoke test the frozen executable, with the same pipe protocol as the app.
+    request = json.dumps({"path": str(ROOT / "tests/fixtures/ocr-japanese.png")}) + "\n"
+    smoke = subprocess.run([str(bundle / "ocr-worker"), str(models)], input=request,
+                           capture_output=True, text=True, check=True, timeout=60)
+    if not any("画像" in block["text"] for block in json.loads(smoke.stdout)["blocks"]):
+        raise SystemExit("Bundled OCR smoke test failed.")
+    destination = OUTPUT / "ocr"
+    if destination.exists():
+        shutil.rmtree(destination)
+    shutil.copytree(bundle, destination, symlinks=True)
     (OUTPUT / "OCR_VERSION").write_text(
-        f"tesseract {TESSERACT}\nleptonica {LEPTONICA}\ntessdata_fast {TESSDATA}\n", encoding="utf-8")
-    print(f"OCR ready: {OUTPUT / 'tesseract'}")
+        "PP-OCRv6 small (RapidOCR 3.10.0 / ONNX Runtime 1.23.2)\n" +
+        "\n".join(f"{task} {checksum}" for task, checksum in MODELS.items()) + "\n", encoding="utf-8")
+    # Remove obsolete bundled OCR files when updating an existing source checkout.
+    for name in ["tesseract", "tessdata", "tesseract-LICENSE", "leptonica-LICENSE"]:
+        old = OUTPUT / name
+        if old.is_dir():
+            shutil.rmtree(old)
+        elif old.exists():
+            old.unlink()
+    print(f"OCR ready: {destination / 'ocr-worker'}")
 
 
 if __name__ == "__main__":

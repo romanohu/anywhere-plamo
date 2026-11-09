@@ -502,13 +502,14 @@ mod tests {
             let captured = capture_x11(30, 40, source.width(), source.height()).unwrap();
             let file = super::super::CaptureFile::new().unwrap();
             write_image(&file.path, captured).unwrap();
-            let text = super::super::recognize(
-                &root.join("resources/runtime"),
-                &file.path,
-                &CancellationToken::new(),
-            )
-            .await
-            .unwrap();
+            let text = super::super::Ocr::default()
+                .recognize(
+                    &root.join("resources/runtime"),
+                    &file.path,
+                    &CancellationToken::new(),
+                )
+                .await
+                .unwrap();
             assert!(
                 text.iter().any(|block| block.text.contains(expected)),
                 "{name}: {text:?}"

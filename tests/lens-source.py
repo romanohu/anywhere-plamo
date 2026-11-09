@@ -53,6 +53,8 @@ def update():
         marker.clear()
         if mode == 'blank':
             image.clear()
+        elif mode == 'comic':
+            image.set_from_file(command['path'])
         elif mode.startswith('layout'):
             # Rasterize soft-wrapped paragraphs; these are not selectable GTK text.
             surface = cairo.ImageSurface(cairo.FORMAT_RGB24, 620, 260)

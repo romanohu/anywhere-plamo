@@ -20,6 +20,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--app', type=Path, default=ROOT / 'src-tauri/target/debug/anywhere-plamo')
+parser.add_argument('--comic', type=Path, help='Optional local PHD comic 156 image for OCR lens regression checks')
 parser.add_argument('--lens', action='store_true', help='Test manual and automatic OCR with the bundled runtime and a prepared model')
 parser.add_argument('--work-dir', type=Path, default=ROOT / '.runtime-build/desktop-test')
 args = parser.parse_args()
@@ -224,7 +225,7 @@ def lens_checks():
     subprocess.run(['xdotool', 'mousemove', '--window', native_window, str(x), str(y),
                     'mousedown', '1', 'mousemove', '--sync', '--window', native_window, str(x + 70), str(y),
                     'mouseup', '1'], env=env, check=True)
-    assert js("return !!getSelection().toString() && !document.getElementById('lens-result').hidden")
+    wait("!!getSelection().toString() && !document.getElementById('lens-result').hidden", 3)
     js('getSelection().removeAllRanges()')
     time.sleep(.6)  # Start a separate click, outside the native double-click interval.
     subprocess.run(['xdotool', 'mousemove', '--window', native_window, str(x), str(y), 'click', '1'], env=env, check=True)
@@ -527,6 +528,37 @@ def lens_checks():
     assert short['width'] < 80 and short['height'] < 40, short
     assert abs(short['center'] - (blocks[0]['x'] + blocks[0]['width']/2) * vertical_layout['region']['width']) < 1, short
     check('short translations stay centered and their background shrinks to the rendered text', short)
+
+    for name in ['ruby-narrow', 'ruby-serif-wide']:
+        subprocess.run(['xdotool', 'windowsize', '--sync', native_window, '1550', '620'], env=env, check=True)
+        source(name)
+        target('en')
+        wait("document.getElementById('lens-source').textContent.includes('ある日の暮方') && document.getElementById('lens-status').textContent === '自動更新中'", 90)
+        blocks = js("return lensCalls.filter(call=>call.result?.kind==='text').at(-1).result.blocks")
+        assert len(blocks) == 2 and blocks[1]['text'].startswith('広い門の下には'), blocks
+        assert all('らしょうもん' not in b['text'] and 'きりぎりす' not in b['text'] for b in blocks), blocks
+        assert '羅生門' in blocks[0]['text'] and '蟋蟀' in blocks[1]['text'], blocks
+        assert js("return [...document.querySelectorAll('.lens-block')].every(node=>/[A-Za-z]/.test(node.textContent))")
+        check('PaddleOCR removes ruby and translates two intact Rashomon paragraphs: ' + name,
+              {'ocr': [b['text'] for b in blocks], 'translation': text('lens-translation')})
+        desktop_image('lens-' + name + '.png')
+
+    if args.comic:
+        subprocess.run(['xdotool', 'windowsize', '--sync', native_window, '720', '480'], env=env, check=True)
+        source('comic', path=str(args.comic.resolve()))
+        target('ja')
+        wait("document.getElementById('lens-source').textContent.includes('CECILIA') && document.getElementById('lens-status').textContent === '自動更新中'", 90)
+        capture = js("return lensCalls.filter(call=>call.result?.kind==='text').at(-1).result")
+        blocks = [b for b in capture['blocks'] if b['y'] < .45]
+        assert len(blocks) == 5, blocks
+        assert any('STILL HERE' in b['text'] and 'TELL' not in b['text'] for b in blocks), blocks
+        assert any('TELL' in b['text'] and 'STILL HERE' not in b['text'] for b in blocks), blocks
+        rendered = js("return [...document.querySelectorAll('.lens-block')].slice(0,5).map(n=>n.textContent)")
+        (WORK / 'comic-capture.json').write_text(json.dumps({'capture': capture, 'rendered': rendered, 'requests': js("return lensCalls.filter(c=>c.command==='translate').map(c=>c.args.text)")}, ensure_ascii=False, indent=2))
+        assert len(rendered) == 5 and all(re.search('[ぁ-んァ-ン一-龯]', t) for t in rendered), rendered
+        check('PaddleOCR keeps five comic speech regions separate and translates every region',
+              {'ocr': [b['text'] for b in blocks], 'translation': rendered})
+        desktop_image('lens-reference-comic.png')
 
     subprocess.run(['xdotool', 'windowsize', '--sync', native_window, '1000', '600'], env=env, check=True)
     target('ja')
