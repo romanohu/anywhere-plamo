@@ -24,7 +24,7 @@ macOSではXcode Command Line ToolsとCMakeを用意してください。
 リポジトリのディレクトリで実行します。
 
 ```sh
-git clone --branch dev https://github.com/romanohu/anywhere-plamo.git
+git clone https://github.com/romanohu/anywhere-plamo.git
 cd anywhere-plamo
 npm ci
 npm run runtime:build
@@ -54,7 +54,7 @@ npm run tauri build
 
 「別ウィンドウで翻訳」をオンにすると、ショートカット翻訳を専用の小窓に表示します。翻訳後に外側をクリックすると閉じます。初期状態はオフです。
 
-「OCRレンズ」はMac・Linuxに対応しています（現在は`dev`ブランチのソース版）。Mac・X11では半透明の枠を移動・拡縮すると、画面の変化が落ち着いてから枠内を自動翻訳します。同じ画面は再処理しません。「自動」で停止・再開でき、オフにすると「更新」（`Ctrl+Enter`、Macは`⌘+Enter`）で手動翻訳できます。画像やPDF内の日本語・英語を、共通のPaddleOCRで端末内だけで読み取ります。小さなルビを除き、行を文章・吹き出し単位にまとめて翻訳します。「原文」で背後の画面に切り替え、`Esc`で通常画面に戻ります。
+「OCRレンズ」はMac・Linuxに対応しています。Mac・X11では半透明の枠を移動・拡縮すると、画面の変化が落ち着いてから枠内を自動翻訳します。同じ画面は再処理しません。「自動」で停止・再開でき、オフにすると「更新」（`Ctrl+Enter`、Macは`⌘+Enter`）で手動翻訳できます。画像やPDF内の日本語・英語を、共通のPaddleOCRで端末内だけで読み取ります。小さなルビを除き、行を文章・吹き出し単位にまとめて翻訳します。「原文」で背後の画面に切り替え、`Esc`で通常画面に戻ります。
 
 Mac・X11では「透過」でレンズ越しに背後のアプリをクリック・スクロールできます。`Ctrl+Shift+L`（Macは`⌘+Shift+L`）で切り替え・解除でき、キーは「設定 → レンズのクリック透過」で変更できます。
 
