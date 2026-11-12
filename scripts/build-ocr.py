@@ -16,6 +16,7 @@ PACKAGES = {"rapidocr": "3.10.0", "onnxruntime": "1.23.2", "opencv-python": "4.1
             "numpy": "2.2.6", "Pillow": "12.0.0", "pyinstaller": "6.22.0"}
 MODELS = {"det": "090f04abcd9d9a7498bc4ebf677e4cb9bdce1fe4197ddb7e529f1ef44e1ff94f",
           "rec": "6f327246b50388f3c176ae304bd95767ea6dc0c9ae92153ef8cbe210b3c14884"}
+KOREAN_SHA256 = 'cd6e2ea50f6943ca7271eb8c56a877a5a90720b7047fe9c41a2e541a25773c9b'
 
 
 def download(name, url, checksum):
@@ -50,6 +51,17 @@ def main():
         name = f"PP-OCRv6_{task}_small.onnx"
         cached = download(name, f"https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.10.0/onnx/PP-OCRv6/{task}/{name}", checksum)
         shutil.copy2(cached, models / name)
+    korean = 'korean_PP-OCRv5_rec_mobile.onnx'
+    cached = download(korean,
+        f'https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.10.0/onnx/PP-OCRv5/rec/{korean}',
+        KOREAN_SHA256)
+    shutil.copy2(cached, models / korean)
+    (models / 'KOREAN_NOTICE.txt').write_text(
+        'Korean PP-OCRv5 mobile: copyright Baidu / PaddleOCR rights holders, Apache-2.0.\n'
+        'Upstream: https://huggingface.co/PaddlePaddle/korean_PP-OCRv5_mobile_rec\n'
+        'ONNX conversion: RapidAI/RapidOCR v3.10.0, korean_PP-OCRv5_rec_mobile.onnx\n'
+        f'SHA256: {KOREAN_SHA256}\n'
+        'Apache-2.0 license text is included under ocr/licenses/rapidocr-3.10.0/.\n', encoding='utf-8')
     package = pathlib.Path(subprocess.check_output(
         [str(python), "-X", "utf8", "-c", "import rapidocr,pathlib;print(pathlib.Path(rapidocr.__file__).parent)"], text=True, encoding="utf-8").strip())
     subprocess.run([str(python), "-m", "PyInstaller", "--noconfirm", "--clean", "--onedir",
@@ -80,18 +92,22 @@ if license.is_file(): shutil.copy2(license,out/'Python-LICENSE.txt')
 (out/'index.json').write_text(json.dumps(index,indent=2)+'\\n')
 ''', str(bundle / "licenses")], check=True)
     # Smoke test the frozen executable, with the same pipe protocol as the app.
-    request = json.dumps({"path": str(ROOT / "tests/fixtures/ocr-japanese.png")}) + "\n"
+    request = ''.join(json.dumps({'path': str(ROOT / f'tests/fixtures/ocr-{name}.png')}) + '\n'
+                      for name in ['japanese', 'korean-mixed'])
     smoke = subprocess.run([str(bundle / executable), str(models)], input=request,
                            capture_output=True, text=True, encoding="utf-8", check=True, timeout=60)
-    if not any("画像" in block["text"] for block in json.loads(smoke.stdout)["blocks"]):
+    responses = [json.loads(line)['blocks'] for line in smoke.stdout.splitlines()]
+    if len(responses) != 2 or not any('画像' in block['text'] for block in responses[0]) or not all(
+            any(word in block['text'] for block in responses[1]) for word in ['안녕하세요', '한국어', 'Local translation', '画像']):
         raise SystemExit("Bundled OCR smoke test failed.")
     destination = OUTPUT / "ocr"
     if destination.exists():
         shutil.rmtree(destination)
     shutil.copytree(bundle, destination, symlinks=True)
     (OUTPUT / "OCR_VERSION").write_text(
-        "PP-OCRv6 small (RapidOCR 3.10.0 / ONNX Runtime 1.23.2)\n" +
-        "\n".join(f"{task} {checksum}" for task, checksum in MODELS.items()) + "\n", encoding="utf-8")
+        "PP-OCRv6 small + Korean PP-OCRv5 mobile (RapidOCR 3.10.0 / ONNX Runtime 1.23.2)\n" +
+        "\n".join(f"{task} {checksum}" for task, checksum in MODELS.items()) +
+        f"\nkorean-rec {KOREAN_SHA256}\n", encoding="utf-8")
     # Remove obsolete bundled OCR files when updating an existing source checkout.
     for name in ["tesseract", "tessdata", "tesseract-LICENSE", "leptonica-LICENSE"]:
         old = OUTPUT / name

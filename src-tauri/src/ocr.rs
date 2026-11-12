@@ -25,6 +25,12 @@ struct Worker {
 }
 
 impl Ocr {
+    pub async fn stop(&self) {
+        if let Some(mut worker) = self.worker.lock().await.take() {
+            let _ = worker.child.kill().await;
+        }
+    }
+
     pub async fn recognize(
         &self,
         runtime: &Path,

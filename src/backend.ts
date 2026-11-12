@@ -45,9 +45,9 @@ export function invoke<T>(command: string, args?: Record<string, unknown>): Prom
   return window.__TAURI__.core.invoke<T>(command, args);
 }
 
-export function progressChannel(onmessage: (event: ProgressEvent) => void): NativeChannel<ProgressEvent> {
+export function progressChannel<T = ProgressEvent>(onmessage: (event: T) => void): NativeChannel<T> {
   if (!window.__TAURI__) throw new Error('デスクトップアプリから実行してください。');
-  const channel = new window.__TAURI__.core.Channel<ProgressEvent>();
+  const channel = new window.__TAURI__.core.Channel<T>();
   channel.onmessage = onmessage;
   return channel;
 }

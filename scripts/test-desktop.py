@@ -634,6 +634,16 @@ def lens_checks():
     desktop_image('lens-columns.png')
 
     subprocess.run(['xdotool', 'windowsize', '--sync', native_window, '950', '520'], env=env, check=True)
+    source('korean-mixed')
+    target('ja')
+    wait("document.getElementById('lens-source').textContent.includes('한국어 문장을 일본어로 번역합니다') && document.getElementById('lens-status').textContent === '自動更新中'", 60)
+    blocks = js("return lensCalls.filter(call=>call.result?.kind==='text').at(-1).result.blocks")
+    rendered = js("return [...document.querySelectorAll('.lens-block')].map(node=>node.textContent)")
+    assert len(blocks) >= 3 and '안녕하세요' in blocks[0]['text'] and all(word in ''.join(b['text'] for b in blocks) for word in ['한국어', 'Local translation', '画像']), blocks
+    assert all(re.search('[ぁ-んァ-ヶ一-龯]', text) and not re.search('[가-힣]', text) for text in rendered[:2]), rendered
+    check('Korean, English and Japanese are read together and Korean is translated into Japanese', {'blocks': blocks, 'translations': rendered})
+    desktop_image('lens-korean.png')
+
     source('vertical')
     target('en')
     wait("document.getElementById('lens-source').textContent.includes('画像の文字を翻訳します日本語を英語に変換する') && document.getElementById('lens-status').textContent === '自動更新中'", 60)

@@ -8,6 +8,7 @@ mod model;
 mod protocol;
 mod selection;
 mod shortcut;
+mod update;
 
 use serde::Serialize;
 use std::{
@@ -118,6 +119,7 @@ struct AppState {
     lens_watch: Mutex<lens::Watch>,
     engine: tokio::sync::Mutex<Option<engine::Engine>>,
     preparation: CancellationToken,
+    updating: AtomicBool,
     operation: Mutex<Option<CancellationToken>>,
     popup_operation: Mutex<Option<CancellationToken>>,
     lens_operation: Mutex<Option<CancellationToken>>,
@@ -162,6 +164,9 @@ impl AppState {
     fn begin(&self, label: &str) -> Result<Operation<'_>, String> {
         let operation = self.operation(label);
         let mut slot = operation.lock().map_err(|_| "処理状態を取得できません。")?;
+        if self.updating.load(Ordering::SeqCst) {
+            return Err("アプリを更新しています。再起動までお待ちください。".into());
+        }
         if slot.is_some() {
             return Err("別の処理が実行中です。完了後に再試行してください。".into());
         }
@@ -901,6 +906,8 @@ fn main() {
             let _ = app.run_on_main_thread(move || handle_launch(&handle, &args));
         }))
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(update::State::default())
         .invoke_handler(tauri::generate_handler![
             get_status,
             set_shortcut,
@@ -923,6 +930,8 @@ fn main() {
             hide_window,
             finish_popup_request,
             open_model_license,
+            update::check_update,
+            update::install_update,
             quit_app
         ])
         .setup(|app| {
@@ -966,6 +975,7 @@ fn main() {
                 lens_watch: Mutex::new(lens::Watch::default()),
                 engine: tokio::sync::Mutex::new(None),
                 preparation: CancellationToken::new(),
+                updating: AtomicBool::new(false),
                 operation: Mutex::new(None),
                 popup_operation: Mutex::new(None),
                 lens_operation: Mutex::new(None),
@@ -1216,6 +1226,7 @@ fn main() {
             state.preparation.cancel();
             tauri::async_runtime::block_on(async {
                 *state.engine.lock().await = None;
+                state.ocr.stop().await;
             });
         }
         #[cfg(target_os = "macos")]
@@ -1361,6 +1372,7 @@ mod tests {
             lens_watch: Mutex::new(crate::lens::Watch::default()),
             engine: tokio::sync::Mutex::new(None),
             preparation: CancellationToken::new(),
+            updating: AtomicBool::new(false),
             operation: Mutex::new(None),
             popup_operation: Mutex::new(None),
             lens_operation: Mutex::new(None),

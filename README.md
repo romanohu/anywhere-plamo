@@ -41,7 +41,7 @@ npm run runtime:build
 npm run tauri dev
 ```
 
-推論エンジンとPaddleOCRの小型モデル・実行環境（日本語の縦書きを含む）は初回に取得・ビルドされます。配布版ではPythonのインストールは不要です。既存のソース版は `npm run ocr:build` でOCRデータを更新してください。翻訳の推論は既定でLinux・WindowsはCPU、macOSはMetalを使用します。OCRは各OSともCPUで動きます。
+推論エンジンとPaddleOCRの小型モデル・実行環境（日本語・英語・韓国語、日本語の縦書きを含む）は初回に取得・ビルドされます。配布版ではPythonのインストールは不要です。既存のソース版は `npm run ocr:build` でOCRデータを更新してください。翻訳の推論は既定でLinux・WindowsはCPU、macOSはMetalを使用します。OCRは各OSともCPUで動きます。
 
 配布用ファイルを作る場合:
 
@@ -50,7 +50,7 @@ python3 scripts/collect-licenses.py
 npm run tauri build
 ```
 
-成果物は`src-tauri/target/release/bundle/`に生成されます。
+成果物は`src-tauri/target/release/bundle/`に生成されます。アプリ内更新用の配布物とMacの継続した署名については[更新の配布手順](docs/updating.md)を参照してください。
 
 Windowsでは`py -3.12 scripts/collect-licenses.py`の後、`npm run tauri -- build --bundles nsis`でインストーラーを作ります。画面取得・選択翻訳・表示倍率を実機で確認してから配布してください。
 
@@ -65,6 +65,8 @@ Windowsでは`py -3.12 scripts/collect-licenses.py`の後、`npm run tauri -- bu
 「OCRレンズ」を開き、枠を画像やPDFに合わせると自動翻訳します（Mac・X11）。「自動」で停止・再開、「更新」で手動取得、「原文」で翻訳前の内容を確認し、`Esc`で閉じます。Waylandでは「更新」から画面の範囲を選択します。
 
 Mac・X11では「透過」で背後のアプリをクリック・スクロールできます。`Ctrl+Shift+L`（Macは`⌘+Shift+L`）で切り替え・解除できます。
+
+「設定 → 更新を確認」で新しい版を取得できます（更新対応版の初回導入と配布側の準備が必要）。
 
 「設定」では、ショートカット、選択文の日英自動切替、別ウィンドウ表示、モデルの先読みを変更できます。トレイ対応環境ではウィンドウを閉じても常駐するため、終了は「設定 → 終了」から行います。
 

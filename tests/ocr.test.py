@@ -63,6 +63,14 @@ class LayoutTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             ocr.socket.getaddrinfo('example.com', 443)
 
+    def test_korean_selection_preserves_confident_japanese_and_english(self):
+        self.assertTrue(ocr.prefer_korean('', 0., '안녕하세요', .99))
+        self.assertTrue(ocr.prefer_korean('WiFi', .99, 'WiFi 비밀번호를 입력하세요', .98))
+        self.assertFalse(ocr.prefer_korean('日本語の文章です。', .99, '한국어', .96))
+        self.assertFalse(ocr.prefer_korean('Read this text.', .98, 'Read this text.', .99))
+        self.assertFalse(ocr.prefer_korean('本文', .6, '한국어', .7))
+        self.assertEqual(ocr.join_text('한국어 문장을', '번역합니다.'), '한국어 문장을 번역합니다.')
+
 
 if __name__ == '__main__':
     unittest.main()

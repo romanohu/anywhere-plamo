@@ -23,6 +23,7 @@ async function fixture(t, options = {}) {
   const { window } = dom;
   window.requestAnimationFrame = callback => { queueMicrotask(() => callback(0)); return 0; };
   window.HTMLElement.prototype.setPointerCapture = () => {};
+  window.HTMLElement.prototype.scrollIntoView = () => {};
   if (options.lens && !options.autoLens) window.localStorage.setItem('lens-auto', 'false');
   const lensTimers = new Map();
   let lensTimerId = 0;
@@ -77,6 +78,14 @@ async function fixture(t, options = {}) {
         calls.push({ command, args });
         switch (command) {
           case 'get_status': return { ...state };
+          case 'check_update':
+            if (options.updateError) throw options.updateError;
+            return options.updateVersion ?? null;
+          case 'install_update':
+            args.onEvent.onmessage({ kind: 'download', received: 50, total: 100 });
+            if (options.installError) throw options.installError;
+            args.onEvent.onmessage({ kind: 'installing' });
+            return;
           case 'open_lens': return;
           case 'apply_lens_selection': return !!options.selectedLens;
           case 'confirm_lens_selection': return;
@@ -200,7 +209,50 @@ test('browser preview clearly disables translation and model download', async t 
   f.click('setup-open');
   assert.equal(f.byId('settings-dialog').open, true);
   assert.equal(f.byId('download-button').disabled, true);
+  assert.equal(f.byId('update-button').disabled, true);
   assert.equal(f.calls.length, 0);
+});
+
+test('updates are checked only on request and installed only after the second click', async t => {
+  const f = await fixture(t, { updateVersion: '0.2.2' });
+  f.click('settings-button');
+  assert.equal(f.calls.some(call => call.command === 'check_update'), false);
+  f.click('update-button');
+  await until(() => !f.byId('update-button').disabled);
+  assert.match(f.byId('update-message').textContent, /0\.2\.2/);
+  assert.equal(f.calls.some(call => call.command === 'install_update'), false);
+  assert.equal(f.byId('update-button').textContent, '更新して再起動');
+  f.click('update-button');
+  f.click('update-button');
+  await until(() => f.byId('update-message').textContent === '再起動中…');
+  assert.equal(f.calls.filter(call => call.command === 'install_update').length, 1);
+  assert.equal(f.byId('update-button').disabled, true);
+});
+
+test('an update failure leaves a retry and requires a new check before installation', async t => {
+  const f = await fixture(t, { updateVersion: '0.2.2', installError: '署名を検証できませんでした' });
+  f.click('update-button');
+  await until(() => !f.byId('update-button').disabled);
+  f.click('update-button');
+  await until(() => !f.byId('update-button').disabled);
+  assert.match(f.byId('update-message').textContent, /署名/);
+  assert.equal(f.byId('update-button').textContent, '更新を確認');
+  f.click('update-button');
+  await until(() => !f.byId('update-button').disabled);
+  assert.equal(f.calls.filter(call => call.command === 'check_update').length, 2);
+  assert.equal(f.calls.filter(call => call.command === 'install_update').length, 1);
+});
+
+test('missing updates and network errors do not offer installation', async t => {
+  for (const options of [{}, { updateError: '接続できませんでした' }]) {
+    const f = await fixture(t, options);
+    f.click('update-button');
+    await until(() => !f.byId('update-button').disabled);
+    assert.equal(f.byId('update-message').textContent, options.updateError ?? '最新バージョンです。');
+    assert.equal(f.byId('update-button').textContent, '更新を確認');
+  }
+  const popup = await fixture(t, { popup: true });
+  assert.equal(popup.byId('update-section').hidden, true);
 });
 
 test('shortcut recording saves a key combination through the native settings command', async t => {

@@ -2,6 +2,7 @@ import { invoke, isDesktop, onClipboardRequest, onShortcutPressed, onWindowHidde
 import type { AppStatus } from './backend';
 import { initLens } from './lens';
 import { initLensSelect } from './lens-select';
+import { initUpdate } from './update';
 
 function element<T extends HTMLElement>(id: string): T {
   const found = document.getElementById(id);
@@ -662,6 +663,8 @@ document.addEventListener('keydown', event => {
 });
 
 async function init(): Promise<void> {
+  if (popup) element('update-section').hidden = true;
+  else initUpdate();
   if (popup) setReadingMode(true);
   updateControls();
   renderShortcut();
