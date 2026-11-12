@@ -1,4 +1,4 @@
-"""Bundle the offline PaddleOCR worker for the host Linux/macOS architecture."""
+"""Bundle the offline PaddleOCR worker for the host architecture."""
 import hashlib
 import json
 import pathlib
@@ -30,13 +30,14 @@ def download(name, url, checksum):
 
 
 def main():
-    if platform.system() not in {"Linux", "Darwin"}:
-        raise SystemExit("Build OCR on Linux or macOS.")
+    if platform.system() not in {"Linux", "Darwin", "Windows"}:
+        raise SystemExit("Build OCR on Linux, macOS or Windows.")
     if not (3, 12) <= sys.version_info[:2] <= (3, 13):
         raise SystemExit("Build OCR with Python 3.12 or 3.13.")
     WORK.mkdir(exist_ok=True)
     environment = WORK / "ocr-venv"
-    python = environment / "bin/python"
+    python = environment / ("Scripts/python.exe" if platform.system() == "Windows" else "bin/python")
+    executable = "ocr-worker.exe" if platform.system() == "Windows" else "ocr-worker"
     if not python.exists():
         venv.EnvBuilder(with_pip=True).create(environment)
     check = "import importlib.metadata as m,json; print(json.dumps({k:m.version(k) for k in " + repr(list(PACKAGES)) + "}))"
@@ -50,7 +51,7 @@ def main():
         cached = download(name, f"https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.10.0/onnx/PP-OCRv6/{task}/{name}", checksum)
         shutil.copy2(cached, models / name)
     package = pathlib.Path(subprocess.check_output(
-        [str(python), "-c", "import rapidocr,pathlib;print(pathlib.Path(rapidocr.__file__).parent)"], text=True).strip())
+        [str(python), "-X", "utf8", "-c", "import rapidocr,pathlib;print(pathlib.Path(rapidocr.__file__).parent)"], text=True, encoding="utf-8").strip())
     subprocess.run([str(python), "-m", "PyInstaller", "--noconfirm", "--clean", "--onedir",
                     "--name", "ocr-worker", "--distpath", str(WORK / "ocr-dist"),
                     "--workpath", str(WORK / "ocr-freeze"), "--specpath", str(WORK),
@@ -74,13 +75,14 @@ for dist in m.distributions():
             if source.is_file():
                 target=out/(name+'-'+version)/str(file);target.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(source,target)
 license=pathlib.Path(sysconfig.get_path('stdlib'))/'LICENSE.txt'
+if not license.is_file(): license=pathlib.Path(sys.base_prefix)/'LICENSE.txt'
 if license.is_file(): shutil.copy2(license,out/'Python-LICENSE.txt')
 (out/'index.json').write_text(json.dumps(index,indent=2)+'\\n')
 ''', str(bundle / "licenses")], check=True)
     # Smoke test the frozen executable, with the same pipe protocol as the app.
     request = json.dumps({"path": str(ROOT / "tests/fixtures/ocr-japanese.png")}) + "\n"
-    smoke = subprocess.run([str(bundle / "ocr-worker"), str(models)], input=request,
-                           capture_output=True, text=True, check=True, timeout=60)
+    smoke = subprocess.run([str(bundle / executable), str(models)], input=request,
+                           capture_output=True, text=True, encoding="utf-8", check=True, timeout=60)
     if not any("画像" in block["text"] for block in json.loads(smoke.stdout)["blocks"]):
         raise SystemExit("Bundled OCR smoke test failed.")
     destination = OUTPUT / "ocr"
@@ -97,7 +99,7 @@ if license.is_file(): shutil.copy2(license,out/'Python-LICENSE.txt')
             shutil.rmtree(old)
         elif old.exists():
             old.unlink()
-    print(f"OCR ready: {destination / 'ocr-worker'}")
+    print(f"OCR ready: {destination / executable}")
 
 
 if __name__ == "__main__":

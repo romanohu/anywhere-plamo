@@ -5,6 +5,10 @@
 #[path = "selection_copy.rs"]
 mod copy;
 
+#[cfg(windows)]
+#[path = "selection_windows.rs"]
+mod windows;
+
 const UNAVAILABLE: &str = "選択した文字を取得できませんでした。文章を選択して、もう一度ショートカットを押してください。対応しないアプリでは、コピーして「貼り付け」を使えます。";
 const TOO_LONG: &str = "一度に翻訳できるのは12,000文字までです。文章を短く分けてください。";
 
@@ -114,7 +118,12 @@ fn read_platform() -> Result<String, String> {
     macos::read()
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(windows)]
+fn read_platform() -> Result<String, String> {
+    windows::read()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 fn read_platform() -> Result<String, String> {
     Err(UNAVAILABLE.into())
 }

@@ -1,10 +1,11 @@
-"""Build a pinned llama.cpp server for the host Linux/macOS architecture."""
+"""Build a pinned llama.cpp server for the host architecture."""
 import argparse
 import os
 import pathlib
 import platform
 import shutil
 import subprocess
+import sys
 import tarfile
 import urllib.request
 
@@ -20,12 +21,12 @@ def main():
     parser.add_argument('--backend', choices=('cpu', 'cuda', 'vulkan', 'metal'),
                         default='metal' if platform.system() == 'Darwin' else 'cpu')
     options = parser.parse_args()
-    if platform.system() not in {"Linux", "Darwin"}:
-        raise SystemExit("This release supports building on Linux and macOS.")
+    if platform.system() not in {"Linux", "Darwin", "Windows"}:
+        raise SystemExit("Build on Linux, macOS or Windows.")
     if options.backend == 'metal' and platform.system() != 'Darwin':
         parser.error('Metal requires macOS.')
-    if options.backend == 'cuda' and platform.system() != 'Linux':
-        parser.error('The CUDA runtime build is supported on Linux only.')
+    if options.backend == 'cuda' and platform.system() not in {'Linux', 'Windows'}:
+        parser.error('CUDA requires Linux or Windows.')
     if not shutil.which("cmake"):
         raise SystemExit("CMake is required. Install it, then run npm run runtime:build again.")
     WORK.mkdir(exist_ok=True)
@@ -54,11 +55,21 @@ def main():
     ]
     if platform.system() == "Darwin":
         args += ["-DGGML_METAL_EMBED_LIBRARY=ON", "-DCMAKE_OSX_DEPLOYMENT_TARGET=13.3"]
+    if platform.system() == "Windows":
+        args += ["-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded"]
     subprocess.run(args, check=True)
     subprocess.run(["cmake", "--build", str(build), "--target", "llama-server",
                     "--config", "Release", "--parallel", str(min(os.cpu_count() or 2, 8))], check=True)
     OUTPUT.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(build / "bin/llama-server", OUTPUT / "llama-server")
+    executable = "llama-server.exe" if platform.system() == "Windows" else "llama-server"
+    binary = build / "bin" / executable
+    if not binary.is_file():
+        binary = build / "bin/Release" / executable
+    shutil.copy2(binary, OUTPUT / executable)
+    # CUDA builds can produce required runtime DLLs next to the executable.
+    if platform.system() == "Windows":
+        for library in binary.parent.glob("*.dll"):
+            shutil.copy2(library, OUTPUT / library.name)
     if platform.system() == "Darwin":
         # Tauri signs app binaries, but does not sign executables in resources.
         subprocess.run(["codesign", "--force", "--sign", "-", str(OUTPUT / "llama-server")],
@@ -74,8 +85,8 @@ def main():
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(file, target)
     (OUTPUT / "VERSION").write_text(f"llama.cpp {REVISION}\nbackend {options.backend}\n", encoding="utf-8")
-    print(f"Runtime ready: {OUTPUT / 'llama-server'}")
-    subprocess.run(["python3", str(ROOT / "scripts/build-ocr.py")], check=True)
+    print(f"Runtime ready: {OUTPUT / executable}")
+    subprocess.run([sys.executable, str(ROOT / "scripts/build-ocr.py")], check=True)
 
 
 if __name__ == "__main__":

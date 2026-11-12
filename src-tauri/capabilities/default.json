@@ -2,6 +2,6 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main-window",
   "description": "Local UI event access; privileged work stays in Rust commands.",
-  "windows": ["main", "popup", "lens"],
+  "windows": ["main", "popup", "lens", "lens-select"],
   "permissions": ["core:event:default"]
 }

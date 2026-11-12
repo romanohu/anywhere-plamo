@@ -22,6 +22,10 @@ pub fn default_lens() -> Shortcut {
     Shortcut::new(Some(default().mods), Code::KeyL)
 }
 
+pub fn default_lens_open() -> Shortcut {
+    Shortcut::new(Some(default().mods), Code::KeyO)
+}
+
 pub fn parse(value: &str) -> Result<Shortcut, String> {
     let shortcut: Shortcut = value
         .trim()
@@ -85,6 +89,8 @@ struct Settings {
     shortcut: String,
     #[serde(default, rename = "lensShortcut")]
     lens_shortcut: String,
+    #[serde(default, rename = "lensOpenShortcut")]
+    lens_open_shortcut: String,
     #[serde(default, rename = "shortcutPopup")]
     shortcut_popup: bool,
 }
@@ -112,6 +118,14 @@ pub fn load_lens(path: &Path) -> Shortcut {
         .unwrap_or_else(default_lens)
 }
 
+pub fn load_lens_open(path: &Path) -> Shortcut {
+    fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Settings>(&bytes).ok())
+        .and_then(|settings| parse(&settings.lens_open_shortcut).ok())
+        .unwrap_or_else(default_lens_open)
+}
+
 pub struct PendingSave {
     temporary: PathBuf,
     destination: PathBuf,
@@ -122,6 +136,7 @@ impl PendingSave {
         path: &Path,
         shortcut: Shortcut,
         lens_shortcut: Shortcut,
+        lens_open_shortcut: Shortcut,
         shortcut_popup: bool,
     ) -> Result<Self, String> {
         let directory = path.parent().ok_or(SAVE_ERROR)?;
@@ -133,6 +148,7 @@ impl PendingSave {
         let bytes = serde_json::to_vec(&Settings {
             shortcut: label(shortcut),
             lens_shortcut: label(lens_shortcut),
+            lens_open_shortcut: label(lens_open_shortcut),
             shortcut_popup,
         })
         .map_err(|_| SAVE_ERROR)?;
@@ -234,18 +250,25 @@ mod tests {
         let path = directory.join("settings.json");
         assert_eq!(load(&path), default());
         assert_eq!(load_lens(&path), default_lens());
+        assert_eq!(load_lens_open(&path), default_lens_open());
         let binding = parse("Ctrl+Alt+KeyT").unwrap();
         let lens_binding = parse("Alt+KeyL").unwrap();
+        let lens_open_binding = parse("Alt+KeyO").unwrap();
         assert!(!load_popup(&path));
-        let pending = PendingSave::new(&path, binding, lens_binding, true).unwrap();
+        let pending =
+            PendingSave::new(&path, binding, lens_binding, lens_open_binding, true).unwrap();
         assert!(!path.exists());
         pending.commit().unwrap();
         assert_eq!(load(&path), binding);
         assert_eq!(load_lens(&path), lens_binding);
+        assert_eq!(load_lens_open(&path), lens_open_binding);
         assert!(load_popup(&path));
-        drop(PendingSave::new(&path, default(), default_lens(), false).unwrap());
+        drop(
+            PendingSave::new(&path, default(), default_lens(), default_lens_open(), false).unwrap(),
+        );
         assert_eq!(load(&path), binding);
         assert_eq!(load_lens(&path), lens_binding);
+        assert_eq!(load_lens_open(&path), lens_open_binding);
         assert!(load_popup(&path));
         assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
         fs::write(&path, r#"{"shortcut":"J"}"#).unwrap();
@@ -254,14 +277,16 @@ mod tests {
         fs::write(&path, r#"{"shortcut":"Ctrl+Alt+KeyT"}"#).unwrap();
         assert_eq!(load(&path), binding);
         assert_eq!(load_lens(&path), default_lens());
+        assert_eq!(load_lens_open(&path), default_lens_open());
         assert!(!load_popup(&path));
         fs::write(
             &path,
-            r#"{"shortcut":"Ctrl+Alt+KeyT","lensShortcut":"KeyJ"}"#,
+            r#"{"shortcut":"Ctrl+Alt+KeyT","lensShortcut":"KeyJ","lensOpenShortcut":"KeyO"}"#,
         )
         .unwrap();
         assert_eq!(load_lens(&path), default_lens());
-        PendingSave::new(&path, default(), default_lens(), true)
+        assert_eq!(load_lens_open(&path), default_lens_open());
+        PendingSave::new(&path, default(), default_lens(), default_lens_open(), true)
             .unwrap()
             .commit()
             .unwrap();

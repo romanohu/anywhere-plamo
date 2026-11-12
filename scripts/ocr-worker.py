@@ -185,7 +185,8 @@ class Ocr:
 
     def recognize(self, path):
         # Never pass strings to RapidOCR: it also accepts URLs as image inputs.
-        image = cv2.imread(str(path))
+        # OpenCV's Windows filename API cannot reliably open non-ASCII user paths.
+        image = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
         if image is None or max(image.shape[:2]) > 8192:
             raise ValueError('Invalid capture image')
         result = self.engine(image)
@@ -212,6 +213,9 @@ class Ocr:
 
 
 def main():
+    # Pipe JSON is UTF-8 on every OS, including Japanese Windows installations.
+    sys.stdin.reconfigure(encoding="utf-8")
+    sys.stdout.reconfigure(encoding="utf-8")
     ocr = Ocr(Path(sys.argv[1]))
     for request in sys.stdin:
         try:

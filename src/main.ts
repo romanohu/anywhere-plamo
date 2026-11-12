@@ -1,6 +1,7 @@
 import { invoke, isDesktop, onClipboardRequest, onShortcutPressed, onWindowHidden, progressChannel } from './backend';
 import type { AppStatus } from './backend';
 import { initLens } from './lens';
+import { initLensSelect } from './lens-select';
 
 function element<T extends HTMLElement>(id: string): T {
   const found = document.getElementById(id);
@@ -17,6 +18,8 @@ const pasteButton = element<HTMLButtonElement>('paste-button');
 const clearButton = element<HTMLButtonElement>('clear-button');
 const copyButton = element<HTMLButtonElement>('copy-button');
 const dialog = element<HTMLDialogElement>('settings-dialog');
+const dictionaryButton = element<HTMLButtonElement>('dictionary-button');
+const dictionaryDialog = element<HTMLDialogElement>('dictionary-dialog');
 const downloadButton = element<HTMLButtonElement>('download-button');
 const preloadModel = element<HTMLInputElement>('preload-model');
 const autoDirection = element<HTMLInputElement>('auto-direction');
@@ -28,10 +31,18 @@ const shortcutRecord = element<HTMLButtonElement>('shortcut-record');
 const shortcutSave = element<HTMLButtonElement>('shortcut-save');
 const shortcutReset = element<HTMLButtonElement>('shortcut-reset');
 const shortcutMessage = element('shortcut-message');
+const dictionaryEntries = element<HTMLDivElement>('dictionary-entries');
+const dictionaryEmpty = element('dictionary-empty');
+const dictionaryTerm = element<HTMLInputElement>('dictionary-term');
+const dictionaryReplacement = element<HTMLInputElement>('dictionary-replacement');
+const dictionaryAdd = element<HTMLButtonElement>('dictionary-add');
+const dictionarySave = element<HTMLButtonElement>('dictionary-save');
+const dictionaryMessage = element('dictionary-message');
 const mac = /Mac/.test(navigator.platform);
 const popup = new URLSearchParams(location.search).has('popup');
 const lens = new URLSearchParams(location.search).has('lens');
-let status: AppStatus = { modelReady: false, runtimeAvailable: false, shortcutAvailable: false, shortcut: '', defaultShortcut: '', shortcutSupported: false, shortcutPopup: false, wayland: false, resident: false, lensSupported: false, ocrAvailable: false, lensUsesSelection: false, lensShortcut: '', defaultLensShortcut: '', lensShortcutAvailable: false, lensPassthrough: false };
+const lensSelect = new URLSearchParams(location.search).has('lens-select');
+let status: AppStatus = { modelReady: false, runtimeAvailable: false, shortcutAvailable: false, shortcut: '', defaultShortcut: '', shortcutSupported: false, shortcutPopup: false, wayland: false, resident: false, lensSupported: false, ocrAvailable: false, lensUsesSelection: false, lensShortcut: '', defaultLensShortcut: '', lensShortcutAvailable: false, lensOpenShortcut: '', defaultLensOpenShortcut: '', lensOpenShortcutAvailable: false, lensPassthrough: false };
 let shortcutDraft = '';
 let recordingShortcut = false;
 let startingShortcut = false;
@@ -54,6 +65,10 @@ let preparationRequested = false;
 let popupRequest: number | null = null;
 let popupTerminal = false;
 let manualTarget = target.value;
+let dictionaryDraft: DictionaryEntry[] = [];
+let dictionarySaving = false;
+
+type DictionaryEntry = { term: string; replacement: string; enabled: boolean };
 
 function loadPreferences(): void {
   try {
@@ -67,6 +82,7 @@ loadPreferences();
 target.value = manualTarget;
 document.body.classList.toggle('popup', popup);
 if (popup) document.title = 'Anywhere Plamo — 選択翻訳';
+dictionaryButton.hidden = popup;
 
 element('modifier-key').textContent = mac ? '⌘' : 'Ctrl';
 
@@ -128,6 +144,7 @@ async function refreshStatus(): Promise<void> {
 }
 
 function currentShortcut(): { binding: string; default: string; available: boolean } {
+  if (shortcutAction.value === 'lensOpen') return { binding: status.lensOpenShortcut, default: status.defaultLensOpenShortcut, available: status.lensOpenShortcutAvailable };
   return shortcutAction.value === 'lens'
     ? { binding: status.lensShortcut, default: status.defaultLensShortcut, available: status.lensShortcutAvailable }
     : { binding: status.shortcut, default: status.defaultShortcut, available: status.shortcutAvailable };
@@ -136,9 +153,10 @@ function currentShortcut(): { binding: string; default: string; available: boole
 function renderShortcut(): void {
   const current = currentShortcut();
   const forLens = shortcutAction.value === 'lens';
+  const forLensOpen = shortcutAction.value === 'lensOpen';
   shortcutAction.disabled = savingShortcut || startingShortcut;
-  element('selection-shortcut-options').hidden = forLens;
-  shortcutRecord.setAttribute('aria-label', forLens ? 'レンズのショートカットを変更' : '翻訳ショートカットを変更');
+  element('selection-shortcut-options').hidden = forLens || forLensOpen;
+  shortcutRecord.setAttribute('aria-label', forLensOpen ? 'OCRレンズ呼び出しのショートカットを変更' : forLens ? 'レンズのショートカットを変更' : '翻訳ショートカットを変更');
   shortcutPopup.disabled = !isDesktop || savingPopup;
   if (!savingPopup) shortcutPopup.checked = status.shortcutPopup;
   shortcutRecord.disabled = !status.shortcutSupported || savingShortcut;
@@ -153,10 +171,10 @@ function renderShortcut(): void {
   shortcutSave.disabled = savingShortcut || recordingShortcut || (shortcutDraft === current.binding && current.available);
   shortcutReset.disabled = savingShortcut || recordingShortcut || (shortcutDraft === current.default && current.binding === current.default && current.available);
   element('shortcut-description').textContent = status.shortcutSupported
-    ? forLens ? 'レンズ越しに背後のアプリを操作できます。同じキーで解除します。' : '他のアプリで選択した文章を翻訳します。'
+    ? forLensOpen ? '範囲を囲み、Enterで翻訳します。同じキーでレンズを閉じます。' : forLens ? 'レンズ越しに背後のアプリを操作できます。同じキーで解除します。' : '他のアプリで選択した文章を翻訳します。'
     : forLens ? 'この環境ではクリック透過を利用できません。' : isDesktop ? 'OSのキーボード設定で、次のコマンドにキーを割り当ててください。' : 'デスクトップアプリで設定できます。';
-  element('shortcut-note').textContent = forLens ? '' : !status.shortcutSupported && isDesktop ? 'anywhere-plamo --translate-selection'
-    : mac ? 'macOSのアクセシビリティ許可が必要です。' : '';
+  element('shortcut-note').textContent = forLens ? '' : !status.shortcutSupported && isDesktop ? `anywhere-plamo --${forLensOpen ? 'toggle-lens' : 'translate-selection'}`
+    : mac && !forLensOpen ? 'macOSのアクセシビリティ許可が必要です。' : '';
   element('shortcut-help').hidden = !status.shortcutSupported;
 }
 
@@ -185,7 +203,7 @@ async function saveShortcut(value = shortcutDraft): Promise<void> {
   shortcutMessage.textContent = '';
   renderShortcut();
   try {
-    status = await invoke<AppStatus>('set_shortcut', { shortcut: value, lens: shortcutAction.value === 'lens' });
+    status = await invoke<AppStatus>('set_shortcut', { shortcut: value, lens: shortcutAction.value === 'lens', lensOpen: shortcutAction.value === 'lensOpen' });
     shortcutDraft = currentShortcut().binding;
     shortcutMessage.textContent = '保存しました';
   } catch (error) {
@@ -200,6 +218,89 @@ function prepareEngine(): void {
   if (!popup && preloadModel.checked && status.modelReady && status.runtimeAvailable && !preparationRequested) {
     preparationRequested = true;
     void invoke('prepare_engine').catch(() => { /* Translation retries if background preparation fails. */ });
+  }
+}
+
+function renderDictionary(): void {
+  dictionaryEmpty.hidden = dictionaryDraft.length > 0;
+  dictionaryEntries.replaceChildren(...dictionaryDraft.map((entry, index) => {
+    const row = document.createElement('div');
+    row.className = 'dictionary-row';
+    const enabled = document.createElement('input');
+    enabled.type = 'checkbox';
+    enabled.checked = entry.enabled;
+    enabled.setAttribute('aria-label', `${entry.term}を有効化`);
+    enabled.addEventListener('change', () => { dictionaryDraft[index].enabled = enabled.checked; });
+    const term = document.createElement('span');
+    term.className = 'dictionary-term';
+    term.textContent = entry.term;
+    term.title = entry.term;
+    const arrow = document.createElement('span');
+    arrow.className = 'dictionary-arrow';
+    arrow.textContent = '→';
+    arrow.setAttribute('aria-hidden', 'true');
+    const replacement = document.createElement('input');
+    replacement.className = 'dictionary-replacement';
+    replacement.value = entry.replacement;
+    replacement.maxLength = 1000;
+    replacement.setAttribute('aria-label', `${entry.term}の訳語`);
+    replacement.addEventListener('input', () => { dictionaryDraft[index].replacement = replacement.value; });
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'icon-button dictionary-delete';
+    remove.setAttribute('aria-label', `${entry.term}を削除`);
+    remove.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg>';
+    remove.addEventListener('click', () => {
+      dictionaryDraft.splice(index, 1);
+      dictionaryMessage.textContent = '';
+      renderDictionary();
+    });
+    row.append(enabled, term, arrow, replacement, remove);
+    return row;
+  }));
+}
+
+async function openDictionary(): Promise<void> {
+  dictionaryMessage.textContent = '';
+  try {
+    dictionaryDraft = await invoke<DictionaryEntry[]>('get_dictionary');
+    dictionaryTerm.value = '';
+    dictionaryReplacement.value = '';
+    renderDictionary();
+    dictionaryDialog.showModal();
+  } catch (error) {
+    showError(error);
+  }
+}
+
+function addDictionaryEntry(): void {
+  const term = dictionaryTerm.value.trim();
+  const replacement = dictionaryReplacement.value.trim();
+  if (!term) { dictionaryMessage.textContent = '原語を入力してください。'; return; }
+  if (dictionaryDraft.some(entry => entry.term === term)) {
+    dictionaryMessage.textContent = 'この原語は登録済みです。既存の訳語を編集してください。';
+    return;
+  }
+  dictionaryDraft.push({ term, replacement, enabled: true });
+  dictionaryTerm.value = '';
+  dictionaryReplacement.value = '';
+  dictionaryMessage.textContent = '';
+  renderDictionary();
+  dictionaryTerm.focus();
+}
+
+async function saveDictionary(): Promise<void> {
+  if (dictionarySaving) return;
+  dictionarySaving = true;
+  dictionaryMessage.textContent = '';
+  try {
+    dictionaryDraft = await invoke<DictionaryEntry[]>('set_dictionary', { entries: dictionaryDraft });
+    renderDictionary();
+    dictionaryMessage.textContent = '保存しました';
+  } catch (error) {
+    dictionaryMessage.textContent = String(error);
+  } finally {
+    dictionarySaving = false;
   }
 }
 
@@ -422,6 +523,29 @@ copyButton.addEventListener('click', async () => {
   } catch (error) { showError(error); }
 });
 element('settings-button').addEventListener('click', openSettings);
+dictionaryButton.addEventListener('click', () => { void openDictionary(); });
+element('dictionary-close').addEventListener('click', () => dictionaryDialog.close());
+dictionaryAdd.addEventListener('click', addDictionaryEntry);
+dictionarySave.addEventListener('click', () => { void saveDictionary(); });
+[dictionaryTerm, dictionaryReplacement].forEach(input => {
+  // Japanese conversion commits on the first Enter and registers on the
+  // second. WebKit reports the committing Enter as a plain keydown right
+  // after compositionend, so swallow that one and let the next register.
+  let ignoreNextEnter = false;
+  input.addEventListener('compositionend', () => {
+    ignoreNextEnter = true;
+    setTimeout(() => { ignoreNextEnter = false; }, 0);
+    input.addEventListener('keyup', () => { ignoreNextEnter = false; }, { once: true });
+  });
+  input.addEventListener('keydown', event => {
+    if (event.isComposing || event.keyCode === 229) return;
+    if (event.key !== 'Enter') return;
+    if (ignoreNextEnter) return;
+    event.preventDefault();
+    addDictionaryEntry();
+  });
+});
+dictionaryDialog.addEventListener('close', () => { dictionaryMessage.textContent = ''; });
 element('lens-button').addEventListener('click', () => { void invoke('open_lens').catch(showError); });
 element('setup-open').addEventListener('click', openSettings);
 element('settings-close').addEventListener('click', () => dialog.close());
@@ -499,7 +623,7 @@ element('license-link').addEventListener('click', async () => {
 });
 element('quit-button').addEventListener('click', () => { void invoke('quit_app').catch(showError); });
 document.addEventListener('keydown', event => {
-  if (lens) return;
+  if (lens || lensSelect) return;
   if (recordingShortcut) {
     if (startingShortcut) { event.preventDefault(); return; }
     if ((event.key === 'Tab' || event.key === 'Escape') && !event.ctrlKey && !event.altKey && !event.metaKey) {
@@ -522,11 +646,11 @@ document.addEventListener('keydown', event => {
     return;
   }
   if (event.isComposing) return;
-  if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !dialog.open) {
+  if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !dialog.open && !dictionaryDialog.open) {
     event.preventDefault();
     void translate();
   }
-  if (event.key === 'Escape' && !dialog.open) {
+  if (event.key === 'Escape' && !dialog.open && !dictionaryDialog.open) {
     event.preventDefault();
     if (busy || cancelling) void cancel();
     else if (isDesktop) {
@@ -546,6 +670,7 @@ async function init(): Promise<void> {
     element('setup-heading').textContent = '画面プレビュー';
     element('setup-banner').querySelector('p')!.textContent = '翻訳・モデル取得・ショートカットはアプリで利用できます。';
     downloadButton.disabled = true;
+    dictionaryButton.hidden = true;
     element<HTMLButtonElement>('quit-button').disabled = true;
     return;
   }
@@ -573,5 +698,6 @@ async function init(): Promise<void> {
   } catch (error) { showError(error); }
 }
 
-if (lens) void initLens();
+if (lensSelect) void initLensSelect();
+else if (lens) void initLens();
 else void init();

@@ -7,6 +7,12 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+pub const EXECUTABLE: &str = if cfg!(windows) {
+    "ocr/ocr-worker.exe"
+} else {
+    "ocr/ocr-worker"
+};
+
 #[derive(Default)]
 pub struct Ocr {
     worker: Mutex<Option<Worker>>,
@@ -31,7 +37,10 @@ impl Ocr {
             worker = self.worker.lock() => worker,
         };
         if worker.is_none() {
-            let mut child = Command::new(runtime.join("ocr/ocr-worker"))
+            let mut command = Command::new(runtime.join(EXECUTABLE));
+            #[cfg(windows)]
+            command.creation_flags(0x08000000); // CREATE_NO_WINDOW, retaining the JSON pipes.
+            let mut child = command
                 .arg(runtime.join("ocr-models"))
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())

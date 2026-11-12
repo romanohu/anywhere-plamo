@@ -14,6 +14,10 @@ use tokio_util::sync::CancellationToken;
 #[path = "lens_linux.rs"]
 mod linux;
 
+#[cfg(target_os = "windows")]
+#[path = "lens_windows.rs"]
+pub mod windows;
+
 #[path = "ocr.rs"]
 mod ocr;
 pub use ocr::Ocr;
@@ -106,7 +110,7 @@ impl Region {
 
 pub fn ready(runtime: &Path) -> bool {
     [
-        "ocr/ocr-worker",
+        ocr::EXECUTABLE,
         "ocr-models/PP-OCRv6_det_small.onnx",
         "ocr-models/PP-OCRv6_rec_small.onnx",
     ]
@@ -121,11 +125,18 @@ struct CaptureFile {
 
 impl CaptureFile {
     fn new() -> Result<Self, String> {
-        use std::os::unix::fs::DirBuilderExt;
         let directory =
             std::env::temp_dir().join(format!("anywhere-plamo-{}", uuid::Uuid::new_v4()));
-        std::fs::DirBuilder::new()
-            .mode(0o700)
+        let builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        let builder = {
+            use std::os::unix::fs::DirBuilderExt;
+            let mut builder = builder;
+            builder.mode(0o700);
+            builder
+        };
+        // Windows inherits the current user's temporary-directory ACL.
+        builder
             .create(&directory)
             .map_err(|_| "読み取り用の一時ファイルを作成できません。")?;
         Ok(Self {
@@ -206,7 +217,9 @@ pub async fn capture(
         cancel,
     )
     .await?;
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    let captured_height = windows::capture(&window, area, &file.path, cancel).await?;
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     return Err("このOSでは画面の読み取りに対応していません。".into());
     if cancel.is_cancelled() {
         return Err("CANCELLED".into());
@@ -227,7 +240,7 @@ pub async fn capture(
     }
     on_read();
     let blocks = ocr.recognize(runtime, &file.path, cancel).await?;
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     let blocks = fit_capture_height(blocks, captured_height / region.height);
     if let Some(watch) = watch {
         watch
@@ -243,9 +256,9 @@ pub async fn capture(
     Ok(CaptureResult::Text { text, blocks })
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 fn fit_capture_height(mut blocks: Vec<TextBlock>, fraction: f64) -> Vec<TextBlock> {
-    // Keep OCR positions relative to the requested DOM region when AppKit clips its bottom.
+    // Keep OCR positions relative to the requested DOM region when its bottom is clipped.
     for block in &mut blocks {
         block.y *= fraction;
         block.height *= fraction;
@@ -468,9 +481,11 @@ mod tests {
 
     #[test]
     fn captures_are_private_and_removed_on_drop() {
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         let file = CaptureFile::new().unwrap();
         let directory = file.directory.clone();
+        #[cfg(unix)]
         assert_eq!(
             std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
             0o700
@@ -488,6 +503,7 @@ mod tests {
         assert!(!directory.exists());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn cancelling_ocr_stops_the_child_process() {
         use std::os::unix::fs::PermissionsExt;
@@ -544,6 +560,24 @@ mod tests {
                 .unwrap()
                 .is_empty());
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires npm run ocr:build"]
+    async fn bundled_ocr_reads_non_ascii_paths_with_utf8_pipe_responses() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let file = CaptureFile::new().unwrap();
+        let path = file.directory.join("日本語の画像.png");
+        std::fs::copy(root.join("../tests/fixtures/ocr-japanese.png"), &path).unwrap();
+        let blocks = Ocr::default()
+            .recognize(
+                &root.join("resources/runtime"),
+                &path,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(blocks.iter().any(|block| block.text.contains("画像")));
     }
 
     #[tokio::test]

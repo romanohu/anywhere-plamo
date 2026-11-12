@@ -19,8 +19,10 @@ async function fixture(t, options = {}) {
   const errors = [];
   const console = new VirtualConsole();
   console.on('jsdomError', error => errors.push(error));
-  const dom = new JSDOM(html, { url: `http://localhost/${options.lens ? '?lens' : options.popup ? '?popup' : ''}`, runScripts: 'outside-only', virtualConsole: console });
+  const dom = new JSDOM(html, { url: `http://localhost/${options.lensSelect ? '?lens-select' : options.lens ? '?lens' : options.popup ? '?popup' : ''}`, runScripts: 'outside-only', virtualConsole: console });
   const { window } = dom;
+  window.requestAnimationFrame = callback => { queueMicrotask(() => callback(0)); return 0; };
+  window.HTMLElement.prototype.setPointerCapture = () => {};
   if (options.lens && !options.autoLens) window.localStorage.setItem('lens-auto', 'false');
   const lensTimers = new Map();
   let lensTimerId = 0;
@@ -51,10 +53,12 @@ async function fixture(t, options = {}) {
     shortcutAvailable: true, wayland: false, resident: true,
     shortcut: 'Ctrl+Shift+KeyJ', defaultShortcut: 'Ctrl+Shift+KeyJ', shortcutSupported: true, shortcutPopup: false,
     lensShortcut: 'Ctrl+Shift+KeyL', defaultLensShortcut: 'Ctrl+Shift+KeyL', lensShortcutAvailable: true, lensPassthrough: false,
+    lensOpenShortcut: 'Ctrl+Shift+KeyO', defaultLensOpenShortcut: 'Ctrl+Shift+KeyO', lensOpenShortcutAvailable: true,
     lensSupported: !!options.lens, ocrAvailable: true, lensUsesSelection: false,
     ...options.status,
   };
   let clipboard = options.clipboard ?? 'Hello, world.';
+  let dictionary = options.dictionary ? options.dictionary.map(entry => ({ ...entry })) : [];
   let request = 1;
   let pending = options.pending ? { request, ...options.pending } : null;
   let rejectOperation;
@@ -74,6 +78,8 @@ async function fixture(t, options = {}) {
         switch (command) {
           case 'get_status': return { ...state };
           case 'open_lens': return;
+          case 'apply_lens_selection': return !!options.selectedLens;
+          case 'confirm_lens_selection': return;
           case 'set_lens_passthrough':
             if (options.passthroughError) throw options.passthroughError;
             state.lensPassthrough = args.enabled;
@@ -88,13 +94,19 @@ async function fixture(t, options = {}) {
             return;
           case 'set_shortcut':
             if (options.shortcutError) throw options.shortcutError;
-            if (args.lens) { state.lensShortcut = args.shortcut; state.lensShortcutAvailable = true; }
+            if (args.lensOpen) { state.lensOpenShortcut = args.shortcut; state.lensOpenShortcutAvailable = true; }
+            else if (args.lens) { state.lensShortcut = args.shortcut; state.lensShortcutAvailable = true; }
             else { state.shortcut = args.shortcut; state.shortcutAvailable = true; }
             return { ...state };
           case 'set_shortcut_popup':
             if (options.popupError) throw options.popupError;
             state.shortcutPopup = args.enabled;
             return { ...state };
+          case 'get_dictionary': return dictionary;
+          case 'set_dictionary':
+            if (options.dictionaryError) throw options.dictionaryError;
+            dictionary = args.entries;
+            return dictionary;
           case 'prepare_engine':
             if (options.prepareError) throw options.prepareError;
             return;
@@ -138,7 +150,7 @@ async function fixture(t, options = {}) {
   };
   if (!options.browser) window.__TAURI__ = native;
   window.eval(bundle);
-  await until(() => options.browser || calls.some(call => call.command === (options.lens ? 'get_status' : 'take_pending_clipboard')));
+  await until(() => options.browser || options.lensSelect || calls.some(call => call.command === (options.lens ? 'apply_lens_selection' : 'take_pending_clipboard')));
   t.after(() => { dom.window.close(); assert.deepEqual(errors, []); });
   return {
     window, byId, calls, state, channels,
@@ -184,6 +196,7 @@ test('browser preview clearly disables translation and model download', async t 
   assert.equal(f.byId('shortcut-record').disabled, true);
   assert.equal(f.byId('shortcut-popup').disabled, true);
   assert.equal(f.byId('translate-button').disabled, true);
+  assert.equal(f.byId('dictionary-button').hidden, true);
   f.click('setup-open');
   assert.equal(f.byId('settings-dialog').open, true);
   assert.equal(f.byId('download-button').disabled, true);
@@ -334,6 +347,93 @@ test('failed popup settings restore the saved option and report the error', asyn
   assert.equal(f.byId('shortcut-popup').checked, true);
   assert.equal(f.state.shortcutPopup, true);
   assert.equal(f.byId('shortcut-message').textContent, '設定を保存できませんでした。');
+});
+
+test('the dictionary dialog loads saved entries and persists additions through the native command', async t => {
+  const f = await fixture(t, { dictionary: [{ term: 'dragon', replacement: 'りゅう', enabled: true }] });
+  assert.equal(f.byId('dictionary-button').hidden, false);
+  f.click('dictionary-button');
+  await until(() => f.byId('dictionary-dialog').open);
+  assert.equal(f.byId('dictionary-entries').children.length, 1);
+  f.byId('dictionary-term').value = 'PLaMo';
+  f.byId('dictionary-replacement').value = 'プラモ';
+  f.click('dictionary-add');
+  assert.equal(f.byId('dictionary-message').textContent, '');
+  assert.equal(f.byId('dictionary-entries').children.length, 2);
+  f.click('dictionary-save');
+  await until(() => f.byId('dictionary-message').textContent === '保存しました');
+  assert.deepEqual(Array.from(f.calls.find(call => call.command === 'set_dictionary').args.entries, entry => ({ ...entry })), [
+    { term: 'dragon', replacement: 'りゅう', enabled: true },
+    { term: 'PLaMo', replacement: 'プラモ', enabled: true },
+  ]);
+  f.byId('dictionary-close').click();
+  f.click('dictionary-button');
+  await until(() => f.byId('dictionary-dialog').open && f.byId('dictionary-entries').children.length === 2);
+  const replacement = f.byId('dictionary-entries').querySelector('.dictionary-replacement');
+  replacement.value = 'りゅうきち';
+  replacement.dispatchEvent(new f.window.Event('input'));
+  f.click('dictionary-save');
+  await until(() => f.byId('dictionary-message').textContent === '保存しました');
+  assert.deepEqual(Array.from(f.calls.findLast(call => call.command === 'set_dictionary').args.entries, entry => ({ ...entry })), [
+    { term: 'dragon', replacement: 'りゅうきち', enabled: true },
+    { term: 'PLaMo', replacement: 'プラモ', enabled: true },
+  ]);
+});
+
+test('dictionary drafts reject empty and duplicate terms and deletions only affect the draft', async t => {
+  const f = await fixture(t);
+  f.click('dictionary-button');
+  await until(() => f.byId('dictionary-dialog').open);
+  assert.equal(f.byId('dictionary-empty').hidden, false);
+  f.click('dictionary-add');
+  assert.equal(f.byId('dictionary-message').textContent, '原語を入力してください。');
+  f.byId('dictionary-term').value = 'cat';
+  f.byId('dictionary-replacement').value = 'ねこ';
+  f.click('dictionary-add');
+  f.byId('dictionary-term').value = 'cat';
+  f.click('dictionary-add');
+  assert.equal(f.byId('dictionary-message').textContent, 'この原語は登録済みです。既存の訳語を編集してください。');
+  assert.equal(f.byId('dictionary-entries').children.length, 1);
+  f.byId('dictionary-entries').querySelector('.dictionary-delete').click();
+  assert.equal(f.byId('dictionary-entries').children.length, 0);
+  assert.equal(f.byId('dictionary-empty').hidden, false);
+  assert.equal(f.calls.some(call => call.command === 'set_dictionary'), false);
+});
+
+test('dictionary Enter registration waits for Japanese conversion to settle', async t => {
+  const f = await fixture(t);
+  f.click('dictionary-button');
+  await until(() => f.byId('dictionary-dialog').open);
+  f.byId('dictionary-term').value = 'りゅう';
+  f.byId('dictionary-replacement').value = 'dragon';
+  const keydown = (init = {}) => f.byId('dictionary-term').dispatchEvent(new f.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true, ...init }));
+  // The Enter that confirms the conversion is marked composing and must not register.
+  keydown({ isComposing: true, keyCode: 229 });
+  assert.equal(f.byId('dictionary-entries').children.length, 0);
+  // WebKit reports the committing Enter as a plain keydown after compositionend.
+  f.byId('dictionary-term').dispatchEvent(new f.window.Event('compositionend'));
+  keydown();
+  assert.equal(f.byId('dictionary-entries').children.length, 0);
+  // The second Enter registers the term.
+  await new Promise(resolve => setTimeout(resolve, 2));
+  keydown();
+  await until(() => f.byId('dictionary-entries').children.length === 1);
+  assert.deepEqual(Array.from(f.byId('dictionary-entries').children, row => row.querySelector('.dictionary-term').textContent), ['りゅう']);
+});
+
+test('dictionary save failures are reported and the draft stays editable', async t => {
+  const f = await fixture(t, { dictionaryError: '辞書を保存できませんでした。' });
+  f.click('dictionary-button');
+  await until(() => f.byId('dictionary-dialog').open);
+  f.byId('dictionary-term').value = 'dragon';
+  f.byId('dictionary-replacement').value = 'りゅう';
+  f.click('dictionary-add');
+  f.click('dictionary-save');
+  await until(() => f.byId('dictionary-message').textContent === '辞書を保存できませんでした。');
+  f.byId('dictionary-entries').querySelector('.dictionary-delete').click();
+  f.click('dictionary-save');
+  await until(() => f.calls.filter(call => call.command === 'set_dictionary').length === 2);
+  assert.deepEqual(Array.from(f.calls.at(-1).args.entries, entry => ({ ...entry })), []);
 });
 
 test('a shortcut popup becomes dismissible only after its translation has finished', async t => {
@@ -1133,6 +1233,25 @@ test('lens ignores unchanged resize events and stops wheel overscroll without ca
   assert.equal(f.calls.some(call => call.command === 'cancel_operation'), false);
 });
 
+test('lens reuses earlier pages after scrolling back but refresh and language changes translate again', async t => {
+  const page = text => ({ kind: 'text', text, blocks: [{ text, x: .1, y: .1, width: .5, height: .1 }] });
+  const f = await fixture(t, { lens: true, autoLens: true,
+    captureResults: ['First page.', 'Second page.', 'First page.', 'First page.', 'First page.'].map(page) });
+  await f.tickLens();
+  await f.tickLens();
+  await f.tickLens();
+  assert.deepEqual(f.calls.filter(call => call.command === 'translate').map(call => call.args.text), ['First page.', 'Second page.']);
+  assert.equal(f.byId('lens-result').hidden, false);
+  f.click('lens-refresh');
+  await until(() => f.calls.filter(call => call.command === 'translate').length === 3 && f.byId('lens-status').textContent === '自動更新中');
+  f.byId('lens-target').value = 'en';
+  f.byId('lens-target').dispatchEvent(new f.window.Event('change'));
+  await f.tickLens();
+  const calls = f.calls.filter(call => call.command === 'translate');
+  assert.equal(calls.length, 4);
+  assert.equal(calls[3].args.target, 'en');
+});
+
 test('closing during a paragraph translation prevents remaining paragraphs and late tokens', async t => {
   const blocks = ['First', 'Second'].map((text, index) => ({ text, x: .1, y: .1 + index * .4, width: .5, height: .1 }));
   const f = await fixture(t, { lens: true, holdTranslation: true, captureResults: [{ kind: 'text', text: 'First\n\nSecond', blocks }] });
@@ -1315,6 +1434,8 @@ test('automatic lens stops on toggle/close, resumes on reopen and retranslates f
   await f.tickLens();
   assert.equal(f.calls.filter(call => call.command === 'capture_lens').length, captures);
   f.showWindow();
+  // Reopening now waits for the native selection geometry before scheduling OCR.
+  await new Promise(resolve => setTimeout(resolve, 0));
   await f.tickLens();
   assert.equal(f.calls.filter(call => call.command === 'capture_lens').length, captures + 1);
   assert.equal(f.calls.filter(call => call.command === 'capture_lens').at(-1).args.reset, true);
@@ -1368,6 +1489,87 @@ test('automatic lens never treats a truncated translation as a complete cached r
   await f.tickLens();
   assert.equal(f.calls.filter(call => call.command === 'translate').length, 2);
   assert.match(f.byId('lens-status').textContent, /上限/);
+});
+
+test('region selection normalizes a reverse drag and confirms only on Enter', async t => {
+  const f = await fixture(t, { lensSelect: true });
+  const surface = f.byId('lens-select');
+  const pointer = (type, x, y) => surface.dispatchEvent(new f.window.MouseEvent(type, { clientX: x, clientY: y, button: 0, bubbles: true }));
+  pointer('pointerdown', 800, 500);
+  pointer('pointermove', 100, 160);
+  pointer('pointerup', 100, 160);
+  assert.equal(f.calls.length, 0);
+  assert.equal(f.byId('lens-select-box').style.width, '700px');
+  f.key('Enter');
+  await until(() => f.calls.some(call => call.command === 'confirm_lens_selection'));
+  assert.deepEqual(JSON.parse(JSON.stringify(f.calls[0].args.region)), { x: 100, y: 160, width: 700, height: 340 });
+  f.key('Enter');
+  assert.equal(f.calls.filter(call => call.command === 'confirm_lens_selection').length, 1);
+  f.closeWindow();
+  assert.equal(f.byId('lens-select-box').hidden, true);
+  pointer('pointerdown', 50, 50);
+  pointer('pointerup', 600, 250);
+  f.key('Enter', { repeat: true });
+  await until(() => f.calls.filter(call => call.command === 'confirm_lens_selection').length === 2);
+});
+
+test('empty or tiny region selection does not run OCR and Escape cancels', async t => {
+  const f = await fixture(t, { lensSelect: true });
+  f.key('Enter');
+  assert.match(f.byId('lens-select-hint').textContent, /広い範囲/);
+  assert.equal(f.calls.length, 0);
+  f.key('Escape');
+  await until(() => f.calls.some(call => call.command === 'hide_window'));
+  assert.equal(f.calls.some(call => call.command === 'capture_lens'), false);
+});
+
+test('a confirmed screen region starts the first translation even with automatic refresh disabled', async t => {
+  const f = await fixture(t, { lens: true, selectedLens: true });
+  await until(() => f.byId('lens-status').textContent.startsWith('更新しました'));
+  assert.equal(f.calls.filter(call => call.command === 'capture_lens').length, 1);
+  assert.equal(f.calls.find(call => call.command === 'capture_lens').args.automatic, false);
+});
+
+test('a late native resize retries the selected region instead of losing its initial translation', async t => {
+  const f = await fixture(t, { lens: true, selectedLens: true, holdTranslation: true });
+  await until(() => f.calls.some(call => call.command === 'translate'));
+  f.moveLens();
+  await until(() => f.calls.filter(call => call.command === 'translate').length === 2);
+  f.finish({ truncated: false });
+  await until(() => f.byId('lens-status').textContent.startsWith('更新しました'));
+  assert.equal(f.window.localStorage.getItem('lens-auto'), 'false');
+});
+
+test('manual cancellation stops the selected region without retrying its initial translation', async t => {
+  const f = await fixture(t, { lens: true, selectedLens: true, holdTranslation: true });
+  await until(() => f.calls.some(call => call.command === 'translate'));
+  f.click('lens-refresh');
+  await until(() => f.byId('lens-refresh').textContent === '更新');
+  await new Promise(resolve => setTimeout(resolve, 150));
+  assert.equal(f.calls.filter(call => call.command === 'translate').length, 1);
+});
+
+test('lens opening shortcut settings save independently, reset and show a Wayland command', async t => {
+  const f = await fixture(t);
+  f.click('settings-button');
+  const action = f.byId('shortcut-action');
+  action.value = 'lensOpen'; action.dispatchEvent(new f.window.Event('change'));
+  assert.equal(f.byId('shortcut-display').textContent, 'Ctrl + Shift + O');
+  assert.equal(f.byId('selection-shortcut-options').hidden, true);
+  await f.record();
+  f.key('KeyO', { ctrlKey: true, altKey: true });
+  f.click('shortcut-save');
+  await until(() => f.byId('shortcut-message').textContent === '保存しました');
+  assert.equal(f.state.lensOpenShortcut, 'Ctrl+Alt+KeyO');
+  assert.equal(f.state.shortcut, 'Ctrl+Shift+KeyJ');
+  assert.equal(f.state.lensShortcut, 'Ctrl+Shift+KeyL');
+  assert.equal(f.calls.find(call => call.command === 'set_shortcut').args.lensOpen, true);
+  f.click('shortcut-reset');
+  await until(() => f.state.lensOpenShortcut === f.state.defaultLensOpenShortcut);
+  f.state.shortcutSupported = false;
+  f.click('settings-close'); f.click('settings-button');
+  await until(() => f.byId('shortcut-note').textContent === 'anywhere-plamo --toggle-lens');
+  assert.equal(f.byId('shortcut-record').disabled, true);
 });
 
 test('lens shortcut settings save independently and can be reset', async t => {

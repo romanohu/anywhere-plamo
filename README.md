@@ -29,6 +29,8 @@ sudo apt install build-essential cmake pkg-config python3-venv libwebkit2gtk-4.1
 
 macOSではXcode Command Line ToolsとCMakeを用意してください。
 
+Windows 11 x64版は開発中で、実機動作は未確認です。Visual Studio Build Toolsの「C++によるデスクトップ開発」、WebView2、Visual C++再頒布可能パッケージを用意してください。以下の`npm run runtime:build`は`py -3.12 scripts/build-runtime.py`に置き換えます。CPUが既定で、Vulkan SDKを用意すれば`--backend vulkan`でGPU版をビルドできます。
+
 リポジトリのディレクトリで実行します。
 
 ```sh
@@ -39,7 +41,7 @@ npm run runtime:build
 npm run tauri dev
 ```
 
-推論エンジンとPaddleOCRの小型モデル・実行環境（日本語の縦書きを含む）は初回に取得・ビルドされます。配布版ではPythonのインストールは不要です。既存のソース版は `npm run ocr:build` でOCRデータを更新してください。翻訳の推論は既定でLinuxはCPU、macOSはMetalを使用します。OCRは両OSともCPUで動きます。
+推論エンジンとPaddleOCRの小型モデル・実行環境（日本語の縦書きを含む）は初回に取得・ビルドされます。配布版ではPythonのインストールは不要です。既存のソース版は `npm run ocr:build` でOCRデータを更新してください。翻訳の推論は既定でLinux・WindowsはCPU、macOSはMetalを使用します。OCRは各OSともCPUで動きます。
 
 配布用ファイルを作る場合:
 
@@ -50,11 +52,15 @@ npm run tauri build
 
 成果物は`src-tauri/target/release/bundle/`に生成されます。
 
+Windowsでは`py -3.12 scripts/collect-licenses.py`の後、`npm run tauri -- build --bundles nsis`でインストーラーを作ります。画面取得・選択翻訳・表示倍率を実機で確認してから配布してください。
+
 ## 使い方
 
 1. 初回は「ダウンロード」から利用条件を確認し、モデルを取得します（約570 MB）。
 2. 翻訳先を選び、原文を入力・貼り付けて「翻訳」を押します。`Ctrl+Enter`（Macは`⌘+Enter`）でも実行できます。
 3. 他のアプリでは文章を選択し、`Ctrl+Shift+J`（Macは`⌘+Shift+J`）で翻訳します。取得できない場合は、コピーして「貼り付け」を使ってください。
+
+「辞書」から原語と訳語を登録すると、翻訳の前に原文中の語句を訳語へ置き換えてから翻訳します。訳語は翻訳先の言語で書いてください。メイン画面・選択翻訳・OCRレンズのすべての翻訳に反映されます（変更は「保存」で確定します）。
 
 「OCRレンズ」を開き、枠を画像やPDFに合わせると自動翻訳します（Mac・X11）。「自動」で停止・再開、「更新」で手動取得、「原文」で翻訳前の内容を確認し、`Esc`で閉じます。Waylandでは「更新」から画面の範囲を選択します。
 

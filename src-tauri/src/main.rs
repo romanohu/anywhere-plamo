@@ -1,7 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod dictionary;
 mod engine;
 mod lens;
+mod lens_select;
 mod model;
 mod protocol;
 mod selection;
@@ -123,9 +125,14 @@ struct AppState {
     pending: Mutex<PendingRequests>,
     shortcut: Mutex<shortcut::State>,
     lens_shortcut: Mutex<shortcut::State>,
+    lens_open_shortcut: Mutex<shortcut::State>,
+    lens_toggling: AtomicBool,
+    lens_selection: Mutex<Option<lens_select::Pending>>,
     shortcut_recording: Mutex<Option<String>>,
     shortcut_popup: AtomicBool,
     settings: PathBuf,
+    dictionary_path: PathBuf,
+    dictionary: Mutex<Vec<dictionary::Entry>>,
     resident: AtomicBool,
     wayland: bool,
 }
@@ -246,6 +253,9 @@ struct AppStatus {
     lens_shortcut: String,
     default_lens_shortcut: String,
     lens_shortcut_available: bool,
+    lens_open_shortcut: String,
+    default_lens_open_shortcut: String,
+    lens_open_shortcut_available: bool,
     lens_passthrough: bool,
 }
 
@@ -256,6 +266,10 @@ fn get_status(state: tauri::State<'_, AppState>) -> AppStatus {
         .lens_shortcut
         .lock()
         .expect("lens shortcut state poisoned");
+    let lens_open_shortcut = state
+        .lens_open_shortcut
+        .lock()
+        .expect("lens open shortcut state poisoned");
     AppStatus {
         model_ready: model::ready(&state.directory),
         runtime_available: state.binary.is_file(),
@@ -266,12 +280,19 @@ fn get_status(state: tauri::State<'_, AppState>) -> AppStatus {
         wayland: state.wayland,
         resident: state.resident.load(Ordering::Relaxed),
         shortcut_popup: state.shortcut_popup.load(Ordering::Relaxed),
-        lens_supported: cfg!(any(target_os = "macos", target_os = "linux")),
+        lens_supported: cfg!(any(
+            target_os = "macos",
+            target_os = "linux",
+            target_os = "windows"
+        )),
         ocr_available: lens::ready(&state.ocr_runtime),
         lens_uses_selection: state.wayland,
         lens_shortcut: shortcut::label(lens_shortcut.binding),
         default_lens_shortcut: shortcut::label(shortcut::default_lens()),
         lens_shortcut_available: lens_shortcut.available,
+        lens_open_shortcut: shortcut::label(lens_open_shortcut.binding),
+        default_lens_open_shortcut: shortcut::label(shortcut::default_lens_open()),
+        lens_open_shortcut_available: lens_open_shortcut.available,
         lens_passthrough: state.lens_passthrough.load(Ordering::Relaxed),
     }
 }
@@ -282,6 +303,7 @@ fn set_shortcut(
     state: tauri::State<'_, AppState>,
     shortcut: String,
     lens: Option<bool>,
+    lens_open: Option<bool>,
 ) -> Result<AppStatus, String> {
     let next = shortcut::parse(&shortcut)?;
     // A failed re-registration must not strand an input-transparent window.
@@ -289,7 +311,7 @@ fn set_shortcut(
         apply_lens_passthrough(&app, false)?;
     }
     {
-        // Keep both bindings locked in the same order when checking conflicts/saving.
+        // Keep all bindings locked in the same order when checking conflicts/saving.
         let mut selection = state
             .shortcut
             .lock()
@@ -298,29 +320,43 @@ fn set_shortcut(
             .lens_shortcut
             .lock()
             .map_err(|_| "ショートカットの状態を取得できません。")?;
-        let (current, other) = if lens.unwrap_or(false) {
-            (&mut *lens_shortcut, &*selection)
+        let mut lens_open_shortcut = state
+            .lens_open_shortcut
+            .lock()
+            .map_err(|_| "ショートカットの状態を取得できません。")?;
+        let index = if lens_open.unwrap_or(false) {
+            2
+        } else if lens.unwrap_or(false) {
+            1
         } else {
-            (&mut *selection, &*lens_shortcut)
+            0
+        };
+        let mut bindings = [
+            selection.binding,
+            lens_shortcut.binding,
+            lens_open_shortcut.binding,
+        ];
+        if bindings
+            .iter()
+            .enumerate()
+            .any(|(i, key)| i != index && *key == next)
+        {
+            return Err("他のショートカットと異なるキーを選んでください。".into());
+        }
+        bindings[index] = next;
+        let current = match index {
+            2 => &mut *lens_open_shortcut,
+            1 => &mut *lens_shortcut,
+            _ => &mut *selection,
         };
         if !current.supported {
             return Err(shortcut::UNAVAILABLE.into());
         }
-        if next == other.binding {
-            return Err("もう一方のショートカットと異なるキーを選んでください。".into());
-        }
         let pending = shortcut::PendingSave::new(
             &state.settings,
-            if lens.unwrap_or(false) {
-                other.binding
-            } else {
-                next
-            },
-            if lens.unwrap_or(false) {
-                next
-            } else {
-                other.binding
-            },
+            bindings[0],
+            bindings[1],
+            bindings[2],
             state.shortcut_popup.load(Ordering::Relaxed),
         )?;
         current.change(
@@ -359,10 +395,15 @@ fn set_shortcut_popup(
             .lens_shortcut
             .lock()
             .map_err(|_| "ショートカットの状態を取得できません。")?;
+        let lens_open_shortcut = state
+            .lens_open_shortcut
+            .lock()
+            .map_err(|_| "ショートカットの状態を取得できません。")?;
         shortcut::PendingSave::new(
             &state.settings,
             shortcut.binding,
             lens_shortcut.binding,
+            lens_open_shortcut.binding,
             enabled,
         )?
         .commit()?;
@@ -384,6 +425,43 @@ fn set_shortcut_recording(
     } else {
         state.stop_recording(window.label());
     }
+}
+
+#[tauri::command]
+fn get_dictionary(state: tauri::State<'_, AppState>) -> Vec<dictionary::Entry> {
+    state
+        .dictionary
+        .lock()
+        .map(|entries| entries.clone())
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+fn set_dictionary(
+    state: tauri::State<'_, AppState>,
+    entries: Vec<dictionary::Entry>,
+) -> Result<Vec<dictionary::Entry>, String> {
+    let entries: Vec<dictionary::Entry> = entries
+        .into_iter()
+        .map(|mut entry| {
+            entry.term = entry.term.trim().to_owned();
+            entry.replacement = entry.replacement.trim().to_owned();
+            entry
+        })
+        // The first occurrence keeps the term when the list carries duplicates.
+        .fold(Vec::new(), |mut unique, entry| {
+            if !entry.term.is_empty()
+                && !unique.iter().any(|kept| kept.term == entry.term)
+            {
+                unique.push(entry);
+            }
+            unique
+        });
+    dictionary::PendingSave::new(&state.dictionary_path, &entries)?.commit()?;
+    if let Ok(mut saved) = state.dictionary.lock() {
+        *saved = entries.clone();
+    }
+    Ok(entries)
 }
 
 #[tauri::command]
@@ -427,6 +505,13 @@ async fn translate(
     target: String,
     on_event: Channel<ProgressEvent>,
 ) -> Result<engine::TranslationResult, String> {
+    // The registered glossary rewrites the source before validation, so the
+    // character limit counts the text the model actually receives.
+    let text = state
+        .dictionary
+        .lock()
+        .map(|entries| dictionary::apply(&text, &entries))
+        .map_err(|_| "辞書を読み込めません。")?;
     protocol::prompt(&text, &target)?;
     let operation = state.begin(window.label())?;
     if !model::ready(&state.directory) {
@@ -486,7 +571,7 @@ fn set_lens_passthrough(window: tauri::WebviewWindow, enabled: bool) -> Result<b
 
 #[tauri::command]
 async fn open_lens(app: tauri::AppHandle) -> Result<(), String> {
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     {
         if app.get_webview_window("lens").is_none() {
             tauri::WebviewWindowBuilder::new(
@@ -508,7 +593,17 @@ async fn open_lens(app: tauri::AppHandle) -> Result<(), String> {
         let window = app
             .get_webview_window("lens")
             .ok_or("レンズを開けませんでした。")?;
+        #[cfg(windows)]
+        lens::windows::exclude_from_capture(&window)?;
         apply_lens_passthrough(&app, false)?;
+        #[cfg(target_os = "linux")]
+        if !window.is_visible().map_err(|error| error.to_string())? {
+            // GTK clears its placement hint when hidden; retain the reading
+            // area instead of letting the window manager place it elsewhere.
+            window
+                .set_position(window.outer_position().map_err(|error| error.to_string())?)
+                .map_err(|error| error.to_string())?;
+        }
         window.show().map_err(|error| error.to_string())?;
         app.state::<AppState>()
             .lens_open
@@ -521,10 +616,10 @@ async fn open_lens(app: tauri::AppHandle) -> Result<(), String> {
         let _ = window.emit("window-shown", ());
         Ok(())
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         let _ = app;
-        Err("OCRレンズはMac・Linuxで利用できます。".into())
+        Err("このOSではOCRレンズを利用できません。".into())
     }
 }
 
@@ -611,7 +706,9 @@ fn show(app: &tauri::AppHandle) {
 }
 
 fn handle_launch(app: &tauri::AppHandle, args: &[String]) {
-    if args.iter().any(|arg| arg == "--translate-selection") {
+    if args.iter().any(|arg| arg == "--toggle-lens") {
+        toggle_lens(app);
+    } else if args.iter().any(|arg| arg == "--translate-selection") {
         translate_selection(app);
     } else if args.iter().any(|arg| arg == "--translate-clipboard") {
         translate_clipboard(app);
@@ -621,6 +718,40 @@ fn handle_launch(app: &tauri::AppHandle, args: &[String]) {
         // Without a tray, keep the window available so the app can be reopened.
         show(app);
     }
+}
+
+fn toggle_lens(app: &tauri::AppHandle) {
+    // Ignore repeated keys while a webview is still being created or hidden.
+    if app
+        .state::<AppState>()
+        .lens_toggling
+        .swap(true, Ordering::Relaxed)
+    {
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let result = if app.state::<AppState>().lens_open.load(Ordering::Relaxed) {
+            app.get_webview_window("lens")
+                .ok_or_else(|| "レンズが見つかりません。".to_owned())
+                .and_then(|window| hide_window(window, app.state::<AppState>(), Some(false)))
+        } else if let Some(window) = app
+            .get_webview_window("lens-select")
+            .filter(|w| w.is_visible().unwrap_or(false))
+        {
+            hide_window(window, app.state::<AppState>(), Some(false))
+        } else {
+            lens_select::open(app.clone()).await
+        };
+        app.state::<AppState>()
+            .lens_toggling
+            .store(false, Ordering::Relaxed);
+        if let Err(error) = result {
+            if let Some(request) = begin_request(&app, "main", false) {
+                deliver_text(&app, "main", request, Err(error), false);
+            }
+        }
+    });
 }
 
 fn translate_clipboard(app: &tauri::AppHandle) {
@@ -708,6 +839,7 @@ fn deliver_text(
 fn hide_window(
     window: tauri::WebviewWindow,
     state: tauri::State<'_, AppState>,
+    show_main: Option<bool>,
 ) -> Result<(), String> {
     state.stop_recording(window.label());
     if window.label() == "popup" {
@@ -716,12 +848,17 @@ fn hide_window(
     if window.label() == "lens" {
         apply_lens_passthrough(window.app_handle(), false)?;
         state.lens_open.store(false, Ordering::Relaxed);
+        if let Ok(mut selection) = state.lens_selection.lock() {
+            *selection = None;
+        }
         state.cancel("lens");
     }
-    if matches!(window.label(), "popup" | "lens") || state.resident.load(Ordering::Relaxed) {
+    if matches!(window.label(), "popup" | "lens" | "lens-select")
+        || state.resident.load(Ordering::Relaxed)
+    {
         window.hide().map_err(|error| error.to_string())?;
         let _ = window.emit_to(window.label(), "window-hidden", ());
-        if window.label() == "lens" {
+        if window.label() == "lens" && show_main.unwrap_or(true) {
             show(window.app_handle());
         }
     }
@@ -774,11 +911,15 @@ fn main() {
             translate,
             cancel_operation,
             open_lens,
+            lens_select::confirm_lens_selection,
+            lens_select::apply_lens_selection,
             set_lens_passthrough,
             capture_lens,
             read_clipboard,
             write_clipboard,
             take_pending_clipboard,
+            get_dictionary,
+            set_dictionary,
             hide_window,
             finish_popup_request,
             open_model_license,
@@ -788,15 +929,19 @@ fn main() {
             let app_directory = app.path().app_data_dir()?;
             let directory = app_directory.join("models");
             let settings = app_directory.join("settings.json");
+            let dictionary_path = app_directory.join("dictionary.json");
             let binary = std::env::var_os("ANYWHERE_PLAMO_LLAMA_SERVER")
                 .map(PathBuf::from)
                 .unwrap_or(
                     app.path()
                         .resource_dir()?
-                        .join("resources/runtime/llama-server"),
+                        .join("resources/runtime")
+                        .join(engine::EXECUTABLE),
                 );
             let binary = if cfg!(debug_assertions) && !binary.is_file() {
-                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/runtime/llama-server")
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("resources/runtime")
+                    .join(engine::EXECUTABLE)
             } else {
                 binary
             };
@@ -809,6 +954,7 @@ fn main() {
             let wayland = cfg!(target_os = "linux")
                 && (std::env::var("XDG_SESSION_TYPE").is_ok_and(|session| session == "wayland")
                     || std::env::var_os("WAYLAND_DISPLAY").is_some());
+            let dictionary = Mutex::new(dictionary::load(&dictionary_path));
             app.manage(AppState {
                 directory,
                 binary,
@@ -835,9 +981,18 @@ fn main() {
                     available: false,
                     supported: false,
                 }),
+                lens_open_shortcut: Mutex::new(shortcut::State {
+                    binding: shortcut::load_lens_open(&settings),
+                    available: false,
+                    supported: false,
+                }),
+                lens_toggling: AtomicBool::new(false),
+                lens_selection: Mutex::new(None),
                 shortcut_recording: Mutex::new(None),
                 shortcut_popup: AtomicBool::new(shortcut::load_popup(&settings)),
                 settings,
+                dictionary_path,
+                dictionary,
                 resident: AtomicBool::new(false),
                 wayland,
             });
@@ -885,7 +1040,13 @@ fn main() {
                                             state.lens_shortcut.try_lock().is_ok_and(|current| {
                                                 current.available && current.binding == key
                                             });
-                                        if active || lens_active {
+                                        let lens_open_active = state
+                                            .lens_open_shortcut
+                                            .try_lock()
+                                            .is_ok_and(|current| {
+                                                current.available && current.binding == key
+                                            });
+                                        if active || lens_active || lens_open_active {
                                             let recording = state
                                                 .shortcut_recording
                                                 .lock()
@@ -897,6 +1058,8 @@ fn main() {
                                                     "shortcut-pressed",
                                                     shortcut::label(key),
                                                 );
+                                            } else if lens_open_active {
+                                                toggle_lens(&handle);
                                             } else if lens_active {
                                                 if state.lens_open.load(Ordering::Relaxed) {
                                                     let enabled = !state
@@ -914,15 +1077,16 @@ fn main() {
                                                         }
                                                     }
                                                 }
-                                            } else if !["main", "popup", "lens"].iter().any(
-                                                |label| {
+                                            } else if !["main", "popup", "lens", "lens-select"]
+                                                .iter()
+                                                .any(|label| {
                                                     handle.get_webview_window(label).is_some_and(
                                                         |window| {
                                                             window.is_focused().unwrap_or(false)
                                                         },
                                                     )
-                                                },
-                                            ) {
+                                                })
+                                            {
                                                 translate_selection(&handle);
                                             }
                                         }
@@ -947,6 +1111,18 @@ fn main() {
                         .global_shortcut()
                         .register(lens_shortcut.binding)
                         .is_ok();
+                let mut lens_open_shortcut = state
+                    .lens_open_shortcut
+                    .lock()
+                    .expect("lens open shortcut state poisoned");
+                lens_open_shortcut.supported = installed;
+                lens_open_shortcut.available = installed
+                    && lens_open_shortcut.binding != shortcut.binding
+                    && lens_open_shortcut.binding != lens_shortcut.binding
+                    && app
+                        .global_shortcut()
+                        .register(lens_open_shortcut.binding)
+                        .is_ok();
             }
             handle_launch(app.handle(), &std::env::args().collect::<Vec<_>>());
             Ok(())
@@ -963,9 +1139,12 @@ fn main() {
                 if window.label() == "lens" {
                     let _ = apply_lens_passthrough(window.app_handle(), false);
                     state.lens_open.store(false, Ordering::Relaxed);
+                    if let Ok(mut selection) = state.lens_selection.lock() {
+                        *selection = None;
+                    }
                     state.cancel("lens");
                 }
-                if matches!(window.label(), "popup" | "lens")
+                if matches!(window.label(), "popup" | "lens" | "lens-select")
                     || state.resident.load(Ordering::Relaxed)
                 {
                     api.prevent_close();
@@ -1197,9 +1376,18 @@ mod tests {
                 available: false,
                 supported: false,
             }),
+            lens_open_shortcut: Mutex::new(super::shortcut::State {
+                binding: super::shortcut::default_lens_open(),
+                available: false,
+                supported: false,
+            }),
+            lens_toggling: AtomicBool::new(false),
+            lens_selection: Mutex::new(None),
             shortcut_recording: Mutex::new(None),
             shortcut_popup: AtomicBool::new(false),
             settings: PathBuf::new(),
+            dictionary_path: PathBuf::new(),
+            dictionary: Mutex::new(Vec::new()),
             resident: AtomicBool::new(false),
             wayland: false,
         }
