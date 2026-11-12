@@ -82,6 +82,16 @@ h3 { font-size: 12px; margin: 0 0 8px; font-weight: 650; }
 .shortcut-actions .setting-description { flex: 1; margin: 0; font-size: 11px; }
 .shortcut-actions .text-button { font-size: 11px; }
 .progress-heading { display: flex; justify-content: space-between; font-size: 12px; }
+.dictionary-row { display: flex; align-items: center; gap: 8px; padding: 7px 0; border-bottom: 1px solid var(--line); font-size: 12px; }
+.dictionary-row:last-child { border-bottom: 0; }
+.dictionary-row input[type="checkbox"] { accent-color: var(--accent); flex-shrink: 0; }
+.dictionary-term { flex-shrink: 0; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.dictionary-arrow { color: var(--muted); flex-shrink: 0; }
+.dictionary-replacement { min-width: 0; flex: 1; color: var(--ink); background: var(--result); border: 1px solid var(--line); border-radius: 5px; padding: 6px 8px; font-size: 12px; }
+.dictionary-delete { flex-shrink: 0; }
+.dictionary-form { display: flex; gap: 8px; margin-top: 10px; }
+.dictionary-form input { min-width: 0; flex: 1; color: var(--ink); background: var(--result); border: 1px solid var(--line); border-radius: 5px; padding: 7px 9px; font-size: 12px; }
+.dictionary-form input:focus-visible, .dictionary-replacement:focus-visible { outline: none; border-color: var(--accent); }
 progress { width: 100%; height: 6px; border: 0; border-radius: 8px; overflow: hidden; background: var(--line); accent-color: var(--accent); }
 progress::-webkit-progress-bar { background: var(--line); }
 progress::-webkit-progress-value { background: var(--accent); }

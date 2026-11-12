@@ -58,6 +58,7 @@ async function fixture(t, options = {}) {
     ...options.status,
   };
   let clipboard = options.clipboard ?? 'Hello, world.';
+  let dictionary = options.dictionary ? options.dictionary.map(entry => ({ ...entry })) : [];
   let request = 1;
   let pending = options.pending ? { request, ...options.pending } : null;
   let rejectOperation;
@@ -101,6 +102,11 @@ async function fixture(t, options = {}) {
             if (options.popupError) throw options.popupError;
             state.shortcutPopup = args.enabled;
             return { ...state };
+          case 'get_dictionary': return dictionary;
+          case 'set_dictionary':
+            if (options.dictionaryError) throw options.dictionaryError;
+            dictionary = args.entries;
+            return dictionary;
           case 'prepare_engine':
             if (options.prepareError) throw options.prepareError;
             return;
@@ -190,6 +196,7 @@ test('browser preview clearly disables translation and model download', async t 
   assert.equal(f.byId('shortcut-record').disabled, true);
   assert.equal(f.byId('shortcut-popup').disabled, true);
   assert.equal(f.byId('translate-button').disabled, true);
+  assert.equal(f.byId('dictionary-button').hidden, true);
   f.click('setup-open');
   assert.equal(f.byId('settings-dialog').open, true);
   assert.equal(f.byId('download-button').disabled, true);
@@ -340,6 +347,72 @@ test('failed popup settings restore the saved option and report the error', asyn
   assert.equal(f.byId('shortcut-popup').checked, true);
   assert.equal(f.state.shortcutPopup, true);
   assert.equal(f.byId('shortcut-message').textContent, '設定を保存できませんでした。');
+});
+
+test('the dictionary dialog loads saved entries and persists additions through the native command', async t => {
+  const f = await fixture(t, { dictionary: [{ term: 'dragon', replacement: 'りゅう', enabled: true }] });
+  assert.equal(f.byId('dictionary-button').hidden, false);
+  f.click('dictionary-button');
+  await until(() => f.byId('dictionary-dialog').open);
+  assert.equal(f.byId('dictionary-entries').children.length, 1);
+  f.byId('dictionary-term').value = 'PLaMo';
+  f.byId('dictionary-replacement').value = 'プラモ';
+  f.click('dictionary-add');
+  assert.equal(f.byId('dictionary-message').textContent, '');
+  assert.equal(f.byId('dictionary-entries').children.length, 2);
+  f.click('dictionary-save');
+  await until(() => f.byId('dictionary-message').textContent === '保存しました');
+  assert.deepEqual(Array.from(f.calls.find(call => call.command === 'set_dictionary').args.entries, entry => ({ ...entry })), [
+    { term: 'dragon', replacement: 'りゅう', enabled: true },
+    { term: 'PLaMo', replacement: 'プラモ', enabled: true },
+  ]);
+  f.byId('dictionary-close').click();
+  f.click('dictionary-button');
+  await until(() => f.byId('dictionary-dialog').open && f.byId('dictionary-entries').children.length === 2);
+  const replacement = f.byId('dictionary-entries').querySelector('.dictionary-replacement');
+  replacement.value = 'りゅうきち';
+  replacement.dispatchEvent(new f.window.Event('input'));
+  f.click('dictionary-save');
+  await until(() => f.byId('dictionary-message').textContent === '保存しました');
+  assert.deepEqual(Array.from(f.calls.findLast(call => call.command === 'set_dictionary').args.entries, entry => ({ ...entry })), [
+    { term: 'dragon', replacement: 'りゅうきち', enabled: true },
+    { term: 'PLaMo', replacement: 'プラモ', enabled: true },
+  ]);
+});
+
+test('dictionary drafts reject empty and duplicate terms and deletions only affect the draft', async t => {
+  const f = await fixture(t);
+  f.click('dictionary-button');
+  await until(() => f.byId('dictionary-dialog').open);
+  assert.equal(f.byId('dictionary-empty').hidden, false);
+  f.click('dictionary-add');
+  assert.equal(f.byId('dictionary-message').textContent, '原語を入力してください。');
+  f.byId('dictionary-term').value = 'cat';
+  f.byId('dictionary-replacement').value = 'ねこ';
+  f.click('dictionary-add');
+  f.byId('dictionary-term').value = 'cat';
+  f.click('dictionary-add');
+  assert.equal(f.byId('dictionary-message').textContent, 'この原語は登録済みです。既存の訳語を編集してください。');
+  assert.equal(f.byId('dictionary-entries').children.length, 1);
+  f.byId('dictionary-entries').querySelector('.dictionary-delete').click();
+  assert.equal(f.byId('dictionary-entries').children.length, 0);
+  assert.equal(f.byId('dictionary-empty').hidden, false);
+  assert.equal(f.calls.some(call => call.command === 'set_dictionary'), false);
+});
+
+test('dictionary save failures are reported and the draft stays editable', async t => {
+  const f = await fixture(t, { dictionaryError: '辞書を保存できませんでした。' });
+  f.click('dictionary-button');
+  await until(() => f.byId('dictionary-dialog').open);
+  f.byId('dictionary-term').value = 'dragon';
+  f.byId('dictionary-replacement').value = 'りゅう';
+  f.click('dictionary-add');
+  f.click('dictionary-save');
+  await until(() => f.byId('dictionary-message').textContent === '辞書を保存できませんでした。');
+  f.byId('dictionary-entries').querySelector('.dictionary-delete').click();
+  f.click('dictionary-save');
+  await until(() => f.calls.filter(call => call.command === 'set_dictionary').length === 2);
+  assert.deepEqual(Array.from(f.calls.at(-1).args.entries, entry => ({ ...entry })), []);
 });
 
 test('a shortcut popup becomes dismissible only after its translation has finished', async t => {

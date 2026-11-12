@@ -14,6 +14,7 @@
         <span class="brand">Anywhere Plamo</span>
         <div class="header-actions">
           <button class="text-button" id="lens-button" hidden>OCRレンズ</button>
+          <button class="text-button" id="dictionary-button">辞書</button>
           <button class="icon-button" id="settings-button" title="設定" aria-label="設定">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/></svg>
           </button>
@@ -113,6 +114,21 @@
         <p class="setting-description" id="preload-description">待機中もメモリを使用。オフは次回起動から。</p>
       </section>
       <section class="settings-section about"><span>Anywhere Plamo 0.2.0 · MIT</span><button class="text-button" id="quit-button">終了</button></section>
+    </dialog>
+    <dialog id="dictionary-dialog" aria-labelledby="dictionary-title">
+      <div class="dialog-header"><h2 id="dictionary-title">辞書</h2><button class="icon-button" id="dictionary-close" aria-label="閉じる"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
+      <section class="settings-section">
+        <p class="setting-description">登録した語句を訳語に置き換えてから翻訳します。訳語は翻訳先の言語で書いてください。</p>
+        <div id="dictionary-entries"></div>
+        <p class="setting-description" id="dictionary-empty">登録された語句はありません。</p>
+        <div class="dictionary-form">
+          <input id="dictionary-term" placeholder="原語" maxlength="1000" aria-label="原語" />
+          <input id="dictionary-replacement" placeholder="訳語" maxlength="1000" aria-label="訳語" />
+          <button class="button small" id="dictionary-add">追加</button>
+        </div>
+        <p class="setting-description" id="dictionary-message" role="status" aria-live="polite"></p>
+      </section>
+      <section class="settings-section about"><button class="button small" id="dictionary-save">保存</button></section>
     </dialog>
     <script type="module" src="/src/main.ts"></script>
   </body>

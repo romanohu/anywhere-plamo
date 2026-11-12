@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod dictionary;
 mod engine;
 mod lens;
 mod lens_select;
@@ -130,6 +131,8 @@ struct AppState {
     shortcut_recording: Mutex<Option<String>>,
     shortcut_popup: AtomicBool,
     settings: PathBuf,
+    dictionary_path: PathBuf,
+    dictionary: Mutex<Vec<dictionary::Entry>>,
     resident: AtomicBool,
     wayland: bool,
 }
@@ -425,6 +428,43 @@ fn set_shortcut_recording(
 }
 
 #[tauri::command]
+fn get_dictionary(state: tauri::State<'_, AppState>) -> Vec<dictionary::Entry> {
+    state
+        .dictionary
+        .lock()
+        .map(|entries| entries.clone())
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+fn set_dictionary(
+    state: tauri::State<'_, AppState>,
+    entries: Vec<dictionary::Entry>,
+) -> Result<Vec<dictionary::Entry>, String> {
+    let entries: Vec<dictionary::Entry> = entries
+        .into_iter()
+        .map(|mut entry| {
+            entry.term = entry.term.trim().to_owned();
+            entry.replacement = entry.replacement.trim().to_owned();
+            entry
+        })
+        // The first occurrence keeps the term when the list carries duplicates.
+        .fold(Vec::new(), |mut unique, entry| {
+            if !entry.term.is_empty()
+                && !unique.iter().any(|kept| kept.term == entry.term)
+            {
+                unique.push(entry);
+            }
+            unique
+        });
+    dictionary::PendingSave::new(&state.dictionary_path, &entries)?.commit()?;
+    if let Ok(mut saved) = state.dictionary.lock() {
+        *saved = entries.clone();
+    }
+    Ok(entries)
+}
+
+#[tauri::command]
 async fn download_model(
     window: tauri::WebviewWindow,
     state: tauri::State<'_, AppState>,
@@ -465,6 +505,13 @@ async fn translate(
     target: String,
     on_event: Channel<ProgressEvent>,
 ) -> Result<engine::TranslationResult, String> {
+    // The registered glossary rewrites the source before validation, so the
+    // character limit counts the text the model actually receives.
+    let text = state
+        .dictionary
+        .lock()
+        .map(|entries| dictionary::apply(&text, &entries))
+        .map_err(|_| "辞書を読み込めません。")?;
     protocol::prompt(&text, &target)?;
     let operation = state.begin(window.label())?;
     if !model::ready(&state.directory) {
@@ -871,6 +918,8 @@ fn main() {
             read_clipboard,
             write_clipboard,
             take_pending_clipboard,
+            get_dictionary,
+            set_dictionary,
             hide_window,
             finish_popup_request,
             open_model_license,
@@ -880,6 +929,7 @@ fn main() {
             let app_directory = app.path().app_data_dir()?;
             let directory = app_directory.join("models");
             let settings = app_directory.join("settings.json");
+            let dictionary_path = app_directory.join("dictionary.json");
             let binary = std::env::var_os("ANYWHERE_PLAMO_LLAMA_SERVER")
                 .map(PathBuf::from)
                 .unwrap_or(
@@ -904,6 +954,7 @@ fn main() {
             let wayland = cfg!(target_os = "linux")
                 && (std::env::var("XDG_SESSION_TYPE").is_ok_and(|session| session == "wayland")
                     || std::env::var_os("WAYLAND_DISPLAY").is_some());
+            let dictionary = Mutex::new(dictionary::load(&dictionary_path));
             app.manage(AppState {
                 directory,
                 binary,
@@ -940,6 +991,8 @@ fn main() {
                 shortcut_recording: Mutex::new(None),
                 shortcut_popup: AtomicBool::new(shortcut::load_popup(&settings)),
                 settings,
+                dictionary_path,
+                dictionary,
                 resident: AtomicBool::new(false),
                 wayland,
             });
@@ -1333,6 +1386,8 @@ mod tests {
             shortcut_recording: Mutex::new(None),
             shortcut_popup: AtomicBool::new(false),
             settings: PathBuf::new(),
+            dictionary_path: PathBuf::new(),
+            dictionary: Mutex::new(Vec::new()),
             resident: AtomicBool::new(false),
             wayland: false,
         }
