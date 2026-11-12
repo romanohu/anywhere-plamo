@@ -527,9 +527,24 @@ dictionaryButton.addEventListener('click', () => { void openDictionary(); });
 element('dictionary-close').addEventListener('click', () => dictionaryDialog.close());
 dictionaryAdd.addEventListener('click', addDictionaryEntry);
 dictionarySave.addEventListener('click', () => { void saveDictionary(); });
-[dictionaryTerm, dictionaryReplacement].forEach(input => input.addEventListener('keydown', event => {
-  if (event.key === 'Enter') { event.preventDefault(); addDictionaryEntry(); }
-}));
+[dictionaryTerm, dictionaryReplacement].forEach(input => {
+  // Japanese conversion commits on the first Enter and registers on the
+  // second. WebKit reports the committing Enter as a plain keydown right
+  // after compositionend, so swallow that one and let the next register.
+  let ignoreNextEnter = false;
+  input.addEventListener('compositionend', () => {
+    ignoreNextEnter = true;
+    setTimeout(() => { ignoreNextEnter = false; }, 0);
+    input.addEventListener('keyup', () => { ignoreNextEnter = false; }, { once: true });
+  });
+  input.addEventListener('keydown', event => {
+    if (event.isComposing || event.keyCode === 229) return;
+    if (event.key !== 'Enter') return;
+    if (ignoreNextEnter) return;
+    event.preventDefault();
+    addDictionaryEntry();
+  });
+});
 dictionaryDialog.addEventListener('close', () => { dictionaryMessage.textContent = ''; });
 element('lens-button').addEventListener('click', () => { void invoke('open_lens').catch(showError); });
 element('setup-open').addEventListener('click', openSettings);

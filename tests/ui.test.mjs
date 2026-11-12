@@ -400,6 +400,27 @@ test('dictionary drafts reject empty and duplicate terms and deletions only affe
   assert.equal(f.calls.some(call => call.command === 'set_dictionary'), false);
 });
 
+test('dictionary Enter registration waits for Japanese conversion to settle', async t => {
+  const f = await fixture(t);
+  f.click('dictionary-button');
+  await until(() => f.byId('dictionary-dialog').open);
+  f.byId('dictionary-term').value = 'りゅう';
+  f.byId('dictionary-replacement').value = 'dragon';
+  const keydown = (init = {}) => f.byId('dictionary-term').dispatchEvent(new f.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true, ...init }));
+  // The Enter that confirms the conversion is marked composing and must not register.
+  keydown({ isComposing: true, keyCode: 229 });
+  assert.equal(f.byId('dictionary-entries').children.length, 0);
+  // WebKit reports the committing Enter as a plain keydown after compositionend.
+  f.byId('dictionary-term').dispatchEvent(new f.window.Event('compositionend'));
+  keydown();
+  assert.equal(f.byId('dictionary-entries').children.length, 0);
+  // The second Enter registers the term.
+  await new Promise(resolve => setTimeout(resolve, 2));
+  keydown();
+  await until(() => f.byId('dictionary-entries').children.length === 1);
+  assert.deepEqual(Array.from(f.byId('dictionary-entries').children, row => row.querySelector('.dictionary-term').textContent), ['りゅう']);
+});
+
 test('dictionary save failures are reported and the draft stays editable', async t => {
   const f = await fixture(t, { dictionaryError: '辞書を保存できませんでした。' });
   f.click('dictionary-button');
