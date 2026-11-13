@@ -4,7 +4,15 @@ target/
 .runtime-build/
 src-tauri/resources/runtime/*
 !src-tauri/resources/runtime/.gitkeep
-src-tauri/gen/
+src-tauri/gen/*
+!src-tauri/gen/android/
+src-tauri/ocr-mobile/android/src/main/assets/
+src-tauri/ocr-mobile/permissions/schemas/
+src-tauri/ocr-mobile/android/build/
+src-tauri/ocr-mobile/android/.gradle/
+src-tauri/ocr-mobile/android/.tauri/
+src-tauri/gen/android/**/.kotlin/
+src-tauri/resources/android/
 *.gguf
 *.part
 .DS_Store

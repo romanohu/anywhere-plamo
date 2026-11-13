@@ -4,6 +4,7 @@ import { initLens } from './lens';
 import { initLensSelect } from './lens-select';
 import { initUpdate } from './update';
 import { initOcrSettings } from './ocr-settings';
+import { initCamera } from './camera';
 
 function element<T extends HTMLElement>(id: string): T {
   const found = document.getElementById(id);
@@ -69,6 +70,7 @@ let popupTerminal = false;
 let manualTarget = target.value;
 let dictionaryDraft: DictionaryEntry[] = [];
 let dictionarySaving = false;
+let camera: ReturnType<typeof initCamera> | null = null;
 
 type DictionaryEntry = { term: string; replacement: string; enabled: boolean };
 
@@ -105,6 +107,7 @@ function updateControls(): void {
   clearButton.disabled = busy || cancelling || !source.value;
   copyButton.disabled = busy || !result.textContent;
   downloadButton.disabled = busy || cancelling || downloading || !status.runtimeAvailable;
+  element<HTMLButtonElement>('camera-button').disabled = busy || cancelling || downloading || !status.ocrAvailable || !status.modelReady;
   element('character-count').textContent = `${source.value.length.toLocaleString()} / 12,000`;
 }
 
@@ -132,7 +135,12 @@ function resetResult(): void {
 
 async function refreshStatus(): Promise<void> {
   status = await invoke<AppStatus>('get_status');
+  document.body.classList.toggle('mobile', status.platform === 'android');
+  element('shortcut-section').hidden = status.platform === 'android';
+  element('update-section').hidden = popup || status.platform === 'android';
+  element('quit-button').hidden = status.platform === 'android';
   element('lens-button').hidden = !status.lensSupported || popup;
+  element('camera-button').hidden = popup;
   element('setup-banner').hidden = status.modelReady && status.runtimeAvailable;
   element('model-tag').textContent = status.modelReady ? '準備完了' : '未準備';
   element('download-section').hidden = status.modelReady;
@@ -628,6 +636,7 @@ element('license-link').addEventListener('click', async () => {
 element('quit-button').addEventListener('click', () => { void invoke('quit_app').catch(showError); });
 document.addEventListener('keydown', event => {
   if (lens || lensSelect) return;
+  if (element<HTMLDialogElement>('camera-dialog').open) return;
   if (recordingShortcut) {
     if (startingShortcut) { event.preventDefault(); return; }
     if ((event.key === 'Tab' || event.key === 'Escape') && !event.ctrlKey && !event.altKey && !event.metaKey) {
@@ -657,7 +666,7 @@ document.addEventListener('keydown', event => {
   if (event.key === 'Escape' && !dialog.open && !dictionaryDialog.open) {
     event.preventDefault();
     if (busy || cancelling) void cancel();
-    else if (isDesktop) {
+    else if (isDesktop && status.platform !== 'android') {
       pendingSelection = null;
       selectionGeneration++;
       void invoke('hide_window').catch(showError);
@@ -683,8 +692,21 @@ async function init(): Promise<void> {
     return;
   }
   try {
-    await onClipboardRequest(() => { if (initialized) void takePending().catch(showError); });
+    if (!popup) camera = initCamera((text, language) => {
+      setReadingMode(false);
+      source.value = text;
+      target.value = language;
+      resetResult();
+      void translate();
+    });
+    await onClipboardRequest(() => {
+      if (!initialized) return;
+      if (camera?.active) void camera.close().then(takePending).catch(showError);
+      else void takePending().catch(showError);
+    });
     await onWindowHidden(() => {
+      if (status.platform === 'android') camera?.suspend();
+      else void camera?.close();
       dialog.close();
       if (popup) {
         pendingSelection = null;

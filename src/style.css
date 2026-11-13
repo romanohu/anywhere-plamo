@@ -102,3 +102,22 @@ progress::-webkit-progress-value { background: var(--accent); }
 .popup .translator { grid-template-columns: 1fr; min-height: calc(100dvh - 160px); }
 .popup .result-content { min-height: 120px; max-height: max(120px, calc(100dvh - 260px)); }
 .popup .panel-header { min-height: 48px; }
+#camera-dialog { width: min(640px, calc(100vw - 24px)); }
+.camera-view { background: #111; display: grid; place-items: center; }
+#camera-stage { position: relative; width: min(100%, calc(60dvh * var(--camera-aspect, 1.333333))); aspect-ratio: 4 / 3; overflow: hidden; }
+.camera-view video, .camera-view canvas { display: block; width: 100%; height: 100%; object-fit: fill; }
+#camera-overlay { position: absolute; inset: 0; pointer-events: none; }
+.camera-block { position: absolute; line-height: 1.45; overflow-wrap: anywhere; color: #fff; }
+.camera-block span { background: #161616df; padding: 1px 3px; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+.camera-block span:empty { display: none; }
+.camera-toolbar { display: flex; align-items: center; gap: 6px; padding: 6px 12px; }
+.camera-toolbar [aria-pressed="true"] { background: var(--hover); color: var(--ink); }
+#camera-target { margin-left: auto; max-width: 130px; }
+#camera-status { padding: 0 20px; }
+.camera-actions { display: flex; justify-content: flex-end; gap: 12px; padding: 12px 20px 20px; }
+.mobile .app { padding-top: env(safe-area-inset-top); padding-bottom: max(12px, env(safe-area-inset-bottom)); }
+.mobile .keyboard-hint { display: none; }
+@media (max-width: 480px) {
+  .mobile .app { padding-left: 12px; padding-right: 12px; }
+  .mobile .app-header { gap: 6px; }
+}

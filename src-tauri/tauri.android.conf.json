@@ -1,0 +1,10 @@
+{
+  "identifier": "app.anywhere-plamo.mobile",
+  "app": {
+    "windows": [{ "label": "main", "title": "Anywhere Plamo" }]
+  },
+  "bundle": {
+    "resources": [],
+    "android": { "minSdkVersion": 28 }
+  }
+}

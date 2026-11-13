@@ -1,0 +1,10 @@
+Android OCR uses PP-OCRv6 small models (Japanese / English) and optional
+Korean PP-OCRv5 mobile, distributed by RapidAI/RapidOCR v3.10.0.
+PaddleOCR / Baidu and RapidOCR contributors, licensed under Apache-2.0.
+https://github.com/PaddlePaddle/PaddleOCR
+https://github.com/RapidAI/RapidOCR
+
+The Android preprocessing, DB box expansion and CTC decoding in PaddleOcr.kt
+are adapted from RapidOCR / PaddleOCR. Layout grouping is adapted from this
+application's scripts/ocr-worker.py. Android runs these models with ONNX
+Runtime 1.23.2 (MIT) and OpenCV 4.11.0 (Apache-2.0).

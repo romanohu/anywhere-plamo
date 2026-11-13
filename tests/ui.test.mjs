@@ -29,7 +29,7 @@ async function fixture(t, options = {}) {
   const lensTimers = new Map();
   let lensTimerId = 0;
   let lensDelay;
-  if (options.autoLens) {
+  if (options.autoLens || options.camera) {
     window.setTimeout = (callback, delay) => { lensDelay = delay; const id = ++lensTimerId; lensTimers.set(id, callback); return id; };
     window.clearTimeout = id => lensTimers.delete(id);
   }
@@ -37,8 +37,30 @@ async function fixture(t, options = {}) {
   if (options.autoDirection !== undefined) window.localStorage.setItem('auto-direction', String(options.autoDirection));
   if (options.target) window.localStorage.setItem('target-language', options.target);
   let now = 0;
-  if (options.manualClock) window.performance.now = () => now;
+  if (options.manualClock || options.camera) window.performance.now = () => now;
   const byId = id => window.document.getElementById(id);
+  const cameraStreams = [];
+  const cameraRequests = [];
+  let cameraPixel = 0;
+  let finishCamera;
+  let finishCameraRead;
+  if (options.camera) {
+    Object.defineProperty(window.document, 'hidden', { configurable: true, value: false });
+    window.localStorage.setItem('camera-auto', String(!!options.autoCamera));
+    Object.defineProperties(byId('camera-video'), { videoWidth: { value: 1920 }, videoHeight: { value: 1080 } });
+    byId('camera-video').play = async () => {};
+    window.HTMLCanvasElement.prototype.getContext = () => ({ drawImage() {}, getImageData() { return { data: new window.Uint8ClampedArray(64 * 48 * 4).fill(cameraPixel) }; } });
+    window.HTMLCanvasElement.prototype.toDataURL = () => 'data:image/png;base64,dGVzdA==';
+    Object.defineProperty(window.navigator, 'mediaDevices', { value: { getUserMedia: async constraints => {
+      cameraRequests.push(constraints);
+      if (options.cameraError) throw new window.DOMException('Denied', options.cameraError);
+      const track = { stopped: 0, stop() { this.stopped++; } };
+      const stream = { getTracks: () => [track], track };
+      cameraStreams.push(stream);
+      if (options.holdCamera) return new Promise(resolve => { finishCamera = () => resolve(stream); });
+      return stream;
+    } } });
+  }
   const captureResult = result => result.kind !== 'text' ? result : {
     ...result, blocks: (result.blocks ?? (result.text.trim() ? [{ text: result.text, x: .1, y: .2, width: .6, height: .1 }] : []))
       .map(block => ({ ...block, regions: block.regions ?? [{ x: block.x, y: block.y, width: block.width, height: block.height }] })),
@@ -112,6 +134,12 @@ async function fixture(t, options = {}) {
             if (options.captureError) throw options.captureError;
             if (options.holdCapture) return new Promise(resolve => { finishCapture = resolve; });
             return captureResult(options.captureResults?.shift() ?? { kind: 'text', text: options.ocrText ?? 'Text in an image.' });
+          case 'recognize_camera': {
+            if (options.cameraReadError) throw options.cameraReadError;
+            const blocks = options.cameraBlocks ?? [{ text: 'Hello, world.', x: .1, y: .2, width: .6, height: .1 }];
+            if (options.holdCameraRead) return new Promise((resolve, reject) => { finishCameraRead = () => resolve(blocks); rejectOperation = reject; });
+            return blocks;
+          }
           case 'set_shortcut_recording':
             if (args.recording && options.holdRecording) return new Promise(resolve => { finishRecording = resolve; });
             return;
@@ -177,6 +205,10 @@ async function fixture(t, options = {}) {
   t.after(() => { dom.window.close(); assert.deepEqual(errors, []); });
   return {
     window, byId, calls, state, channels,
+    cameraStreams, cameraRequests,
+    finishCamera() { finishCamera(); },
+    finishCameraRead() { finishCameraRead(); },
+    cameraFrame(value) { cameraPixel = value; },
     paint() { frames.splice(0).forEach(callback => callback(0)); },
     advance(milliseconds) { now += milliseconds; },
     input(text) { byId('source').value = text; byId('source').dispatchEvent(new window.Event('input')); },
@@ -1793,4 +1825,155 @@ test('lens batches streamed text per frame and discards paints after a move', as
   f.moveLens();
   f.paint();
   assert.equal(f.byId('lens-translation').textContent, '');
+});
+test('manual camera freezes, translates separate blocks, toggles originals and opens editable text', async t => {
+  const f = await fixture(t, { camera: true, cameraBlocks: [
+    { text: 'Hello', x: .1, y: .2, width: .3, height: .1 },
+    { text: 'Goodbye', x: .6, y: .5, width: .3, height: .1 },
+  ], translationOutputs: ['こんにちは', 'さようなら'] });
+  f.click('camera-button');
+  await until(() => !f.byId('camera-capture').disabled);
+  assert.equal(f.cameraRequests[0].audio, false);
+  f.click('camera-capture');
+  await until(() => f.byId('camera-status').textContent === '翻訳完了');
+  assert.equal(f.cameraStreams[0].track.stopped, 1);
+  assert.equal(f.byId('camera-preview').hidden, false);
+  assert.equal(f.calls.filter(c => c.command === 'recognize_camera').length, 1);
+  assert.deepEqual(f.calls.filter(c => c.command === 'translate').map(c => c.args.text), ['Hello', 'Goodbye']);
+  assert.equal(f.byId('camera-overlay').children.length, 2);
+  assert.equal(f.byId('camera-overlay').children[0].style.left, '10%');
+  f.click('camera-original');
+  assert.equal(f.byId('camera-overlay').hidden, true);
+  f.click('camera-original');
+  assert.equal(f.byId('camera-overlay').hidden, false);
+  f.click('camera-text');
+  await until(() => f.byId('source').value === 'Hello\n\nGoodbye');
+  assert.equal(f.byId('camera-dialog').open, false);
+});
+
+test('late camera permissions cannot restart a closed or hidden camera', async t => {
+  for (const hide of [false, true]) {
+    const f = await fixture(t, { camera: true, holdCamera: true });
+    f.click('camera-button');
+    await until(() => f.cameraRequests.length === 1);
+    if (hide) f.closeWindow(); else f.click('camera-close');
+    f.finishCamera();
+    await until(() => f.cameraStreams[0].track.stopped === 1);
+    assert.equal(f.byId('camera-dialog').open, false);
+    assert.equal(f.calls.some(c => c.command === 'recognize_camera'), false);
+  }
+});
+
+test('camera permission failure stays retryable without invoking OCR', async t => {
+  const options = { camera: true, cameraError: 'NotAllowedError' };
+  const f = await fixture(t, options);
+  f.click('camera-button');
+  await until(() => f.byId('camera-status').textContent.includes('カメラを許可'));
+  assert.equal(f.byId('camera-retry').hidden, false);
+  options.cameraError = null;
+  f.click('camera-retry');
+  await until(() => !f.byId('camera-capture').disabled);
+  f.click('camera-close');
+  assert.equal(f.cameraStreams[0].track.stopped, 1);
+  assert.equal(f.calls.some(c => c.command === 'recognize_camera'), false);
+});
+
+test('Android camera permission pause keeps the request open, then backgrounding stops the camera', async t => {
+  const f = await fixture(t, { camera: true, holdCamera: true, status: { platform: 'android' } });
+  f.click('camera-button');
+  await until(() => f.cameraRequests.length === 1);
+  f.closeWindow();
+  assert.equal(f.byId('camera-dialog').open, true);
+  f.finishCamera();
+  await until(() => !f.byId('camera-capture').disabled);
+  f.closeWindow();
+  assert.equal(f.cameraStreams[0].track.stopped, 1);
+  assert.equal(f.byId('camera-dialog').open, false);
+});
+
+test('automatic camera waits for stability, avoids unchanged work and cancels stale translations on movement', async t => {
+  const f = await fixture(t, { camera: true, autoCamera: true, holdTranslation: true });
+  f.click('camera-button');
+  await until(() => f.byId('camera-video').srcObject);
+  f.advance(150); await f.tickLens();
+  assert.equal(f.calls.some(c => c.command === 'recognize_camera'), false);
+  f.advance(200); await f.tickLens();
+  await until(() => f.calls.some(c => c.command === 'translate'));
+  f.send({ kind: 'token', text: '古い訳文' });
+  f.cameraFrame(200); f.advance(150); await f.tickLens();
+  await until(() => f.calls.some(c => c.command === 'cancel_operation'));
+  assert.equal(f.byId('camera-overlay').textContent, '');
+  f.send({ kind: 'token', text: '遅れた訳文' });
+  assert.equal(f.byId('camera-overlay').textContent, '');
+  f.advance(400); await f.tickLens();
+  await until(() => f.calls.filter(c => c.command === 'translate').length === 2);
+  f.send({ kind: 'token', text: '新しい訳文' }); f.finish({ truncated: false });
+  await until(() => f.byId('camera-status').textContent === '自動更新中');
+  f.advance(1000); await f.tickLens();
+  assert.equal(f.calls.filter(c => c.command === 'recognize_camera').length, 2);
+  assert.equal(f.cameraStreams[0].track.stopped, 0);
+  f.click('camera-close');
+  assert.equal(f.cameraStreams[0].track.stopped, 1);
+});
+
+test('switching camera modes waits for OCR cancellation and ignores stale results', async t => {
+  const options = { camera: true, autoCamera: true, holdCameraRead: true, holdCancellation: true };
+  const f = await fixture(t, options);
+  f.click('camera-button');
+  await until(() => f.byId('camera-video').srcObject);
+  f.advance(400); await f.tickLens();
+  await until(() => f.calls.some(c => c.command === 'recognize_camera'));
+  f.click('camera-manual');
+  await until(() => f.calls.some(c => c.command === 'cancel_operation'));
+  assert.equal(f.cameraRequests.length, 1);
+  f.finishCameraRead(); f.finishCancellation();
+  await until(() => f.cameraRequests.length === 2);
+  assert.equal(f.calls.some(c => c.command === 'translate'), false);
+  options.holdCameraRead = false;
+  await until(() => !f.byId('camera-capture').disabled);
+  f.click('camera-capture');
+  await until(() => f.byId('camera-status').textContent === '翻訳完了');
+  assert.equal(f.cameraStreams.every(s => s.track.stopped === 1), true);
+});
+
+test('camera language changes retranslate frozen images and backgrounding stops live work', async t => {
+  const f = await fixture(t, { camera: true });
+  f.click('camera-button'); await until(() => !f.byId('camera-capture').disabled);
+  f.click('camera-capture'); await until(() => f.byId('camera-status').textContent === '翻訳完了');
+  f.byId('camera-target').value = 'ko';
+  f.byId('camera-target').dispatchEvent(new f.window.Event('change'));
+  await until(() => f.calls.filter(c => c.command === 'translate').length === 2);
+  assert.equal(f.calls.filter(c => c.command === 'translate').at(-1).args.target, 'ko');
+  await until(() => f.byId('camera-status').textContent === '翻訳完了');
+  f.click('camera-auto'); await until(() => f.cameraStreams.length === 2);
+  await until(() => f.byId('camera-video').srcObject);
+  Object.defineProperty(f.window.document, 'hidden', { value: true });
+  f.window.document.dispatchEvent(new f.window.Event('visibilitychange'));
+  assert.equal(f.cameraStreams[1].track.stopped, 1);
+  assert.equal(f.byId('camera-dialog').open, false);
+});
+
+test('automatic OCR errors pause instead of retrying indefinitely; empty images do not translate', async t => {
+  for (const cameraReadError of ['読み取りエラー', null]) {
+    const f = await fixture(t, { camera: true, autoCamera: true, cameraReadError, cameraBlocks: [] });
+    f.click('camera-button'); await until(() => f.byId('camera-video').srcObject);
+    f.advance(400); await f.tickLens();
+    await until(() => f.byId('camera-status').textContent === (cameraReadError ?? '文字が見つかりません'));
+    for (let i = 0; i < 3; i++) { f.advance(500); await f.tickLens(); }
+    assert.equal(f.calls.filter(c => c.command === 'recognize_camera').length, 1);
+    assert.equal(f.calls.some(c => c.command === 'translate'), false);
+    f.click('camera-close');
+  }
+});
+
+test('Android hides desktop-only settings while keeping camera, clipboard and translation', async t => {
+  const f = await fixture(t, { status: { platform: 'android', lensSupported: false } });
+  assert.equal(f.byId('shortcut-section').hidden, true);
+  assert.equal(f.byId('update-section').hidden, true);
+  assert.equal(f.byId('quit-button').hidden, true);
+  assert.equal(f.byId('lens-button').hidden, true);
+  assert.equal(f.byId('camera-button').hidden, false);
+  f.click('paste-button'); await until(() => f.byId('source').value);
+  f.click('translate-button'); await until(() => f.byId('translation-status').textContent.includes('翻訳完了'));
+  assert.equal(f.calls.some(c => c.command === 'check_update'), false);
 });

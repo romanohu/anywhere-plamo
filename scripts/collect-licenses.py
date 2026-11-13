@@ -1,14 +1,18 @@
 """Copy Cargo dependency license files into the app's bundled resources."""
 import json
+import argparse
 import pathlib
 import shutil
 import subprocess
 
 root = pathlib.Path(__file__).resolve().parent.parent
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--output', type=pathlib.Path, default=root / 'src-tauri/resources/runtime/rust-licenses')
+args = parser.parse_args()
 metadata = json.loads(subprocess.check_output([
     "cargo", "metadata", "--format-version=1", "--manifest-path", str(root / "src-tauri/Cargo.toml"),
 ], text=True))
-destination = root / "src-tauri/resources/runtime/rust-licenses"
+destination = args.output
 destination.mkdir(parents=True, exist_ok=True)
 index = []
 for package in metadata["packages"]:

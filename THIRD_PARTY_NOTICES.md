@@ -8,6 +8,7 @@ The MIT license in this repository covers Anywhere Plamo's original source code.
 | llama.cpp | MIT; vendored components retain their own notices | https://github.com/ggml-org/llama.cpp |
 | PaddleOCR PP-OCRv6 small / Korean PP-OCRv5 mobile / RapidOCR | Apache-2.0; upstream weights belong to Baidu / PaddleOCR rights holders | https://github.com/PaddlePaddle/PaddleOCR · https://github.com/RapidAI/RapidOCR |
 | ONNX Runtime | MIT | https://github.com/microsoft/onnxruntime |
+| OpenCV (Android) | Apache-2.0; bundled components retain their notices | https://github.com/opencv/opencv |
 | Python and OCR dependencies | PSF-2.0 and their respective licenses (bundled in `ocr/licenses`) | https://www.python.org/ · https://pypi.org/project/rapidocr/ |
 | PLaMo 3 Translate 0.8B GGUF (Q4_K_M) | [PLaMo Community License](https://plamo.preferredai.jp/info/plamo-community-license-ja) | https://huggingface.co/pfnet/plamo-3-translate-0.8b-GGUF |
 
@@ -35,6 +36,9 @@ is an optional in-app download, attributed in `ocr-models/KOREAN_NOTICE.txt` and
 native-library notices are included under `ocr/licenses`.
 `scripts/collect-licenses.py` collects license texts for Rust dependencies into
 the same directory before release builds. Those notices must accompany the binary.
+
+Android packages include OCR, llama.cpp and Rust dependency notices under
+`assets/licenses`, prepared by `scripts/build-android.py`.
 
 Built with PLaMo. Anywhere Plamo is an independent project and is not an official
 Preferred Networks application.

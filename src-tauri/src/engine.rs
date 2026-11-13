@@ -1,7 +1,6 @@
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::{
-    collections::VecDeque,
     net::TcpListener,
     path::Path,
     process::{Child, Command, Stdio},
@@ -29,36 +28,9 @@ pub struct Engine {
     cache: TranslationCache,
 }
 
-// Session-only, shared by all windows. Bound both entry count and UTF-8 bytes.
-#[derive(Default)]
-struct TranslationCache(VecDeque<(String, String, String)>);
-
-impl TranslationCache {
-    fn get(&mut self, text: &str, target: &str) -> Option<String> {
-        let index = self
-            .0
-            .iter()
-            .position(|(source, language, _)| source == text && language == target)?;
-        let entry = self.0.remove(index)?;
-        let output = entry.2.clone();
-        self.0.push_back(entry);
-        Some(output)
-    }
-
-    fn insert(&mut self, text: &str, target: &str, output: String) {
-        self.0.push_back((text.into(), target.into(), output));
-        let mut bytes: usize = self
-            .0
-            .iter()
-            .map(|(s, t, o)| s.len() + t.len() + o.len())
-            .sum();
-        while self.0.len() > 128 || bytes > 2 * 1024 * 1024 {
-            if let Some((s, t, o)) = self.0.pop_front() {
-                bytes -= s.len() + t.len() + o.len();
-            }
-        }
-    }
-}
+#[path = "translation_cache.rs"]
+mod cache;
+use cache::TranslationCache;
 
 impl Drop for Engine {
     fn drop(&mut self) {

@@ -1,4 +1,5 @@
 export interface AppStatus {
+  platform?: 'android';
   modelReady: boolean;
   runtimeAvailable: boolean;
   shortcutAvailable: boolean;
@@ -41,7 +42,7 @@ declare global { interface Window { __TAURI__?: TauriBridge } }
 export const isDesktop = !!window.__TAURI__;
 
 export function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
-  if (!window.__TAURI__) return Promise.reject(new Error('翻訳はデスクトップアプリで利用できます。この画面はブラウザプレビューです。'));
+  if (!window.__TAURI__) return Promise.reject(new Error('翻訳はアプリで利用できます。この画面はブラウザプレビューです。'));
   return window.__TAURI__.core.invoke<T>(command, args);
 }
 

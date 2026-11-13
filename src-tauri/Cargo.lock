@@ -52,6 +52,7 @@ name = "anywhere-plamo"
 version = "0.2.3"
 dependencies = [
  "arboard",
+ "base64 0.22.1",
  "cc",
  "core-foundation 0.10.1",
  "dbus",
@@ -70,6 +71,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-clipboard-manager",
  "tauri-plugin-global-shortcut",
+ "tauri-plugin-plamo-ocr",
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
  "tokio",
@@ -4244,6 +4246,15 @@ dependencies = [
  "tauri",
  "tauri-plugin",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "tauri-plugin-plamo-ocr"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tauri",
+ "tauri-plugin",
 ]
 
 [[package]]

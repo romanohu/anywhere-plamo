@@ -1,6 +1,6 @@
 # Anywhere Plamo
 
-選択した文章をショートカットで翻訳する、Linux・macOS向けの非公式PLaMoクライアントです。PLaMo 3 Translate 0.8Bを端末上で動かし、モデル取得後はオフラインで翻訳できます。
+文章・画面・カメラの文字を翻訳する非公式PLaMoクライアントです。Linux・macOSに対応し、Windows・Android版は開発中です。PLaMo 3 Translate 0.8Bを端末上で動かし、モデル取得後はオフラインで翻訳できます。
 
 <table>
   <tr><th>OCRレンズ</th><th>選択した文章の翻訳</th></tr>
@@ -54,6 +54,19 @@ npm run tauri build
 
 Windowsでは`py -3.12 scripts/collect-licenses.py`の後、`npm run tauri -- build --bundles nsis`でインストーラーを作ります。画面取得・選択翻訳・表示倍率を実機で確認してから配布してください。
 
+### Android（開発版）
+
+Android版のビルドには、上記に加えてJDK 17以上、Android SDK（API 36・Build Tools 36.0.0）、NDK r28以上、Ninjaが必要です。`JAVA_HOME`・`ANDROID_HOME`・`NDK_HOME`を設定して実行します。Android 9以降の64bit端末が対象です。実機での動作・発熱は未確認です。
+
+```sh
+rustup target add aarch64-linux-android
+npm ci
+npm run android:prepare
+npm run tauri -- android build --debug --apk --target aarch64
+```
+
+検証用APKは`src-tauri/gen/android/app/build/outputs/apk/universal/debug/`に生成されます。翻訳モデルは初回起動後に取得します。Android版は文章の入力・貼り付けとカメラ翻訳に対応します。
+
 ## 使い方
 
 1. 初回は「ダウンロード」から利用条件を確認し、モデルを取得します（約570 MB）。
@@ -65,6 +78,8 @@ Windowsでは`py -3.12 scripts/collect-licenses.py`の後、`npm run tauri -- bu
 韓国語OCRは設定の「ダウンロードして有効化」から追加できます（約14 MB）。使わないときはオフにすると負荷を減らせます。オフにしてもモデルは残り、再ダウンロードせずオンにできます。「モデルを削除」で保存容量も解放できます。
 
 「OCRレンズ」を開き、枠を画像やPDFに合わせると自動翻訳します（Mac・X11）。「自動」で停止・再開、「更新」で手動取得、「原文」で翻訳前の内容を確認し、`Esc`で閉じます。Waylandでは「更新」から画面の範囲を選択します。
+
+「カメラ」は2モードです。「自動」は映像が落ち着くと訳文を重ねて更新し、「撮影」は画像を止めて翻訳します。「原文」で重ね表示を切り替え、撮影後の「文章を開く」で原文を編集できます。カメラの許可が必要です。画像は端末内で処理し、読み取り後の一時画像は削除します。
 
 Mac・X11では「透過」で背後のアプリをクリック・スクロールできます。`Ctrl+Shift+L`（Macは`⌘+Shift+L`）で切り替え・解除できます。
 

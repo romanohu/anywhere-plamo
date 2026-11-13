@@ -22,6 +22,7 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--app', type=Path, default=ROOT / 'src-tauri/target/debug/anywhere-plamo')
 parser.add_argument('--comic', type=Path, help='Optional local PHD comic 156 image for OCR lens regression checks')
 parser.add_argument('--korean-model', type=Path, help='Optional Korean ONNX weight for offline lens tests')
+parser.add_argument('--camera', action='store_true', help='Use fixture video frames with real local OCR and translation')
 parser.add_argument('--lens', action='store_true', help='Test manual and automatic OCR with the bundled runtime and a prepared model')
 parser.add_argument('--work-dir', type=Path, default=ROOT / '.runtime-build/desktop-test')
 args = parser.parse_args()
@@ -734,6 +735,54 @@ def lens_checks():
     desktop_image('lens-large.png')
     print('ALL LENS DESKTOP CHECKS PASSED', flush=True)
 
+def camera_checks():
+    import base64
+    image = 'data:image/png;base64,' + base64.b64encode((ROOT / 'tests/fixtures/ocr-english.png').read_bytes()).decode()
+    blocks = invoke('recognize_camera', {'image': image})
+    assert any('Local translation' in b['text'] for b in blocks), blocks
+    check('camera PNG is read by the bundled PaddleOCR', blocks)
+    assert not list((WORK / 'app-cache').rglob('capture.png'))
+    check('camera temporary image is removed after OCR')
+    js("""
+      const fixture = new Image();fixture.src=arguments[0];window.cameraFixture=fixture;
+      const video=document.getElementById('camera-video');
+      Object.defineProperties(video,{videoWidth:{get:()=>fixture.naturalWidth},videoHeight:{get:()=>fixture.naturalHeight}});
+      video.play=async()=>{};
+      const draw=CanvasRenderingContext2D.prototype.drawImage;
+      CanvasRenderingContext2D.prototype.drawImage=function(source,...args){return draw.call(this,source===video?fixture:source,...args);};
+      window.cameraStopped=0;window.cameraRequested=0;
+      Object.defineProperty(navigator,'mediaDevices',{value:{getUserMedia:async constraints=>{
+        if(constraints.audio!==false)throw new Error('Audio was requested');
+        window.cameraRequested++;
+        const stream=new MediaStream();stream.getTracks=()=>[{stop:()=>window.cameraStopped++}];return stream;
+      }}});
+    """, image)
+    wait('window.cameraFixture.complete && window.cameraFixture.naturalWidth > 0')
+    click('camera-button')
+    wait("document.getElementById('camera-video').srcObject !== null")
+    click('camera-manual')
+    wait("!document.getElementById('camera-capture').disabled")
+    click('camera-capture')
+    wait("document.getElementById('camera-status').textContent === '翻訳完了'", 120)
+    assert text('camera-overlay').strip()
+    assert js('return window.cameraStopped === window.cameraRequested')
+    check('manual camera stops capture and overlays a real local translation', text('camera-overlay'))
+    screenshot('camera-manual.png')
+    click('camera-original')
+    assert js("return document.getElementById('camera-overlay').hidden")
+    click('camera-original')
+    click('camera-auto')
+    wait("document.getElementById('camera-status').textContent === '自動更新中'", 120)
+    assert text('camera-overlay').strip()
+    assert js('return window.cameraStopped < window.cameraRequested')
+    check('automatic camera translates without capture button and keeps video running', text('camera-overlay'))
+    screenshot('camera-live.png')
+    click('camera-close')
+    wait('window.cameraStopped === window.cameraRequested')
+    assert not js("return document.getElementById('camera-dialog').open")
+    check('closing the camera releases every media stream')
+    print('CAMERA NATIVE CHECKS PASSED', flush=True)
+
 env = os.environ.copy()
 env['XDG_DATA_HOME'] = str(DATA)
 env['XDG_CONFIG_HOME'] = str(WORK / 'app-config')
@@ -752,7 +801,7 @@ try:
             if driver.poll() is not None:
                 raise RuntimeError('Driver stopped: ' + (WORK / 'desktop.log').read_text())
             time.sleep(0.1)
-    value = request('POST', '/session', {'capabilities': {'alwaysMatch': {'browserName': 'wry', 'tauri:options': {'application': str(APP), 'args': [] if args.lens else ['--background']}}}})
+    value = request('POST', '/session', {'capabilities': {'alwaysMatch': {'browserName': 'wry', 'tauri:options': {'application': str(APP), 'args': [] if args.lens or args.camera else ['--background']}}}})
     SESSION = value['sessionId']
     request('POST', f'/session/{SESSION}/timeouts', {'script': 30000})
     select_window('main')
@@ -760,6 +809,9 @@ try:
     wait("document.getElementById('model-tag').textContent === " + json.dumps('準備完了' if status['modelReady'] else '未準備'))
     assert status['runtimeAvailable'], status
     check('native application startup', status)
+    if args.camera:
+        camera_checks()
+        sys.exit(0)
     if args.lens:
         lens_checks()
         sys.exit(0)

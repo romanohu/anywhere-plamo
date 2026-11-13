@@ -11,6 +11,7 @@
     "tauri": "tauri",
     "runtime:build": "python3 scripts/build-runtime.py",
     "ocr:build": "python3 scripts/build-ocr.py",
+    "android:prepare": "python3 scripts/build-android.py",
     "benchmark": "python3 scripts/benchmark.py",
     "test:protocol": "python3 scripts/test-protocol.py",
     "test:ui": "node --test --test-isolation=none tests/ui.test.mjs"

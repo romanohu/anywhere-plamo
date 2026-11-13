@@ -13,6 +13,7 @@
       <header class="app-header">
         <span class="brand">Anywhere Plamo</span>
         <div class="header-actions">
+          <button class="text-button" id="camera-button" hidden>カメラ</button>
           <button class="text-button" id="lens-button" hidden>OCRレンズ</button>
           <button class="text-button" id="dictionary-button">辞書</button>
           <button class="icon-button" id="settings-button" title="設定" aria-label="設定">
@@ -87,9 +88,20 @@
       <p id="lens-select-hint" role="status"></p>
     </section>
 
+    <dialog id="camera-dialog" aria-labelledby="camera-title">
+      <div class="dialog-header"><h2 id="camera-title">カメラ</h2><button class="icon-button" id="camera-close" aria-label="カメラを閉じる"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
+      <div class="camera-toolbar">
+        <button class="text-button" id="camera-auto" aria-pressed="true">自動</button><button class="text-button" id="camera-manual" aria-pressed="false">撮影</button>
+        <select id="camera-target" aria-label="カメラの翻訳先の言語"></select><button class="text-button" id="camera-original" aria-pressed="false" disabled>原文</button>
+      </div>
+      <div class="camera-view"><div id="camera-stage"><video id="camera-video" autoplay muted playsinline></video><canvas id="camera-preview" hidden></canvas><div id="camera-overlay" aria-live="off"></div></div></div>
+      <p id="camera-status" class="setting-description" role="status" aria-live="polite"></p>
+      <div class="camera-actions"><button class="text-button" id="camera-text" hidden>文章を開く</button><button class="text-button" id="camera-retry" hidden>撮り直す</button><button class="button primary" id="camera-capture" disabled>撮影して翻訳</button></div>
+    </dialog>
+
     <dialog id="settings-dialog" aria-labelledby="settings-title">
       <div class="dialog-header"><h2 id="settings-title">設定</h2><button class="icon-button" id="settings-close" aria-label="閉じる"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
-      <section class="settings-section">
+      <section class="settings-section" id="shortcut-section">
         <h3>ショートカット</h3>
         <select id="shortcut-action" aria-label="ショートカットの機能"><option value="selection">選択した文章を翻訳</option><option value="lensOpen">OCRレンズを開く／閉じる</option><option value="lens">レンズのクリック透過</option></select>
         <p class="setting-description" id="shortcut-description">他のアプリで選択した文章を翻訳します。</p>
