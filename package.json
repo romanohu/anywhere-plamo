@@ -14,7 +14,7 @@
     "android:prepare": "python3 scripts/build-android.py",
     "benchmark": "python3 scripts/benchmark.py",
     "test:protocol": "python3 scripts/test-protocol.py",
-    "test:ui": "node --test --test-isolation=none tests/ui.test.mjs"
+    "test:ui": "node --test --test-isolation=none tests/ui.test.mjs tests/camera.test.mjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0",

@@ -19,6 +19,8 @@ kotlin { compilerOptions { jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 dependencies {
     implementation(project(":tauri-android"))
+    implementation("androidx.activity:activity-ktx:1.10.1")
+    implementation("androidx.appcompat:appcompat:1.7.1")
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.23.2")
     implementation("org.opencv:opencv:4.11.0")
 }

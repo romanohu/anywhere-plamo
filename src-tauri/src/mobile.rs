@@ -4,6 +4,7 @@ mod dictionary;
 mod engine;
 mod model;
 mod ocr_model;
+mod screen_lens;
 #[allow(dead_code)]
 mod protocol;
 
@@ -38,6 +39,7 @@ struct AppState {
     dictionary_path: PathBuf,
     dictionary: Mutex<Vec<dictionary::Entry>>,
     ocr: MobileOcr,
+    screen: Mutex<Option<CancellationToken>>,
 }
 
 struct Operation<'a> {
@@ -109,7 +111,7 @@ impl MobileOcr {
 fn get_status(state: tauri::State<'_, AppState>) -> serde_json::Value {
     serde_json::json!({
         "platform": "android", "modelReady": model::ready(&state.directory), "runtimeAvailable": true,
-        "ocrAvailable": true, "lensSupported": false, "shortcutAvailable": false,
+        "ocrAvailable": true, "lensSupported": true, "shortcutAvailable": false,
         "shortcut": "", "defaultShortcut": "", "shortcutSupported": false, "shortcutPopup": false,
         "wayland": false, "resident": false, "lensUsesSelection": false, "lensShortcut": "",
         "defaultLensShortcut": "", "lensShortcutAvailable": false, "lensOpenShortcut": "",
@@ -219,10 +221,6 @@ async fn recognize_camera(
 ) -> Result<serde_json::Value, String> {
     let state = app.state::<AppState>();
     let operation = state.begin("main")?;
-    let _guard = state.ocr.gate.lock().await;
-    if operation.token.is_cancelled() {
-        return Err("CANCELLED".into());
-    }
     let cache = app
         .path()
         .app_cache_dir()
@@ -231,6 +229,19 @@ async fn recognize_camera(
         tauri::async_runtime::spawn_blocking(move || camera::Capture::new(&cache, &image))
             .await
             .map_err(|error| error.to_string())??;
+    recognize_file(&app, &capture.path, &operation.token).await
+}
+
+async fn recognize_file(
+    app: &tauri::AppHandle,
+    path: &std::path::Path,
+    cancel: &CancellationToken,
+) -> Result<serde_json::Value, String> {
+    let state = app.state::<AppState>();
+    let _guard = state.ocr.gate.lock().await;
+    if cancel.is_cancelled() {
+        return Err("CANCELLED".into());
+    }
     let korean = state
         .ocr
         .enabled
@@ -238,14 +249,14 @@ async fn recognize_camera(
         .then(|| ocr_model::path(&state.ocr.directory));
     let ocr = app.state::<tauri_plugin_plamo_ocr::Ocr>();
     let mut pending = Box::pin(ocr.recognize(
-        capture.path.to_str().ok_or("画像のパスが無効です。")?,
+        path.to_str().ok_or("画像のパスが無効です。")?,
         korean.as_deref().and_then(std::path::Path::to_str),
     ));
     tokio::select! {
         // Dispatch recognition before cancellation, even if already cancelled.
         biased;
         result = &mut pending => result,
-        _ = operation.token.cancelled() => {
+        _ = cancel.cancelled() => {
             let _ = ocr.cancel().await;
             // Keep the private image alive until native inference has actually stopped.
             let _ = pending.await;
@@ -318,6 +329,7 @@ pub fn run() {
             translate,
             cancel_operation,
             recognize_camera,
+            screen_lens::start_screen_lens,
             get_dictionary,
             set_dictionary,
             take_pending_clipboard,
@@ -339,6 +351,7 @@ pub fn run() {
                 directory: directory.join("models"),
                 engine: Arc::new(Mutex::new(None)),
                 operation: Mutex::new(None),
+                screen: Mutex::new(None),
                 preparation: Mutex::new(None),
                 download: tokio::sync::Mutex::new(()),
                 ocr: MobileOcr {

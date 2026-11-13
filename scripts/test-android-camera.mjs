@@ -136,7 +136,7 @@ try {
   await wait('document.getElementById("camera-status").textContent === "翻訳完了"');
   assert.equal(await js('window.testCameraTrack.readyState'), 'ended');
   assert.equal(await js('document.getElementById("camera-preview").hidden'), false);
-  const translated = await js('document.getElementById("camera-overlay").textContent');
+  const translated = await js('document.getElementById("camera-paragraphs").textContent');
   assert.match(translated, /[\u3040-\u30ff\u3400-\u9fff]/);
   screenshot('manual');
   check('Manual capture freezes the image, releases the camera and shows Japanese', translated);
@@ -162,7 +162,7 @@ try {
   check('Retake returns to the live camera');
   await tap('camera-auto');
   await wait('document.getElementById("camera-status").textContent === "自動更新中"');
-  assert.match(await js('document.getElementById("camera-overlay").textContent'), /[\u3040-\u30ff\u3400-\u9fff]/);
+  assert.match(await js('document.getElementById("camera-paragraphs").textContent'), /[\u3040-\u30ff\u3400-\u9fff]/);
   assert.equal(await js('document.getElementById("camera-video").srcObject.getVideoTracks()[0].readyState'), 'live');
   assert.equal(await js('document.getElementById("camera-capture").hidden'), true);
   screenshot('automatic');

@@ -40,6 +40,13 @@ impl Ocr {
             .run_mobile_plugin::<()>("openLicense", ())
             .map_err(|error| error.to_string())
     }
+
+    pub async fn screen(&self, command: &str, args: serde_json::Value) -> Result<serde_json::Value, String> {
+        self.0
+            .run_mobile_plugin_async(command, args)
+            .await
+            .map_err(|error| error.to_string())
+    }
 }
 
 pub fn init() -> TauriPlugin<Wry> {

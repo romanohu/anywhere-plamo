@@ -21,7 +21,7 @@ private data class Box(val x: Double, val y: Double, val right: Double, val bott
     fun json(w: Int, h: Int) = JSONObject().put("x", x / w).put("y", y / h)
         .put("width", width / w).put("height", height / h)
 }
-private data class Line(val text: String, val box: Box, val size: Double, val vertical: Boolean)
+private data class Line(val text: String, val box: Box, val size: Double, val vertical: Boolean, val rotation: Int = 0)
 private data class Recognizer(val session: OrtSession, val characters: List<String>) : AutoCloseable {
     override fun close() = session.close()
 }
@@ -191,10 +191,22 @@ class PaddleOcr(private val assets: AssetManager, private val cancelled: AtomicB
             val lines = mutableListOf<Line>()
             for (points in detect(image)) {
                 checkCancelled()
+                val box = Box(points.minOf { it.x }, points.minOf { it.y }, points.maxOf { it.x }, points.maxOf { it.y })
+                if (box.width <= 0 || box.height <= 0) continue
+                val tall = box.height > box.width * 1.8
                 val crop = crop(image, points)
                 var result: Pair<String, Double>
+                var reversed = false
                 try {
                     result = read(crop, recognizer!!)
+                    // A sideways line may be cropped upside down. Compare the
+                    // opposite direction instead of sending garbled Latin to translation.
+                    if (tall || result.second < .88) {
+                        Core.rotate(crop, crop, Core.ROTATE_180)
+                        val candidate = read(crop, recognizer!!)
+                        if (candidate.second > result.second + .04) { result = candidate; reversed = true }
+                        if (!reversed) Core.rotate(crop, crop, Core.ROTATE_180)
+                    }
                     korean?.let { model ->
                         val candidate = read(crop, model)
                         val omitted = result.first.none(::cjk) && result.first.replace(" ", "").length < candidate.first.replace(" ", "").length * .7
@@ -202,23 +214,42 @@ class PaddleOcr(private val assets: AssetManager, private val cancelled: AtomicB
                     }
                 } finally { crop.release() }
                 if (result.second < .5 || result.first.isBlank()) continue
-                val box = Box(points.minOf { it.x }, points.minOf { it.y }, points.maxOf { it.x }, points.maxOf { it.y })
-                if (box.width <= 0 || box.height <= 0) continue
-                lines.add(Line(result.first, box, min(box.width, box.height), box.height > box.width * 1.8))
+                val latin = result.first.count { it in 'a'..'z' || it in 'A'..'Z' } >= max(2, result.first.count { it.isLetter() } / 2)
+                val rotation = if (tall && latin) { if (reversed) 270 else 90 } else if (!tall && reversed) 180 else 0
+                lines.add(Line(result.first, box, min(box.width, box.height), tall && rotation == 0, rotation))
             }
-            val refined = geometry(image, lines)
-            val kept = refined.filter { line -> !refined.any { body -> ruby(line, body) } }
-            return group(kept).map { paragraph ->
-                var text = ""
-                for (line in paragraph) {
-                    if (text.isNotEmpty() && !cjk(text.last()) && !cjk(line.text.first()) && text.last() != '-') text += " "
-                    text += line.text
-                }
-                val box = Box(paragraph.minOf { it.box.x }, paragraph.minOf { it.box.y }, paragraph.maxOf { it.box.right }, paragraph.maxOf { it.box.bottom })
-                box.json(image.cols(), image.rows()).put("text", text)
-                    .put("regions", org.json.JSONArray(paragraph.map { it.box.json(image.cols(), image.rows()) }))
+            return lines.groupBy { it.rotation }.flatMap { (rotation, oriented) ->
+                val upright = Mat()
+                try {
+                    when (rotation) {
+                        90 -> Core.rotate(image, upright, Core.ROTATE_90_COUNTERCLOCKWISE)
+                        180 -> Core.rotate(image, upright, Core.ROTATE_180)
+                        270 -> Core.rotate(image, upright, Core.ROTATE_90_CLOCKWISE)
+                        else -> image.copyTo(upright)
+                    }
+                    val refined = geometry(upright, oriented.map { it.copy(box = turn(it.box, image.cols(), image.rows(), rotation)) })
+                    val kept = refined.filter { line -> !refined.any { body -> ruby(line, body) } }
+                    group(kept).map { paragraph ->
+                        var text = ""
+                        for (line in paragraph) {
+                            if (text.isNotEmpty() && !cjk(text.last()) && !cjk(line.text.first()) && text.last() != '-') text += " "
+                            text += line.text
+                        }
+                        val box = Box(paragraph.minOf { it.box.x }, paragraph.minOf { it.box.y }, paragraph.maxOf { it.box.right }, paragraph.maxOf { it.box.bottom })
+                        val inverse = (360 - rotation) % 360
+                        turn(box, upright.cols(), upright.rows(), inverse).json(image.cols(), image.rows()).put("text", text).put("rotation", rotation)
+                            .put("regions", org.json.JSONArray(paragraph.map { turn(it.box, upright.cols(), upright.rows(), inverse).json(image.cols(), image.rows()) }))
+                    }
+                } finally { upright.release() }
             }
         } finally { image.release() }
+    }
+
+    private fun turn(box: Box, width: Int, height: Int, rotation: Int): Box = when (rotation) {
+        90 -> Box(box.y, width - box.right, box.bottom, width - box.x)
+        180 -> Box(width - box.right, height - box.bottom, width - box.x, height - box.y)
+        270 -> Box(height - box.bottom, box.x, height - box.y, box.right)
+        else -> box
     }
 
     private fun geometry(image: Mat, lines: List<Line>): List<Line> {
@@ -281,7 +312,8 @@ class PaddleOcr(private val assets: AssetManager, private val cancelled: AtomicB
             val matches = groups.mapNotNull { group ->
                 val previous = group.last(); val a = previous.box; val b = line.box
                 val distance = (b.y + b.bottom - a.y - a.bottom) / 2
-                if (distance > 0 && distance <= max(line.size, previous.size) * (if (prose) 3.2 else spacing)
+                if (distance > 0 && min(line.size, previous.size) >= max(line.size, previous.size) * .65
+                    && distance <= max(line.size, previous.size) * (if (prose) 3.2 else spacing)
                     && min(b.right, a.right) - max(b.x, a.x) >= min(b.width, a.width) * .5 && (!prose || b.x - left < size * .6)) Pair(distance, group) else null
             }
             val match = matches.minByOrNull { it.first }?.second

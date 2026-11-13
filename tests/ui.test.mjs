@@ -49,7 +49,7 @@ async function fixture(t, options = {}) {
     window.localStorage.setItem('camera-auto', String(!!options.autoCamera));
     Object.defineProperties(byId('camera-video'), { videoWidth: { value: 1920 }, videoHeight: { value: 1080 } });
     byId('camera-video').play = async () => {};
-    window.HTMLCanvasElement.prototype.getContext = () => ({ drawImage() {}, getImageData() { return { data: new window.Uint8ClampedArray(64 * 48 * 4).fill(cameraPixel) }; } });
+    window.HTMLCanvasElement.prototype.getContext = () => ({ drawImage() {}, save() {}, restore() {}, translate() {}, rotate() {}, resetTransform() {}, getImageData() { return { data: new window.Uint8ClampedArray(64 * 48 * 4).fill(cameraPixel) }; } });
     window.HTMLCanvasElement.prototype.toDataURL = () => 'data:image/png;base64,dGVzdA==';
     Object.defineProperty(window.navigator, 'mediaDevices', { value: { getUserMedia: async constraints => {
       cameraRequests.push(constraints);
@@ -123,6 +123,9 @@ async function fixture(t, options = {}) {
             args.onEvent.onmessage({ kind: 'installing' });
             return;
           case 'open_lens': return;
+          case 'start_screen_lens':
+            if (options.screenLensError) throw options.screenLensError;
+            return;
           case 'apply_lens_selection': return !!options.selectedLens;
           case 'confirm_lens_selection': return;
           case 'set_lens_passthrough':
@@ -1918,6 +1921,8 @@ test('automatic camera waits for stability, avoids unchanged work and cancels st
   await until(() => f.calls.some(c => c.command === 'translate'));
   f.send({ kind: 'token', text: '古い訳文' });
   f.cameraFrame(200); f.advance(150); await f.tickLens();
+  assert.equal(f.calls.some(c => c.command === 'cancel_operation'), false, 'one shaken frame must not cancel translation');
+  f.advance(150); await f.tickLens();
   await until(() => f.calls.some(c => c.command === 'cancel_operation'));
   assert.equal(f.byId('camera-overlay').textContent, '');
   f.send({ kind: 'token', text: '遅れた訳文' });
@@ -1944,7 +1949,8 @@ test('switching camera modes waits for OCR cancellation and ignores stale result
   await until(() => f.calls.some(c => c.command === 'cancel_operation'));
   assert.equal(f.cameraRequests.length, 1);
   f.finishCameraRead(); f.finishCancellation();
-  await until(() => f.cameraRequests.length === 2);
+  await until(() => !f.byId('camera-capture').disabled);
+  assert.equal(f.cameraRequests.length, 1, 'mode switches keep the live camera open');
   assert.equal(f.calls.some(c => c.command === 'translate'), false);
   options.holdCameraRead = false;
   await until(() => !f.byId('camera-capture').disabled);
@@ -1983,14 +1989,83 @@ test('automatic OCR errors pause instead of retrying indefinitely; empty images 
   }
 });
 
-test('Android hides desktop-only settings while keeping camera, clipboard and translation', async t => {
-  const f = await fixture(t, { status: { platform: 'android', lensSupported: false } });
+test('Android hides desktop-only settings while keeping camera, screen lens, clipboard and translation', async t => {
+  const f = await fixture(t, { status: { platform: 'android', lensSupported: true } });
   assert.equal(f.byId('shortcut-section').hidden, true);
   assert.equal(f.byId('update-section').hidden, true);
   assert.equal(f.byId('quit-button').hidden, true);
-  assert.equal(f.byId('lens-button').hidden, true);
+  assert.equal(f.byId('lens-button').hidden, false);
   assert.equal(f.byId('camera-button').hidden, false);
   f.click('paste-button'); await until(() => f.byId('source').value);
   f.click('translate-button'); await until(() => f.byId('translation-status').textContent.includes('翻訳完了'));
   assert.equal(f.calls.some(c => c.command === 'check_update'), false);
+});
+
+test('Android screen lens releases the camera and passes the selected target to the native overlay', async t => {
+  const f = await fixture(t, { camera: true, target: 'en', status: { platform: 'android', lensSupported: true } });
+  f.click('camera-button'); await until(() => !f.byId('camera-capture').disabled);
+  f.click('lens-button');
+  await until(() => f.calls.some(c => c.command === 'start_screen_lens'));
+  assert.equal(f.cameraStreams[0].track.stopped, 1);
+  assert.equal(f.byId('camera-dialog').open, false);
+  assert.equal(f.calls.find(c => c.command === 'start_screen_lens').args.target, 'en');
+  assert.equal(f.calls.some(c => c.command === 'open_lens'), false);
+});
+
+test('Android screen lens permission cancellation permits retry and missing model disables entry', async t => {
+  const f = await fixture(t, { screenLensError: '画面共有をキャンセルしました。', status: { platform: 'android', lensSupported: true } });
+  f.click('lens-button'); await until(() => !f.byId('lens-button').disabled);
+  assert.equal(f.calls.filter(c => c.command === 'start_screen_lens').length, 1);
+  f.click('lens-button'); await until(() => !f.byId('lens-button').disabled);
+  assert.equal(f.calls.filter(c => c.command === 'start_screen_lens').length, 2);
+  const missing = await fixture(t, { modelReady: false, status: { platform: 'android', lensSupported: true } });
+  assert.equal(missing.byId('lens-button').disabled, true);
+});
+
+test('camera rotation swaps capture dimensions and can rotate a frozen image without reopening camera', async t => {
+  const f = await fixture(t, { camera: true });
+  f.click('camera-button'); await until(() => !f.byId('camera-capture').disabled);
+  f.click('camera-rotate');
+  await until(() => f.byId('camera-stage').style.getPropertyValue('--camera-aspect') === String(1080 / 1920));
+  f.click('camera-capture'); await until(() => f.byId('camera-status').textContent === '翻訳完了');
+  assert.equal(f.byId('camera-preview').width, 1080);
+  assert.equal(f.byId('camera-preview').height, 1920);
+  f.click('camera-rotate'); await until(() => f.calls.filter(c => c.command === 'recognize_camera').length === 2);
+  await until(() => f.byId('camera-status').textContent === '翻訳完了');
+  assert.equal(f.byId('camera-preview').width, 1920);
+  assert.equal(f.byId('camera-preview').height, 1080);
+  assert.equal(f.cameraRequests.length, 1);
+});
+
+test('long camera paragraphs use numbered links to the complete transcript', async t => {
+  const translation = 'これは長い文章の翻訳です。'.repeat(20);
+  const f = await fixture(t, { camera: true, translationOutputs: [translation] });
+  f.click('camera-button'); await until(() => !f.byId('camera-capture').disabled);
+  f.click('camera-capture'); await until(() => f.byId('camera-status').textContent === '翻訳完了');
+  const marker = f.byId('camera-overlay').firstElementChild;
+  assert.ok(marker.classList.contains('is-marker'));
+  assert.equal(marker.textContent, '1');
+  marker.click();
+  assert.equal(f.byId('camera-transcript').open, true);
+  assert.equal(f.byId('camera-paragraphs').querySelector('span').textContent, translation);
+});
+
+test('automatic camera keeps in-flight translation through small exposure changes', async t => {
+  const f = await fixture(t, { camera: true, autoCamera: true, holdTranslation: true });
+  f.click('camera-button'); await until(() => f.byId('camera-video').srcObject);
+  f.advance(350); await f.tickLens();
+  await until(() => f.channels.length === 1);
+  f.cameraFrame(12);
+  for (let i = 0; i < 5; i++) { f.advance(150); await f.tickLens(); }
+  assert.equal(f.calls.filter(c => c.command === 'cancel_operation').length, 0);
+  assert.equal(f.calls.filter(c => c.command === 'recognize_camera').length, 1);
+  f.send({ kind: 'token', text: 'こんにちは。' }); f.finish({ truncated: false });
+  await until(() => f.byId('camera-status').textContent === '自動更新中');
+});
+
+test('automatic camera has a bounded initial wait even if motion never fully settles', async t => {
+  const f = await fixture(t, { camera: true, autoCamera: true });
+  f.click('camera-button'); await until(() => f.byId('camera-video').srcObject);
+  for (let i = 0; i < 10; i++) { f.cameraFrame(i % 2 ? 0 : 200); f.advance(150); await f.tickLens(); }
+  assert.equal(f.calls.filter(c => c.command === 'recognize_camera').length, 1);
 });

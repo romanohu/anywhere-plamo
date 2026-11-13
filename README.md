@@ -67,7 +67,7 @@ npm run android:prepare
 npm run tauri -- android build --debug --apk --target aarch64
 ```
 
-検証用APKは`src-tauri/gen/android/app/build/outputs/apk/universal/debug/`に生成されます。翻訳モデルは初回起動後に取得します。Android版は文章の入力・貼り付けとカメラ翻訳に対応します。
+検証用APKは`src-tauri/gen/android/app/build/outputs/apk/universal/debug/`に生成されます。翻訳モデルは初回起動後に取得します。Android版は文章の入力・貼り付け、カメラ翻訳、他のアプリに重ねる画面OCRレンズに対応します。レンズは初回に重ね表示と画面共有を許可して使います。
 
 署名付きAPKの作成は[Android配布手順](docs/android-testing.md#配布用apk)を参照してください。
 

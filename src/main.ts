@@ -54,6 +54,7 @@ let savingPopup = false;
 let busy = false;
 let downloading = false;
 let cancelling = false;
+let openingScreenLens = false;
 let generation = 0;
 let copyTimer: ReturnType<typeof setTimeout>;
 let initialized = false;
@@ -108,6 +109,7 @@ function updateControls(): void {
   copyButton.disabled = busy || !result.textContent;
   downloadButton.disabled = busy || cancelling || downloading || !status.runtimeAvailable;
   element<HTMLButtonElement>('camera-button').disabled = busy || cancelling || downloading || !status.ocrAvailable || !status.modelReady;
+  if (status.platform === 'android') element<HTMLButtonElement>('lens-button').disabled = openingScreenLens || busy || cancelling || downloading || !status.modelReady;
   element('character-count').textContent = `${source.value.length.toLocaleString()} / 12,000`;
 }
 
@@ -558,7 +560,15 @@ dictionarySave.addEventListener('click', () => { void saveDictionary(); });
   });
 });
 dictionaryDialog.addEventListener('close', () => { dictionaryMessage.textContent = ''; });
-element('lens-button').addEventListener('click', () => { void invoke('open_lens').catch(showError); });
+element('lens-button').addEventListener('click', () => {
+  if (status.platform !== 'android') { void invoke('open_lens').catch(showError); return; }
+  openingScreenLens = true;
+  updateControls();
+  void (async () => {
+    await camera?.close();
+    await invoke('start_screen_lens', { target: target.value });
+  })().catch(showError).finally(() => { openingScreenLens = false; updateControls(); });
+});
 element('setup-open').addEventListener('click', openSettings);
 element('settings-close').addEventListener('click', () => dialog.close());
 dialog.addEventListener('close', () => {
