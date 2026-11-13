@@ -1,5 +1,10 @@
 use super::{check_text_limit, Region, TextBlock};
-use std::{path::Path, process::Stdio, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    process::Stdio,
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command},
@@ -16,6 +21,8 @@ pub const EXECUTABLE: &str = if cfg!(windows) {
 #[derive(Default)]
 pub struct Ocr {
     worker: Mutex<Option<Worker>>,
+    model_directory: PathBuf,
+    korean: AtomicBool,
 }
 
 struct Worker {
@@ -25,6 +32,37 @@ struct Worker {
 }
 
 impl Ocr {
+    pub fn new(model_directory: PathBuf) -> Self {
+        Self {
+            korean: AtomicBool::new(crate::ocr_model::enabled(&model_directory)),
+            model_directory,
+            worker: Mutex::new(None),
+        }
+    }
+
+    pub fn model_directory(&self) -> &Path {
+        &self.model_directory
+    }
+
+    pub fn korean_status(&self) -> crate::ocr_model::Status {
+        crate::ocr_model::Status {
+            ready: crate::ocr_model::ready(&self.model_directory),
+            enabled: self.korean.load(Ordering::Relaxed),
+        }
+    }
+
+    pub async fn set_korean(&self, enabled: bool) -> Result<(), String> {
+        let mut worker = self.worker.lock().await;
+        crate::ocr_model::save_enabled(&self.model_directory, enabled).await?;
+        if self.korean.swap(enabled, Ordering::Relaxed) != enabled {
+            // Restart to release ONNX allocations, including its thread pools.
+            if let Some(mut worker) = worker.take() {
+                let _ = worker.child.kill().await;
+            }
+        }
+        Ok(())
+    }
+
     pub async fn stop(&self) {
         if let Some(mut worker) = self.worker.lock().await.take() {
             let _ = worker.child.kill().await;
@@ -44,10 +82,13 @@ impl Ocr {
         };
         if worker.is_none() {
             let mut command = Command::new(runtime.join(EXECUTABLE));
+            command.arg(runtime.join("ocr-models"));
+            if self.korean.load(Ordering::Relaxed) {
+                command.arg(crate::ocr_model::path(&self.model_directory));
+            }
             #[cfg(windows)]
             command.creation_flags(0x08000000); // CREATE_NO_WINDOW, retaining the JSON pipes.
             let mut child = command
-                .arg(runtime.join("ocr-models"))
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
@@ -137,6 +178,48 @@ fn parse_response(bytes: &[u8]) -> Result<Vec<TextBlock>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires bundled OCR and ANYWHERE_PLAMO_KOREAN_MODEL pointing to the optional weight"]
+    async fn korean_toggle_releases_worker_and_preserves_japanese_and_english() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let directory =
+            std::env::temp_dir().join(format!("plamo-ocr-toggle-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&directory).await.unwrap();
+        tokio::fs::copy(
+            std::env::var_os("ANYWHERE_PLAMO_KOREAN_MODEL").unwrap(),
+            crate::ocr_model::path(&directory),
+        )
+        .await
+        .unwrap();
+        let ocr = Ocr::new(directory.clone());
+        assert!(!ocr.korean_status().enabled);
+        let runtime = root.join("resources/runtime");
+        let image = root.join("../tests/fixtures/ocr-korean-mixed.png");
+        let cancel = CancellationToken::new();
+        for enabled in [false, true, false] {
+            ocr.set_korean(enabled).await.unwrap();
+            assert!(ocr.worker.lock().await.is_none());
+            assert_eq!(Ocr::new(directory.clone()).korean_status().enabled, enabled);
+            let blocks = ocr.recognize(&runtime, &image, &cancel).await.unwrap();
+            let text = blocks
+                .iter()
+                .map(|block| block.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(
+                text.contains("Local translation") && text.contains("画像"),
+                "{text}"
+            );
+            assert_eq!(
+                text.contains("한국어 문장을 일본어로 번역합니다"),
+                enabled,
+                "{text}"
+            );
+        }
+        ocr.stop().await;
+        tokio::fs::remove_dir_all(directory).await.unwrap();
+    }
 
     #[test]
     fn validates_worker_geometry_text_limits_and_empty_pages() {

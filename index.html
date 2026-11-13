@@ -113,6 +113,14 @@
         <label class="setting-toggle" title="初回の翻訳を速くします"><input type="checkbox" id="preload-model" checked aria-describedby="preload-description" />起動時にモデルを先読み</label>
         <p class="setting-description" id="preload-description">待機中もメモリを使用。オフは次回起動から。</p>
       </section>
+      <section class="settings-section" id="ocr-settings">
+        <label class="setting-toggle"><input type="checkbox" id="korean-ocr" disabled />韓国語OCR</label>
+        <p class="setting-description">日本語・英語は常に読み取れます。韓国語を使うときだけオンにしてください。</p>
+        <button class="button small" id="korean-download">ダウンロードして有効化 · 約14 MB</button>
+        <button class="text-button" id="korean-remove" hidden>モデルを削除</button>
+        <button class="text-button" id="korean-cancel" hidden>中止</button>
+        <p class="setting-description" id="korean-message" role="status" aria-live="polite"></p>
+      </section>
       <section class="settings-section" id="update-section">
         <button class="button small" id="update-button">更新を確認</button>
         <p class="setting-description" id="update-message" role="status" aria-live="polite"></p>

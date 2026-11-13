@@ -28,10 +28,10 @@ The full model license governs; this summary does not replace it.
 
 `scripts/build-runtime.py` copies llama.cpp's LICENSE and the license/notice files
 under its vendor and ggml directories into the bundled runtime directory.
-`scripts/build-ocr.py` bundles PP-OCRv6 small and Korean PP-OCRv5 mobile models converted to ONNX by RapidOCR,
+`scripts/build-ocr.py` bundles PP-OCRv6 small models converted to ONNX by RapidOCR,
 a self-contained Python worker, and their license texts. RapidOCR’s
 `MODEL_LICENSES.md` records the v6 model provenance and attribution; the Korean model
-is attributed in `ocr-models/KOREAN_NOTICE.txt` and its [upstream model card](https://huggingface.co/PaddlePaddle/korean_PP-OCRv5_mobile_rec). Dependency and
+is an optional in-app download, attributed in `ocr-models/KOREAN_NOTICE.txt` and its [upstream model card](https://huggingface.co/PaddlePaddle/korean_PP-OCRv5_mobile_rec). Dependency and
 native-library notices are included under `ocr/licenses`.
 `scripts/collect-licenses.py` collects license texts for Rust dependencies into
 the same directory before release builds. Those notices must accompany the binary.

@@ -5,6 +5,7 @@ mod engine;
 mod lens;
 mod lens_select;
 mod model;
+mod ocr_model;
 mod protocol;
 mod selection;
 mod shortcut;
@@ -530,7 +531,7 @@ async fn translate(
         state.start_engine(&mut engine, &operation.token).await?;
     }
     engine
-        .as_ref()
+        .as_mut()
         .ok_or("翻訳エンジンが見つかりません。")?
         .translate(&text, &target, &on_event, &operation.token)
         .await
@@ -909,6 +910,10 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(update::State::default())
         .invoke_handler(tauri::generate_handler![
+            ocr_model::get_korean_ocr,
+            ocr_model::set_korean_ocr,
+            ocr_model::download_korean_ocr,
+            ocr_model::remove_korean_ocr,
             get_status,
             set_shortcut,
             set_shortcut_popup,
@@ -968,7 +973,7 @@ fn main() {
                 directory,
                 binary,
                 ocr_runtime,
-                ocr: lens::Ocr::default(),
+                ocr: lens::Ocr::new(app_directory.join("ocr-models")),
                 lens_open: AtomicBool::new(false),
                 lens_passthrough: AtomicBool::new(false),
                 lens_bounds: Mutex::new(None),

@@ -3,6 +3,7 @@ import type { AppStatus } from './backend';
 import { initLens } from './lens';
 import { initLensSelect } from './lens-select';
 import { initUpdate } from './update';
+import { initOcrSettings } from './ocr-settings';
 
 function element<T extends HTMLElement>(id: string): T {
   const found = document.getElementById(id);
@@ -363,6 +364,8 @@ async function translate(): Promise<void> {
   const started = performance.now();
   let firstToken: number | null = null;
   let acceptingEvents = true;
+  const output = document.createTextNode('');
+  result.append(output);
   statusText.textContent = 'モデルを準備中…';
   updateControls();
   try {
@@ -376,7 +379,7 @@ async function translate(): Promise<void> {
         }
         empty.hidden = true;
         result.hidden = false;
-        result.textContent += event.text;
+        output.appendData(event.text);
         statusText.textContent = '翻訳中…';
       }
     });
@@ -663,6 +666,8 @@ document.addEventListener('keydown', event => {
 });
 
 async function init(): Promise<void> {
+  if (popup) element('ocr-settings').hidden = true;
+  else initOcrSettings();
   if (popup) element('update-section').hidden = true;
   else initUpdate();
   if (popup) setReadingMode(true);

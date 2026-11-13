@@ -248,16 +248,27 @@ export async function initLens(): Promise<void> {
           continue;
         }
         let output = '';
+        let pendingPaint = false;
+        let streaming = true;
+        const paint = (): void => {
+          paragraph.textContent = input.startsWith(comparable(output)) ? '' : output;
+          render();
+          fitBlock(paragraph);
+        };
         const channel = () => progressChannel(event => {
           if (run !== generation || !busy) return;
           if (event.kind === 'loading') message('モデルを読み込み中…');
           if (event.kind === 'token') {
             output += event.text;
             // A copied prefix is not yet a translation; avoid flashing the OCR text.
-            paragraph.textContent = input.startsWith(comparable(output)) ? '' : output;
             message('翻訳中…');
-            render();
-            fitBlock(paragraph);
+            if (!pendingPaint) {
+              pendingPaint = true;
+              requestAnimationFrame(() => {
+                pendingPaint = false;
+                if (run === generation && busy && streaming) paint();
+              });
+            }
           }
         });
         let outcome = await invoke<{ truncated: boolean }>('translate', { text: block.text, target: target.value, onEvent: channel() });
@@ -274,6 +285,7 @@ export async function initLens(): Promise<void> {
           if (run !== generation) return;
         }
         truncated ||= outcome.truncated;
+        streaming = false;
         if (!outcome.truncated) nextTranslations.set(block.text, output);
         const same = comparable(output) === input;
         paragraph.textContent = same ? '' : output;
@@ -402,6 +414,9 @@ export async function initLens(): Promise<void> {
       void invoke<AppStatus>('get_status').then(app => { loadPassthrough(app); render(); }).catch(error => message(String(error), true));
     });
     await window.__TAURI__!.event.listen('lens-changed', moved);
+    await window.__TAURI__!.event.listen('ocr-settings-changed', () => {
+      invalidate(auto ? instruction() : 'OCR設定を変更しました。「更新」で再読取', true);
+    });
     await onWindowHidden(() => { visible = false; showAgain = false; selectedRefresh = false; invalidate(instruction(), true); });
     await window.__TAURI__!.event.listen('window-shown', () => { void shown(); });
     const app = await invoke<AppStatus>('get_status');

@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parent.parent
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--app', type=Path, default=ROOT / 'src-tauri/target/debug/anywhere-plamo')
 parser.add_argument('--comic', type=Path, help='Optional local PHD comic 156 image for OCR lens regression checks')
+parser.add_argument('--korean-model', type=Path, help='Optional Korean ONNX weight for offline lens tests')
 parser.add_argument('--lens', action='store_true', help='Test manual and automatic OCR with the bundled runtime and a prepared model')
 parser.add_argument('--work-dir', type=Path, default=ROOT / '.runtime-build/desktop-test')
 args = parser.parse_args()
@@ -35,6 +36,10 @@ if not DRIVER or not APP.is_file():
 DATA = WORK / 'app-data'
 DATA.mkdir(exist_ok=True)
 MODEL = DATA / 'app.anywhere-plamo.desktop/models'
+if args.korean_model:
+    ocr_models = DATA / 'app.anywhere-plamo.desktop/ocr-models'
+    ocr_models.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(args.korean_model, ocr_models / 'korean_PP-OCRv5_rec_mobile.onnx')
 REPORT = []
 
 def port():
@@ -634,15 +639,23 @@ def lens_checks():
     desktop_image('lens-columns.png')
 
     subprocess.run(['xdotool', 'windowsize', '--sync', native_window, '950', '520'], env=env, check=True)
-    source('korean-mixed')
-    target('ja')
-    wait("document.getElementById('lens-source').textContent.includes('한국어 문장을 일본어로 번역합니다') && document.getElementById('lens-status').textContent === '自動更新中'", 60)
-    blocks = js("return lensCalls.filter(call=>call.result?.kind==='text').at(-1).result.blocks")
-    rendered = js("return [...document.querySelectorAll('.lens-block')].map(node=>node.textContent)")
-    assert len(blocks) >= 3 and '안녕하세요' in blocks[0]['text'] and all(word in ''.join(b['text'] for b in blocks) for word in ['한국어', 'Local translation', '画像']), blocks
-    assert all(re.search('[ぁ-んァ-ヶ一-龯]', text) and not re.search('[가-힣]', text) for text in rendered[:2]), rendered
-    check('Korean, English and Japanese are read together and Korean is translated into Japanese', {'blocks': blocks, 'translations': rendered})
-    desktop_image('lens-korean.png')
+    if args.korean_model:
+        select_window('main')
+        invoke('set_korean_ocr', {'enabled': True})
+        select_window('lens')
+        source('korean-mixed')
+        target('ja')
+        wait("document.getElementById('lens-source').textContent.includes('한국어 문장을 일본어로 번역합니다') && document.getElementById('lens-status').textContent === '自動更新中'", 60)
+        blocks = js("return lensCalls.filter(call=>call.result?.kind==='text').at(-1).result.blocks")
+        rendered = js("return [...document.querySelectorAll('.lens-block')].map(node=>node.textContent)")
+        assert len(blocks) >= 3 and '안녕하세요' in blocks[0]['text'] and all(word in ''.join(b['text'] for b in blocks) for word in ['한국어', 'Local translation', '画像']), blocks
+        assert all(re.search('[ぁ-んァ-ヶ一-龯]', text) and not re.search('[가-힣]', text) for text in rendered[:2]), rendered
+        check('Korean, English and Japanese are read together and Korean is translated into Japanese', {'blocks': blocks, 'translations': rendered})
+        desktop_image('lens-korean.png')
+
+        select_window('main')
+        invoke('set_korean_ocr', {'enabled': False})
+        select_window('lens')
 
     source('vertical')
     target('en')

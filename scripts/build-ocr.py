@@ -52,10 +52,8 @@ def main():
         cached = download(name, f"https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.10.0/onnx/PP-OCRv6/{task}/{name}", checksum)
         shutil.copy2(cached, models / name)
     korean = 'korean_PP-OCRv5_rec_mobile.onnx'
-    cached = download(korean,
-        f'https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.10.0/onnx/PP-OCRv5/rec/{korean}',
-        KOREAN_SHA256)
-    shutil.copy2(cached, models / korean)
+    # Korean recognition is an optional in-app download, not a bundled weight.
+    (models / korean).unlink(missing_ok=True)
     (models / 'KOREAN_NOTICE.txt').write_text(
         'Korean PP-OCRv5 mobile: copyright Baidu / PaddleOCR rights holders, Apache-2.0.\n'
         'Upstream: https://huggingface.co/PaddlePaddle/korean_PP-OCRv5_mobile_rec\n'
@@ -93,21 +91,21 @@ if license.is_file(): shutil.copy2(license,out/'Python-LICENSE.txt')
 ''', str(bundle / "licenses")], check=True)
     # Smoke test the frozen executable, with the same pipe protocol as the app.
     request = ''.join(json.dumps({'path': str(ROOT / f'tests/fixtures/ocr-{name}.png')}) + '\n'
-                      for name in ['japanese', 'korean-mixed'])
+                      for name in ['japanese', 'english'])
     smoke = subprocess.run([str(bundle / executable), str(models)], input=request,
                            capture_output=True, text=True, encoding="utf-8", check=True, timeout=60)
     responses = [json.loads(line)['blocks'] for line in smoke.stdout.splitlines()]
     if len(responses) != 2 or not any('画像' in block['text'] for block in responses[0]) or not all(
-            any(word in block['text'] for block in responses[1]) for word in ['안녕하세요', '한국어', 'Local translation', '画像']):
+            any(word in block['text'] for block in responses[1]) for word in ['Local translation']):
         raise SystemExit("Bundled OCR smoke test failed.")
     destination = OUTPUT / "ocr"
     if destination.exists():
         shutil.rmtree(destination)
     shutil.copytree(bundle, destination, symlinks=True)
     (OUTPUT / "OCR_VERSION").write_text(
-        "PP-OCRv6 small + Korean PP-OCRv5 mobile (RapidOCR 3.10.0 / ONNX Runtime 1.23.2)\n" +
+        "PP-OCRv6 small (RapidOCR 3.10.0 / ONNX Runtime 1.23.2)\n" +
         "\n".join(f"{task} {checksum}" for task, checksum in MODELS.items()) +
-        f"\nkorean-rec {KOREAN_SHA256}\n", encoding="utf-8")
+        f"\noptional-korean-rec {KOREAN_SHA256}\n", encoding="utf-8")
     # Remove obsolete bundled OCR files when updating an existing source checkout.
     for name in ["tesseract", "tessdata", "tesseract-LICENSE", "leptonica-LICENSE"]:
         old = OUTPUT / name

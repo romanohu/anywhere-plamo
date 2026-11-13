@@ -194,7 +194,7 @@ class MultilingualOCR(RapidOCR):
 
 
 class Ocr:
-    def __init__(self, models):
+    def __init__(self, models, korean_path=None):
         params = {'Global.use_cls': False, 'Global.log_level': 'error',
                   'Global.model_root_dir': str(models),
                   'EngineConfig.onnxruntime.intra_op_num_threads': 2,
@@ -206,7 +206,9 @@ class Ocr:
                 raise FileNotFoundError(path.name)
             params.update({f'{task}.model_path': str(path), f'{task}.ocr_version': OCRVersion.PPOCRV6,
                            f'{task}.model_type': ModelType.SMALL})
-        korean_path = models / 'korean_PP-OCRv5_rec_mobile.onnx'
+        if korean_path is None:
+            self.engine = RapidOCR(params=params)
+            return
         if not korean_path.is_file():
             raise FileNotFoundError(korean_path.name)
         korean = {**params, 'Global.use_det': False, 'Rec.model_path': str(korean_path),
@@ -248,7 +250,7 @@ def main():
     # Pipe JSON is UTF-8 on every OS, including Japanese Windows installations.
     sys.stdin.reconfigure(encoding="utf-8")
     sys.stdout.reconfigure(encoding="utf-8")
-    ocr = Ocr(Path(sys.argv[1]))
+    ocr = Ocr(Path(sys.argv[1]), Path(sys.argv[2]) if len(sys.argv) > 2 else None)
     for request in sys.stdin:
         try:
             blocks = ocr.recognize(Path(json.loads(request)['path']))

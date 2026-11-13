@@ -113,7 +113,6 @@ pub fn ready(runtime: &Path) -> bool {
         ocr::EXECUTABLE,
         "ocr-models/PP-OCRv6_det_small.onnx",
         "ocr-models/PP-OCRv6_rec_small.onnx",
-        "ocr-models/korean_PP-OCRv5_rec_mobile.onnx",
     ]
     .iter()
     .all(|file| runtime.join(file).is_file())
@@ -653,7 +652,6 @@ mod tests {
         for (name, expected) in [
             ("english", "Local translation"),
             ("japanese", "画像"),
-            ("korean-mixed", "한국어 문장을 일본어로 번역합니다"),
             ("columns", "speech bubble"),
             ("vertical", "画像の文字を翻訳します日本語を英語に変換する"),
         ] {

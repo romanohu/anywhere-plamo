@@ -21,7 +21,8 @@ async function fixture(t, options = {}) {
   console.on('jsdomError', error => errors.push(error));
   const dom = new JSDOM(html, { url: `http://localhost/${options.lensSelect ? '?lens-select' : options.lens ? '?lens' : options.popup ? '?popup' : ''}`, runScripts: 'outside-only', virtualConsole: console });
   const { window } = dom;
-  window.requestAnimationFrame = callback => { queueMicrotask(() => callback(0)); return 0; };
+  const frames = [];
+  window.requestAnimationFrame = callback => { if (options.manualFrames) frames.push(callback); else queueMicrotask(() => callback(0)); return 0; };
   window.HTMLElement.prototype.setPointerCapture = () => {};
   window.HTMLElement.prototype.scrollIntoView = () => {};
   if (options.lens && !options.autoLens) window.localStorage.setItem('lens-auto', 'false');
@@ -71,6 +72,7 @@ async function fixture(t, options = {}) {
   let finishRecording;
   let finishCapture;
   const channels = [];
+  let korean = { ready: false, enabled: false, ...options.korean };
   const native = {
     core: {
       Channel: class { onmessage = () => {}; },
@@ -78,6 +80,18 @@ async function fixture(t, options = {}) {
         calls.push({ command, args });
         switch (command) {
           case 'get_status': return { ...state };
+          case 'get_korean_ocr': return { ...korean };
+          case 'set_korean_ocr':
+            if (options.koreanError) throw options.koreanError;
+            korean.enabled = args.enabled;
+            return { ...korean };
+          case 'remove_korean_ocr': korean = { ready: false, enabled: false }; return { ...korean };
+          case 'download_korean_ocr':
+            channel = args.onEvent;
+            return new Promise((resolve, reject) => {
+              finishOperation = () => { korean = { ready: true, enabled: true }; resolve({ ...korean }); };
+              rejectOperation = reject;
+            });
           case 'check_update':
             if (options.updateError) throw options.updateError;
             return options.updateVersion ?? null;
@@ -163,6 +177,7 @@ async function fixture(t, options = {}) {
   t.after(() => { dom.window.close(); assert.deepEqual(errors, []); });
   return {
     window, byId, calls, state, channels,
+    paint() { frames.splice(0).forEach(callback => callback(0)); },
     advance(milliseconds) { now += milliseconds; },
     input(text) { byId('source').value = text; byId('source').dispatchEvent(new window.Event('input')); },
     click(id) { byId(id).focus(); byId(id).click(); },
@@ -1201,7 +1216,7 @@ test('copied prefixes stay hidden until translated text arrives and unchanged bl
   f.send({ kind: 'token', text: 'NASA' });
   assert.equal(f.byId('lens-result').hidden, true);
   f.send({ kind: 'token', text: 'がロケットを打ち上げます。' });
-  assert.equal(f.byId('lens-result').hidden, false);
+  await until(() => !f.byId('lens-result').hidden);
   f.finish({ truncated: false });
   await until(() => f.calls.filter(call => call.command === 'translate').length === 2);
   f.send({ kind: 'token', text: '12345' });
@@ -1713,5 +1728,69 @@ test('lens never loops when the sentence-case retry is copied too', async t => {
   f.finish({ truncated: false });
   await until(() => f.byId('lens-status').textContent.startsWith('更新しました'));
   assert.equal(f.calls.filter(call => call.command === 'translate').length, 2);
+  assert.equal(f.byId('lens-translation').textContent, '');
+});
+
+test('Korean OCR downloads only on request, can be disabled without deleting, and re-enabled offline', async t => {
+  const f = await fixture(t);
+  await until(() => f.calls.some(call => call.command === 'get_korean_ocr'));
+  assert.equal(f.calls.some(call => call.command === 'download_korean_ocr'), false);
+  assert.equal(f.byId('korean-ocr').checked, false);
+  assert.equal(f.byId('korean-ocr').disabled, true);
+  f.click('korean-download');
+  await until(() => f.calls.some(call => call.command === 'download_korean_ocr'));
+  f.send({ kind: 'download', received: 50, total: 100 });
+  assert.match(f.byId('korean-message').textContent, /50%/);
+  f.finish();
+  await until(() => f.byId('korean-ocr').checked);
+  assert.equal(f.byId('korean-download').hidden, true);
+  f.click('korean-ocr');
+  await until(() => !f.byId('korean-remove').hidden);
+  assert.equal(f.byId('korean-download').hidden, true);
+  f.click('korean-ocr');
+  await until(() => f.byId('korean-ocr').checked && !f.byId('korean-ocr').disabled);
+  assert.equal(f.calls.filter(call => call.command === 'download_korean_ocr').length, 1);
+  f.click('korean-ocr');
+  await until(() => !f.byId('korean-remove').hidden);
+  f.click('korean-remove');
+  await until(() => !f.byId('korean-download').hidden);
+  assert.equal(f.byId('korean-ocr').disabled, true);
+});
+
+test('cancelled Korean download stays off and allows retry', async t => {
+  const f = await fixture(t);
+  f.click('korean-download');
+  await until(() => f.calls.some(call => call.command === 'download_korean_ocr'));
+  f.click('korean-cancel');
+  await until(() => f.byId('korean-message').textContent.includes('中止しました'));
+  assert.equal(f.byId('korean-ocr').checked, false);
+  assert.equal(f.byId('korean-download').disabled, false);
+  assert.equal(f.byId('korean-cancel').hidden, true);
+});
+
+test('Korean toggle failure restores saved state', async t => {
+  const f = await fixture(t, { korean: { ready: true, enabled: true }, koreanError: '保存できません' });
+  await until(() => f.byId('korean-ocr').checked);
+  f.click('korean-ocr');
+  await until(() => f.byId('korean-message').textContent.includes('保存できません'));
+  assert.equal(f.byId('korean-ocr').checked, true);
+  assert.equal(f.byId('korean-remove').hidden, true);
+});
+
+test('lens batches streamed text per frame and discards paints after a move', async t => {
+  const f = await fixture(t, { lens: true, holdTranslation: true, manualFrames: true });
+  f.click('lens-refresh');
+  await until(() => f.calls.some(call => call.command === 'translate'));
+  f.send({ kind: 'token', text: '最初' });
+  f.send({ kind: 'token', text: 'の訳文' });
+  assert.equal(f.byId('lens-translation').textContent, '');
+  f.paint();
+  assert.equal(f.byId('lens-translation').textContent, '最初の訳文');
+  f.send({ kind: 'token', text: 'の続き' });
+  f.finish({ truncated: false });
+  await until(() => f.byId('lens-status').textContent.startsWith('更新しました'));
+  assert.equal(f.byId('lens-translation').textContent, '最初の訳文の続き', 'completion flushes even when frames are throttled');
+  f.moveLens();
+  f.paint();
   assert.equal(f.byId('lens-translation').textContent, '');
 });

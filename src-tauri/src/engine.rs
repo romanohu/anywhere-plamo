@@ -1,6 +1,7 @@
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::{
+    collections::VecDeque,
     net::TcpListener,
     path::Path,
     process::{Child, Command, Stdio},
@@ -25,6 +26,38 @@ pub struct Engine {
     url: String,
     key: String,
     client: reqwest::Client,
+    cache: TranslationCache,
+}
+
+// Session-only, shared by all windows. Bound both entry count and UTF-8 bytes.
+#[derive(Default)]
+struct TranslationCache(VecDeque<(String, String, String)>);
+
+impl TranslationCache {
+    fn get(&mut self, text: &str, target: &str) -> Option<String> {
+        let index = self
+            .0
+            .iter()
+            .position(|(source, language, _)| source == text && language == target)?;
+        let entry = self.0.remove(index)?;
+        let output = entry.2.clone();
+        self.0.push_back(entry);
+        Some(output)
+    }
+
+    fn insert(&mut self, text: &str, target: &str, output: String) {
+        self.0.push_back((text.into(), target.into(), output));
+        let mut bytes: usize = self
+            .0
+            .iter()
+            .map(|(s, t, o)| s.len() + t.len() + o.len())
+            .sum();
+        while self.0.len() > 128 || bytes > 2 * 1024 * 1024 {
+            if let Some((s, t, o)) = self.0.pop_front() {
+                bytes -= s.len() + t.len() + o.len();
+            }
+        }
+    }
 }
 
 impl Drop for Engine {
@@ -106,6 +139,7 @@ impl Engine {
             url: format!("http://127.0.0.1:{port}"),
             key,
             client,
+            cache: TranslationCache::default(),
         };
         let started = Instant::now();
         loop {
@@ -132,17 +166,32 @@ impl Engine {
     }
 
     pub async fn translate(
-        &self,
+        &mut self,
         text: &str,
         target: &str,
         channel: &Channel<ProgressEvent>,
         cancel: &CancellationToken,
     ) -> Result<TranslationResult, String> {
-        tokio::select! {
+        protocol::prompt(text, target)?;
+        if cancel.is_cancelled() {
+            return Err("CANCELLED".into());
+        }
+        if let Some(output) = self.cache.get(text, target) {
+            channel
+                .send(ProgressEvent::Token { text: output })
+                .map_err(|_| "画面との接続が切れました。")?;
+            return Ok(TranslationResult { truncated: false });
+        }
+        let mut output = String::new();
+        let result = tokio::select! {
             biased;
             _ = cancel.cancelled() => Err("CANCELLED".into()),
-            result = self.translate_text(text, target, channel, cancel) => result,
+            result = self.translate_text(text, target, channel, cancel, &mut output) => result,
+        }?;
+        if !result.truncated && !output.trim().is_empty() && !cancel.is_cancelled() {
+            self.cache.insert(text, target, output);
         }
+        Ok(result)
     }
 
     async fn translate_text(
@@ -151,11 +200,14 @@ impl Engine {
         target: &str,
         channel: &Channel<ProgressEvent>,
         cancel: &CancellationToken,
+        output: &mut String,
     ) -> Result<TranslationResult, String> {
         let prompt = protocol::prompt(text, target)?;
         let input_length = self.input_length(&prompt).await?;
         if input_length <= protocol::MAX_INPUT_TOKENS {
-            return self.translate_inner(&prompt, input_length, channel).await;
+            return self
+                .translate_inner(&prompt, input_length, channel, output)
+                .await;
         }
         let mut chunks = Vec::new();
         for part in protocol::paragraphs(text) {
@@ -189,16 +241,21 @@ impl Engine {
                     prompt,
                     input_length,
                 } => {
-                    let result = self.translate_inner(&prompt, input_length, channel).await?;
+                    let result = self
+                        .translate_inner(&prompt, input_length, channel, output)
+                        .await?;
                     if result.truncated {
                         return Ok(result);
                     }
                 }
-                TranslationChunk::Separator(text) => channel
-                    .send(ProgressEvent::Token {
-                        text: text.to_owned(),
-                    })
-                    .map_err(|_| "画面との接続が切れました。")?,
+                TranslationChunk::Separator(text) => {
+                    channel
+                        .send(ProgressEvent::Token {
+                            text: text.to_owned(),
+                        })
+                        .map_err(|_| "画面との接続が切れました。")?;
+                    output.push_str(text);
+                }
             }
         }
         Ok(TranslationResult { truncated: false })
@@ -229,6 +286,7 @@ impl Engine {
         prompt: &str,
         input_length: usize,
         channel: &Channel<ProgressEvent>,
+        output: &mut String,
     ) -> Result<TranslationResult, String> {
         let mut response = self
             .client
@@ -256,6 +314,7 @@ impl Engine {
                     &mut completed,
                     &mut truncated,
                     &mut received_text,
+                    output,
                 )?;
                 if completed {
                     break;
@@ -273,6 +332,7 @@ impl Engine {
                     &mut completed,
                     &mut truncated,
                     &mut received_text,
+                    output,
                 )?;
                 if completed {
                     break;
@@ -296,6 +356,7 @@ impl Engine {
         completed: &mut bool,
         truncated: &mut bool,
         received_text: &mut bool,
+        output: &mut String,
     ) -> Result<(), String> {
         if event == "[DONE]" {
             return if *completed {
@@ -322,6 +383,7 @@ impl Engine {
             .filter(|text| !text.is_empty())
         {
             *received_text = true;
+            output.push_str(text);
             channel
                 .send(ProgressEvent::Token {
                     text: text.to_owned(),
@@ -349,6 +411,23 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tauri::ipc::InvokeResponseBody;
 
+    #[test]
+    fn translation_cache_separates_languages_and_bounds_memory() {
+        let mut cache = TranslationCache::default();
+        cache.insert("Hello", "ja", "こんにちは".into());
+        cache.insert("Hello", "ko", "안녕하세요".into());
+        assert_eq!(cache.get("Hello", "ja").as_deref(), Some("こんにちは"));
+        assert!(cache.get("Hello", "en").is_none());
+        assert!(cache.get("Hello!", "ja").is_none());
+        for i in 0..127 {
+            cache.insert(&i.to_string(), "ja", "訳文".into());
+        }
+        assert!(cache.get("Hello", "ko").is_none());
+        assert!(cache.get("Hello", "ja").is_some());
+        cache.insert("long", "ja", "x".repeat(2 * 1024 * 1024));
+        assert!(cache.0.is_empty());
+    }
+
     fn channel() -> (Channel<ProgressEvent>, Arc<Mutex<Vec<String>>>) {
         let texts = Arc::new(Mutex::new(Vec::new()));
         let output = texts.clone();
@@ -371,6 +450,7 @@ mod tests {
     fn streams_text_and_requires_a_known_finish_reason() {
         for reason in ["stop", "length"] {
             let (channel, texts) = channel();
+            let mut output = String::new();
             let (mut completed, mut truncated, mut received) = (false, false, false);
             Engine::handle_event(
                 r#"{"choices":[{"text":"こんにちは","finish_reason":null}]}"#,
@@ -378,6 +458,7 @@ mod tests {
                 &mut completed,
                 &mut truncated,
                 &mut received,
+                &mut output,
             )
             .unwrap();
             assert!(!completed);
@@ -388,17 +469,20 @@ mod tests {
                 &mut completed,
                 &mut truncated,
                 &mut received,
+                &mut output,
             )
             .unwrap();
             assert!(completed);
             assert_eq!(truncated, reason == "length");
             assert_eq!(*texts.lock().unwrap(), ["こんにちは", "🍃"]);
+            assert_eq!(output, "こんにちは🍃");
             Engine::handle_event(
                 "[DONE]",
                 &channel,
                 &mut completed,
                 &mut truncated,
                 &mut received,
+                &mut output,
             )
             .unwrap();
         }
@@ -414,6 +498,7 @@ mod tests {
             &mut completed,
             &mut truncated,
             &mut received,
+            &mut String::new(),
         )
         .unwrap();
         assert!(Engine::handle_event(
@@ -422,6 +507,7 @@ mod tests {
             &mut completed,
             &mut truncated,
             &mut received,
+            &mut String::new(),
         )
         .is_err());
         assert!(!completed);
@@ -445,6 +531,7 @@ mod tests {
                 &mut completed,
                 &mut truncated,
                 &mut received,
+                &mut String::new(),
             )
             .is_err());
             assert!(!completed);
