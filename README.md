@@ -56,6 +56,8 @@ Windowsでは`py -3.12 scripts/collect-licenses.py`の後、`npm run tauri -- bu
 
 ### Android（開発版）
 
+Android 9以降のARM64端末向けAPKは[Releases](https://github.com/romanohu/anywhere-plamo/releases)から取得できます。
+
 Android版のビルドには、上記に加えてJDK 17以上、Android SDK（API 36・Build Tools 36.0.0）、NDK r28以上、Ninjaが必要です。`JAVA_HOME`・`ANDROID_HOME`・`NDK_HOME`を設定して実行します。Android 9以降の64bit端末が対象です。実機での動作・発熱は未確認です。
 
 ```sh
@@ -66,6 +68,8 @@ npm run tauri -- android build --debug --apk --target aarch64
 ```
 
 検証用APKは`src-tauri/gen/android/app/build/outputs/apk/universal/debug/`に生成されます。翻訳モデルは初回起動後に取得します。Android版は文章の入力・貼り付けとカメラ翻訳に対応します。
+
+署名付きAPKの作成は[Android配布手順](docs/android-testing.md#配布用apk)を参照してください。
 
 ## 使い方
 
