@@ -699,6 +699,11 @@ async function init(): Promise<void> {
       resetResult();
       void translate();
     });
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) return;
+      if (status.platform === 'android') camera?.suspend();
+      else void camera?.close();
+    });
     await onClipboardRequest(() => {
       if (!initialized) return;
       if (camera?.active) void camera.close().then(takePending).catch(showError);

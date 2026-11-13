@@ -306,8 +306,10 @@ fn open_model_license(app: tauri::AppHandle) -> Result<(), String> {
 #[tauri::mobile_entry_point]
 pub fn run() {
     tauri::Builder::default()
+        .manage(camera::PermissionOrigin::default())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_plamo_ocr::init())
+        .on_page_load(camera::page_load)
         .on_permission_request(camera::permission)
         .invoke_handler(tauri::generate_handler![
             get_status,

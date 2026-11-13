@@ -60,18 +60,46 @@ impl Drop for Capture {
     }
 }
 
+fn local_page(url: &tauri::Url) -> bool {
+    url.scheme() == "tauri"
+        || matches!(
+            url.host_str(),
+            Some("tauri.localhost" | "localhost" | "127.0.0.1")
+        )
+}
+
+#[cfg(target_os = "android")]
+#[derive(Default)]
+pub struct PermissionOrigin(std::sync::atomic::AtomicBool);
+
+#[cfg(target_os = "android")]
+pub fn page_load(webview: &tauri::Webview, payload: &tauri::webview::PageLoadPayload<'_>) {
+    use tauri::Manager;
+    if webview.label() == "main" {
+        webview.state::<PermissionOrigin>().0.store(
+            payload.event() == tauri::webview::PageLoadEvent::Finished && local_page(payload.url()),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+}
+
 pub fn permission(
     webview: tauri::Webview,
     kind: tauri::webview::PermissionKind,
 ) -> tauri::webview::PermissionResponse {
     use tauri::webview::{PermissionKind, PermissionResponse};
-    let local = webview.url().is_ok_and(|url| {
-        url.scheme() == "tauri"
-            || matches!(
-                url.host_str(),
-                Some("tauri.localhost" | "localhost" | "127.0.0.1")
-            )
-    });
+    // Android calls this from its UI thread. Querying webview.url() here waits
+    // for that same thread and deadlocks; use the native page-load URL instead.
+    #[cfg(target_os = "android")]
+    let local = {
+        use tauri::Manager;
+        webview
+            .state::<PermissionOrigin>()
+            .0
+            .load(std::sync::atomic::Ordering::Relaxed)
+    };
+    #[cfg(not(target_os = "android"))]
+    let local = webview.url().is_ok_and(|url| local_page(&url));
     if webview.label() == "main" && local && matches!(kind, PermissionKind::Camera) {
         PermissionResponse::Allow
     } else {

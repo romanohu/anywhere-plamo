@@ -1884,11 +1884,28 @@ test('Android camera permission pause keeps the request open, then backgrounding
   await until(() => f.cameraRequests.length === 1);
   f.closeWindow();
   assert.equal(f.byId('camera-dialog').open, true);
+  Object.defineProperty(f.window.document, 'hidden', { configurable: true, value: true });
+  f.window.document.dispatchEvent(new f.window.Event('visibilitychange'));
+  assert.equal(f.byId('camera-dialog').open, true);
+  Object.defineProperty(f.window.document, 'hidden', { configurable: true, value: false });
+  f.window.document.dispatchEvent(new f.window.Event('visibilitychange'));
   f.finishCamera();
   await until(() => !f.byId('camera-capture').disabled);
   f.closeWindow();
   assert.equal(f.cameraStreams[0].track.stopped, 1);
   assert.equal(f.byId('camera-dialog').open, false);
+});
+
+test('Android releases a late camera permission when the app remains in the background', async t => {
+  const f = await fixture(t, { camera: true, holdCamera: true, status: { platform: 'android' } });
+  f.click('camera-button');
+  await until(() => f.cameraRequests.length === 1);
+  Object.defineProperty(f.window.document, 'hidden', { value: true });
+  f.window.document.dispatchEvent(new f.window.Event('visibilitychange'));
+  f.finishCamera();
+  await until(() => f.cameraStreams[0].track.stopped === 1);
+  assert.equal(f.byId('camera-dialog').open, false);
+  assert.equal(f.calls.some(c => c.command === 'recognize_camera'), false);
 });
 
 test('automatic camera waits for stability, avoids unchanged work and cancels stale translations on movement', async t => {

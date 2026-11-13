@@ -148,6 +148,7 @@ export function initCamera(onText: (text: string, language: string) => void): { 
       } });
       if (run !== generation || !dialog.open || document.hidden) {
         acquired.getTracks().forEach(track => track.stop());
+        if (run === generation && document.hidden) void close();
         return;
       }
       stream = acquired;
@@ -294,12 +295,11 @@ export function initCamera(onText: (text: string, language: string) => void): { 
   dialog.addEventListener('cancel', event => { event.preventDefault(); void close(); });
   dialog.addEventListener('close', () => { stopCamera(); void cancelWork(); });
   video.addEventListener('resize', resize);
-  document.addEventListener('visibilitychange', () => { if (document.hidden) void close(); });
   window.addEventListener('pagehide', () => { void close(); });
   return {
     close,
     // Android also pauses the activity while the camera permission prompt is open.
-    // Keep that request alive; a hidden document still cancels it in start().
+    // Keep that request alive; start() releases it if the app remains hidden.
     suspend() { if (stream || work || frozen || paused) void close(); },
     get active() { return dialog.open || work !== null || cancellation !== null; },
   };
