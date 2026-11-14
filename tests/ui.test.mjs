@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { JSDOM, VirtualConsole } from 'jsdom';
+import { SourceTextModule } from 'node:vm';
 
 const html = readFileSync(new URL('../dist/index.html', import.meta.url), 'utf8');
 const script = html.match(/<script[^>]+src="([^"]+)"/)[1];
@@ -45,6 +46,14 @@ async function fixture(t, options = {}) {
   let cameraPixel = 0;
   let finishCamera;
   let finishCameraRead;
+  if (options.document) {
+    window.URL.createObjectURL = () => 'blob:document-test';
+    window.URL.revokeObjectURL = () => {};
+    window.Image = class { naturalWidth = 800; naturalHeight = 600; async decode() { if (options.documentDecodeError) throw new Error('画像を読み込めません'); } };
+    window.HTMLCanvasElement.prototype.getContext = () => ({ drawImage() {}, fillRect() {}, save() {}, restore() {}, translate() {}, rotate() {},
+      measureText: text => ({ width: Array.from(text).length * 6 }), getImageData: () => ({ data: [255, 255, 255, 255] }) });
+    window.HTMLCanvasElement.prototype.toBlob = callback => callback(new window.Blob(['image'], { type: 'image/png' }));
+  }
   if (options.camera) {
     Object.defineProperty(window.document, 'hidden', { configurable: true, value: false });
     window.localStorage.setItem('camera-auto', String(!!options.autoCamera));
@@ -159,7 +168,7 @@ async function fixture(t, options = {}) {
             if (options.cameraReadError) throw options.cameraReadError;
             const blocks = options.cameraBlocks ?? [{ text: 'Hello, world.', x: .1, y: .2, width: .6, height: .1 }];
             if (options.holdCameraRead) return new Promise((resolve, reject) => { finishCameraRead = () => resolve(blocks); rejectOperation = reject; });
-            return blocks;
+            return options.document ? blocks.map(block => ({ ...block, regions: block.regions ?? [block] })) : blocks;
           }
           case 'set_shortcut_recording':
             if (args.recording && options.holdRecording) return new Promise(resolve => { finishRecording = resolve; });
@@ -227,12 +236,40 @@ async function fixture(t, options = {}) {
     event: { listen: async (event, callback) => { listeners.set(event, callback); return () => listeners.delete(event); } },
   };
   if (!options.browser) window.__TAURI__ = native;
-  window.eval(bundle);
+  // Run the production ES modules, including lazy PDF imports, in this window.
+  const modules = new Map();
+  async function loadModule(url, code) {
+    if (modules.has(url)) return modules.get(url);
+    const module = new SourceTextModule(code ?? readFileSync(new URL(`../dist${new URL(url).pathname}`, import.meta.url), 'utf8'), {
+      context: dom.getInternalVMContext(), identifier: url,
+      initializeImportMeta: meta => { meta.url = url; },
+      importModuleDynamically: async (specifier, parent) => {
+        const child = await loadModule(new URL(specifier, parent.identifier).href);
+        if (child.status === 'linked') await child.evaluate();
+        return child;
+      },
+    });
+    modules.set(url, module);
+    await module.link((specifier, parent) => loadModule(new URL(specifier, parent.identifier).href));
+    return module;
+  }
+  await (await loadModule(new URL(script, window.location.href).href, bundle)).evaluate();
   await until(() => options.browser || options.lensSelect || calls.some(call => call.command === (options.lens ? 'apply_lens_selection' : 'take_pending_clipboard')));
   t.after(() => { dom.window.close(); assert.deepEqual(errors, []); });
   return {
     window, byId, calls, state, channels,
     cameraStreams, cameraRequests, cameraEncodings,
+    openDocument(name = 'page.png', drop = false) {
+      const file = new window.File(['image'], name, { type: 'image/png' });
+      if (drop) {
+        const event = new window.Event('drop', { bubbles: true, cancelable: true });
+        Object.defineProperty(event, 'dataTransfer', { value: { types: ['Files'], files: [file] } });
+        window.document.dispatchEvent(event);
+      } else {
+        Object.defineProperty(byId('document-file'), 'files', { configurable: true, value: [file] });
+        byId('document-file').dispatchEvent(new window.Event('change'));
+      }
+    },
     finishCameraEncode(index = cameraEncodings.length - 1) { cameraEncodings[index].finish(); },
     finishCamera() { finishCamera(); },
     finishCameraRead() { finishCameraRead(); },
@@ -2323,4 +2360,58 @@ test('losing the camera device cancels work and allows reopening without stale r
   assert.equal(f.byId('camera-paragraphs').querySelector('span').textContent, '');
   f.click('camera-retry'); await until(() => f.cameraStreams.length === 2 && f.byId('camera-video').srcObject);
   assert.equal(f.cameraStreams[0].track.stopped, 1);
+});
+
+test('image documents translate locally, toggle the original, reveal paragraphs and copy', async t => {
+  const f = await fixture(t, { document: true });
+  f.openDocument('image.png', true);
+  await until(() => f.byId('document-status').textContent === '翻訳完了');
+  assert.ok(f.calls.some(c => c.command === 'recognize_camera'));
+  assert.ok(f.calls.some(c => c.command === 'translate'));
+  f.click('document-original');
+  assert.equal(f.byId('document-overlay').hidden, true);
+  f.click('document-original');
+  f.window.document.querySelector('.document-block').click();
+  assert.equal(f.byId('document-detail').hidden, false);
+  assert.ok(f.byId('document-source').textContent);
+  assert.ok(f.byId('document-output').textContent);
+  f.click('document-copy');
+  await until(() => f.byId('document-status').textContent.includes('コピーしました'));
+  assert.ok(f.clipboard());
+  f.click('document-close');
+  await until(() => !f.byId('document-dialog').open && f.byId('document-canvas').width === 0);
+});
+
+test('document cancellation waits for inference before a new file can run', async t => {
+  const f = await fixture(t, { document: true, holdTranslation: true });
+  f.openDocument();
+  await until(() => f.calls.some(c => c.command === 'translate'));
+  const before = f.calls.filter(c => c.command === 'translate').length;
+  f.openDocument('another.png');
+  assert.equal(f.calls.filter(c => c.command === 'translate').length, before);
+  f.click('document-close');
+  await until(() => f.byId('document-canvas').width === 0);
+  assert.ok(f.calls.some(c => c.command === 'cancel_operation'));
+  assert.equal(f.byId('document-overlay').children.length, 0);
+});
+
+test('unsupported document files fail without invoking OCR or translation and can be replaced', async t => {
+  const f = await fixture(t, { document: true });
+  f.openDocument('script.svg');
+  await until(() => f.byId('document-status').textContent.includes('PDF・PNG'));
+  assert.ok(!f.calls.some(c => c.command === 'recognize_camera' || c.command === 'translate'));
+  assert.equal(f.byId('document-open').disabled, false);
+  f.openDocument('valid.png');
+  await until(() => f.byId('document-status').textContent === '翻訳完了');
+});
+
+test('editor hotkeys do not start another translation while a document is open', async t => {
+  const f = await fixture(t, { document: true, holdTranslation: true });
+  f.openDocument();
+  await until(() => f.calls.some(c => c.command === 'translate'));
+  f.key('Enter', { ctrlKey: true });
+  assert.equal(f.calls.filter(c => c.command === 'translate').length, 1);
+  f.click('document-close');
+  await until(() => f.byId('document-canvas').width === 0);
+  assert.equal(f.byId('document-dialog').open, false);
 });

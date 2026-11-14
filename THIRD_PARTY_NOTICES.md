@@ -5,6 +5,7 @@ The MIT license in this repository covers Anywhere Plamo's original source code.
 | Component | License | Source |
 | --- | --- | --- |
 | Tauri and its official plugins | MIT / Apache-2.0 | https://github.com/tauri-apps |
+| PDF.js | Apache-2.0; bundled fonts and image decoders retain their own notices in `pdfjs/` | https://github.com/mozilla/pdf.js |
 | llama.cpp | MIT; vendored components retain their own notices | https://github.com/ggml-org/llama.cpp |
 | PaddleOCR PP-OCRv6 small / Korean PP-OCRv5 mobile / RapidOCR | Apache-2.0; upstream weights belong to Baidu / PaddleOCR rights holders | https://github.com/PaddlePaddle/PaddleOCR · https://github.com/RapidAI/RapidOCR |
 | ONNX Runtime | MIT | https://github.com/microsoft/onnxruntime |

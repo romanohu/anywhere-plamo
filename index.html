@@ -13,6 +13,7 @@
       <header class="app-header">
         <span class="brand">Anywhere Plamo</span>
         <div class="header-actions">
+          <button class="text-button" id="document-button" hidden>ファイル</button>
           <button class="text-button" id="camera-button" hidden>カメラ</button>
           <button class="text-button" id="lens-button" hidden>OCRレンズ</button>
           <button class="text-button" id="dictionary-button">辞書</button>
@@ -87,6 +88,20 @@
       <div id="lens-select-box" hidden></div>
       <p id="lens-select-hint" role="status"></p>
     </section>
+
+    <input type="file" id="document-file" accept=".pdf,.png,.jpg,.jpeg,.webp" hidden />
+    <dialog id="document-dialog" aria-labelledby="document-title">
+      <div class="dialog-header"><h2 id="document-title">PDF・画像</h2><button class="text-button" id="document-open">開く</button><button class="icon-button" id="document-close" aria-label="ファイルを閉じる"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
+      <div class="document-toolbar">
+        <div class="document-navigation"><button class="icon-button" id="document-previous" aria-label="前のページ">‹</button><input id="document-page" type="number" min="1" value="1" aria-label="ページ" /><span id="document-pages">/ 1</span><button class="icon-button" id="document-next" aria-label="次のページ">›</button></div>
+        <select id="document-target" aria-label="ファイルの翻訳先の言語"></select><button class="text-button" id="document-original" aria-pressed="false">原文</button>
+        <div class="document-zoom-controls"><button class="icon-button" id="document-zoom-out" aria-label="縮小">−</button><button class="text-button" id="document-zoom" title="幅に合わせる">100%</button><button class="icon-button" id="document-zoom-in" aria-label="拡大">＋</button></div>
+      </div>
+      <div id="document-view"><div id="document-stage"><canvas id="document-canvas" aria-label="元のページ"></canvas><div id="document-overlay"></div></div></div>
+      <section id="document-detail" aria-label="選択した段落" hidden><button class="icon-button" id="document-detail-close" aria-label="段落を閉じる">×</button><p id="document-output" dir="auto" tabindex="0"></p><details><summary>原文</summary><p id="document-source" dir="auto"></p></details></section>
+      <p id="document-status" role="status" aria-live="polite"></p>
+      <div class="document-actions"><button class="text-button" id="document-rotate">回転</button><button class="text-button" id="document-ocr">画像から読む</button><button class="text-button" id="document-copy">訳文をコピー</button><button class="button small" id="document-translate">訳し直す</button></div>
+    </dialog>
 
     <dialog id="camera-dialog" aria-labelledby="camera-title">
       <div class="dialog-header"><h2 id="camera-title">カメラ</h2><button class="icon-button" id="camera-close" aria-label="カメラを閉じる"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>

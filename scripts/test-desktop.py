@@ -4,6 +4,7 @@
 Openbox + xcompmgr), bundled OCR, and a downloaded model under --work-dir/app-data.
 """
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -23,6 +24,7 @@ parser.add_argument('--app', type=Path, default=ROOT / 'src-tauri/target/debug/a
 parser.add_argument('--comic', type=Path, help='Optional local PHD comic 156 image for OCR lens regression checks')
 parser.add_argument('--korean-model', type=Path, help='Optional Korean ONNX weight for offline lens tests')
 parser.add_argument('--camera', action='store_true', help='Use fixture video frames with real local OCR and translation')
+parser.add_argument('--document', action='store_true', help='Test local PDF/image loading, replacement, OCR and cancellation')
 parser.add_argument('--lens', action='store_true', help='Test manual and automatic OCR with the bundled runtime and a prepared model')
 parser.add_argument('--work-dir', type=Path, default=ROOT / '.runtime-build/desktop-test')
 args = parser.parse_args()
@@ -735,6 +737,83 @@ def lens_checks():
     desktop_image('lens-large.png')
     print('ALL LENS DESKTOP CHECKS PASSED', flush=True)
 
+def document_checks():
+    def upload(path, drop=False):
+        js("""const bytes=Uint8Array.from(atob(arguments[0]), c=>c.charCodeAt(0));
+          const transfer=new DataTransfer();transfer.items.add(new File([bytes],arguments[1]));
+          if(arguments[2]) document.dispatchEvent(new DragEvent('drop',{dataTransfer:transfer,bubbles:true,cancelable:true}));
+          else { const input=document.getElementById('document-file');input.files=transfer.files;input.dispatchEvent(new Event('change')); }""",
+           base64.b64encode(path.read_bytes()).decode(), path.name, drop)
+        wait("document.getElementById('document-dialog').open")
+
+    def finished():
+        wait("document.getElementById('document-translate').textContent === '訳し直す'", 180)
+        assert text('document-status') == '翻訳完了', text('document-status')
+
+    def sources():
+        return js("""return Array.from(document.querySelectorAll('.document-block'), b=>{
+          b.click();return document.getElementById('document-source').textContent});""")
+
+    js("""window.documentViolations=[];
+      document.addEventListener('securitypolicyviolation',e=>documentViolations.push(e.blockedURI));""")
+    upload(ROOT / 'tests/fixtures/document-layout.pdf', True)
+    finished()
+    assert text('document-pages') == '/ 3'
+    assert not any(Path(f'/proc/{pid}/exe').resolve().name == 'ocr-worker' for pid in owned_processes())
+    source = sources()
+    assert any('Reading a paper should be simple.' in s and 'Translations appear in the same place.' in s for s in source), source
+    assert not any('E = mc2' in s for s in source), source
+    assert next(i for i, s in enumerate(source) if s.startswith('Small details')) < next(i for i, s in enumerate(source) if s.startswith('The second column')), source
+    assert js("return document.querySelectorAll('.document-block').length") >= 6
+    click('document-detail-close')
+    check('PDF drop extracts native text, keeps paragraphs and leaves equations intact', source)
+    screenshot('document-translated.png')
+    click('document-original')
+    assert js("return document.getElementById('document-overlay').hidden")
+    screenshot('document-original.png')
+    click('document-original')
+    js("document.querySelector('.document-block').click()")
+    assert text('document-source') and text('document-output')
+    check('replacement toggles to the original and a paragraph opens its full text')
+    click('document-detail-close'); click('document-copy')
+    assert re.search('[ぁ-んァ-ン一-龯]', invoke('read_clipboard'))
+    click('document-zoom-in')
+    wait("document.getElementById('document-zoom').textContent==='125%'")
+    click('document-zoom')
+    check('page translation copies to the actual clipboard and zoom remains aligned')
+    click('document-next'); finished()
+    assert any(Path(f'/proc/{pid}/exe').resolve().name == 'ocr-worker' for pid in owned_processes())
+    screenshot('document-scan.png')
+    check('scanned PDF falls back to the actual local OCR')
+    click('document-next'); finished()
+    source = sources()
+    assert any('日本語の文章' in s for s in source), source
+    assert any('한국어 문장을' in s for s in source), source
+    click('document-detail-close')
+    screenshot('document-cjk.png')
+    assert not js('return documentViolations'), js('return documentViolations')
+    check('Japanese and Korean CID fonts use bundled CMaps without external resources')
+    click('document-close')
+    wait("!document.getElementById('document-dialog').open")
+    upload(ROOT / 'tests/fixtures/ocr-korean-short.png')
+    finished()
+    if invoke('get_korean_ocr')['enabled']:
+        source = sources()
+        assert '홈' in source and '책' in source, source
+        click('document-detail-close')
+    screenshot('document-korean.png')
+    check('image files use OCR and the same translated page view')
+    click('document-translate')
+    click('document-close')
+    wait("!document.getElementById('document-dialog').open")
+    wait("document.getElementById('document-canvas').width===0")
+    upload(ROOT / 'tests/fixtures/document-layout.pdf')
+    finished()
+    click('document-close')
+    check('closing during translation cancels cleanly and another PDF can open')
+    print('DOCUMENT NATIVE CHECKS PASSED', flush=True)
+
+
 def camera_checks():
     import base64
     image = 'data:image/png;base64,' + base64.b64encode((ROOT / 'tests/fixtures/ocr-english.png').read_bytes()).decode()
@@ -801,7 +880,7 @@ try:
             if driver.poll() is not None:
                 raise RuntimeError('Driver stopped: ' + (WORK / 'desktop.log').read_text())
             time.sleep(0.1)
-    value = request('POST', '/session', {'capabilities': {'alwaysMatch': {'browserName': 'wry', 'tauri:options': {'application': str(APP), 'args': [] if args.lens or args.camera else ['--background']}}}})
+    value = request('POST', '/session', {'capabilities': {'alwaysMatch': {'browserName': 'wry', 'tauri:options': {'application': str(APP), 'args': [] if args.lens or args.camera or args.document else ['--background']}}}})
     SESSION = value['sessionId']
     request('POST', f'/session/{SESSION}/timeouts', {'script': 30000})
     select_window('main')
@@ -809,6 +888,9 @@ try:
     wait("document.getElementById('model-tag').textContent === " + json.dumps('準備完了' if status['modelReady'] else '未準備'))
     assert status['runtimeAvailable'], status
     check('native application startup', status)
+    if args.document:
+        document_checks()
+        sys.exit(0)
     if args.camera:
         camera_checks()
         sys.exit(0)

@@ -174,10 +174,13 @@ def group_lines(lines):
 
 def prefer_korean(text, score, korean, korean_score):
     hangul = sum('\uac00' <= ch <= '\ud7a3' for ch in korean)
-    # Keep confident Japanese/English results. The general recognizer can also
-    # omit Hangul while confidently returning only a short English fragment.
-    omitted = not any(cjk(ch) for ch in text) and len(text.replace(' ', '')) < len(korean.replace(' ', '')) * .7
-    return hangul >= 2 and korean_score >= .9 and (korean_score > score + .05 or omitted)
+    kana = any('\u3040' <= ch <= '\u30ff' for ch in text)
+    # The general model has no Hangul vocabulary: it can confidently substitute
+    # a Han character or omit most of a line. Its score cannot veto a clear
+    # single Hangul syllable, and Han substitutions are not Japanese evidence.
+    omitted = not kana and len(text.replace(' ', '')) < len(korean.replace(' ', '')) * .7
+    syllable = hangul == 1 and korean_score >= .9 and not kana and not any(ch.isascii() and ch.isalpha() for ch in text)
+    return hangul >= 1 and korean_score >= .85 and (korean_score > score + .02 or omitted or syllable)
 
 
 class CachedOCR(RapidOCR):

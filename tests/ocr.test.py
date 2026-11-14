@@ -72,6 +72,16 @@ class LayoutTests(unittest.TestCase):
         self.assertFalse(ocr.prefer_korean('本文', .6, '한국어', .7))
         self.assertEqual(ocr.join_text('한국어 문장을', '번역합니다.'), '한국어 문장을 번역합니다.')
 
+    def test_korean_syllables_and_serif_lines_are_not_discarded_as_han_substitutions(self):
+        self.assertTrue(ocr.prefer_korean('喜', .9957, '홈', .94616))
+        self.assertTrue(ocr.prefer_korean('祖', .99925, '책', .99171))
+        self.assertTrue(ocr.prefer_korean('召', .96201, '검색', .99758))
+        self.assertTrue(ocr.prefer_korean('', 0., '한국어 문장을 정확하게 읽고 번역합니다.', .89802))
+        self.assertTrue(ocr.prefer_korean('明舎.', .66935, '이 제품은 무료 배송이 가능합니다.', .89178))
+        self.assertFalse(ocr.prefer_korean('長', .99995, '튜', .17635))
+        self.assertFalse(ocr.prefer_korean('ホーム', .99, '홈', .96))
+        self.assertFalse(ocr.prefer_korean('Home', .99, '홈', .96))
+
 
 class RecognitionCacheTests(unittest.TestCase):
     def setUp(self):

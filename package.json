@@ -5,6 +5,8 @@
   "type": "module",
   "license": "MIT",
   "scripts": {
+    "predev": "node scripts/prepare-pdf.mjs",
+    "prebuild": "node scripts/prepare-pdf.mjs",
     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
     "build": "tsc --noEmit && vite build",
     "check": "tsc --noEmit",
@@ -14,12 +16,15 @@
     "android:prepare": "python3 scripts/build-android.py",
     "benchmark": "python3 scripts/benchmark.py",
     "test:protocol": "python3 scripts/test-protocol.py",
-    "test:ui": "node --test --test-isolation=none tests/ui.test.mjs tests/camera.test.mjs"
+    "test:ui": "node --experimental-vm-modules --test --test-isolation=none tests/ui.test.mjs tests/camera.test.mjs tests/document.test.mjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0",
     "typescript": "~7.0.2",
     "vite": "~8.1.0",
     "jsdom": "^27.4.0"
+  },
+  "dependencies": {
+    "pdfjs-dist": "6.5.438"
   }
 }

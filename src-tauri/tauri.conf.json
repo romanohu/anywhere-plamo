@@ -13,6 +13,7 @@
     "withGlobalTauri": true,
     "windows": [{
       "label": "main",
+      "dragDropEnabled": false,
       "title": "Anywhere Plamo",
       "width": 780,
       "height": 620,
@@ -32,7 +33,7 @@
       "center": true
     }],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' asset: data:; media-src 'self' blob:; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'self'; frame-src 'none'"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' asset: data: blob:; font-src 'self' blob: data:; worker-src 'self' blob:; media-src 'self' blob:; connect-src 'self' ipc: http://ipc.localhost; object-src 'none'; base-uri 'self'; frame-src 'none'"
     }
   },
   "plugins": {

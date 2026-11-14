@@ -1,0 +1,28 @@
+#document-dialog { width: calc(100vw - 24px); max-width: 1400px; height: calc(100dvh - 24px); max-height: calc(100dvh - 24px); padding: 0; overflow: hidden; }
+#document-dialog[open] { display: flex; flex-direction: column; }
+#document-dialog .dialog-header { gap: 8px; padding: 4px 8px 0 16px; flex-shrink: 0; }
+#document-title { font-size: 13px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.document-toolbar { display: flex; align-items: center; padding: 0 8px 4px; gap: 4px; flex-wrap: wrap; flex-shrink: 0; }
+.document-navigation, .document-zoom-controls { display: flex; align-items: center; gap: 2px; }
+.document-navigation { font-size: 11px; color: var(--muted); }
+#document-page { width: 44px; padding: 4px; text-align: center; font: inherit; color: var(--ink); background: var(--result); border: 1px solid var(--line); border-radius: 4px; appearance: textfield; -moz-appearance: textfield; }
+#document-page::-webkit-inner-spin-button { appearance: none; }
+#document-target { margin-left: auto; }
+.document-toolbar .icon-button { width: 28px; height: 28px; }
+#document-original[aria-pressed="true"] { background: var(--hover); color: var(--ink); }
+#document-view { flex: 1; min-height: 80px; overflow: auto; padding: 12px; background: var(--background); overscroll-behavior: contain; }
+#document-stage { position: relative; margin: 0 auto; background: #fff; box-shadow: 0 1px 8px #0002; overflow: hidden; }
+#document-canvas { display: block; width: 100%; height: auto; }
+#document-overlay { position: absolute; inset: 0; pointer-events: none; }
+.document-mask { position: absolute; pointer-events: none; }
+.document-block { position: absolute; padding: 0; margin: 0; border: 0; border-radius: 0; text-align: start; white-space: pre; line-height: 1.2; overflow: hidden; pointer-events: auto; font-family: -apple-system, BlinkMacSystemFont, "Noto Sans CJK JP", sans-serif; }
+.document-block:hover, .document-block:focus-visible { outline: 1px solid #888; outline-offset: 2px; }
+#document-detail { position: relative; flex-shrink: 0; border-top: 1px solid var(--line); max-height: 30dvh; overflow: auto; padding: 10px 42px 10px 16px; font-size: 13px; }
+#document-detail p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+#document-detail details { margin-top: 8px; color: var(--muted); font-size: 12px; }
+#document-detail summary { cursor: pointer; }
+#document-detail-close { position: absolute; right: 4px; top: 4px; }
+#document-status { margin: 0; padding: 4px 16px; color: var(--muted); font-size: 11px; flex-shrink: 0; }
+.document-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; padding: 2px 12px 10px; flex-wrap: wrap; }
+#document-copy { margin-left: auto; }
+@media (max-width: 560px) { .document-zoom-controls { margin-left: auto; } #document-dialog { width: 100vw; height: 100dvh; max-height: 100dvh; max-width: 100vw; margin: 0; border: 0; border-radius: 0; } }
