@@ -85,12 +85,13 @@ export function initDocument(available: () => boolean): { close: () => Promise<v
     for (const [index, block] of blocks.entries()) {
       if (!outputs[index]) continue;
       const regionWidth = Math.max(1, block.width * width), regionHeight = Math.max(1, block.height * height);
-      let font = Math.max(8, block.font * height * .92);
+      const textWidth = Math.max(1, regionWidth - 2);
+      let font = Math.max(1, block.font * height * .92);
       let lines: string[] = [];
-      const minimum = Math.max(8, font * .65);
+      const minimum = font * .65;
       for (;;) {
         context.font = `${font}px -apple-system, BlinkMacSystemFont, "Noto Sans CJK JP", sans-serif`;
-        lines = wrapText(outputs[index], regionWidth, text => context.measureText(text).width);
+        lines = wrapText(outputs[index], textWidth, text => context.measureText(text).width);
         if (lines.length * font * 1.2 <= regionHeight || font <= minimum) break;
         font = Math.max(minimum, font - .5);
       }
@@ -99,17 +100,11 @@ export function initDocument(available: () => boolean): { close: () => Promise<v
       if (clipped) {
         lines = lines.slice(0, maxLines);
         let last = lines[maxLines - 1];
-        while (last && context.measureText(last + '…').width > regionWidth) last = Array.from(last).slice(0, -1).join('');
+        while (last && context.measureText(last + '…').width > textWidth) last = Array.from(last).slice(0, -1).join('');
         lines[maxLines - 1] = last + '…';
       }
       const color = background(block);
       const dark = color.slice(4, -1).split(',').map(Number).reduce((a, b) => a + b, 0) < 384;
-      for (const region of block.regions) {
-        const mask = document.createElement('span'); mask.className = 'document-mask';
-        const bleed = Math.max(1, block.font * height * .25);
-        mask.style.cssText = `left:calc(${region.x * 100}% - ${bleed}px);top:calc(${region.y * 100}% - ${bleed}px);width:calc(${region.width * 100}% + ${bleed * 2}px);height:calc(${region.height * 100}% + ${bleed * 2}px);background:${color}`;
-        fragment.append(mask);
-      }
       const button = document.createElement('button'); button.className = 'document-block';
       button.style.cssText = `left:${block.x * 100}%;top:${block.y * 100}%;width:${regionWidth}px;height:${regionHeight}px;font-size:${font}px;color:${dark ? '#fff' : '#161616'};background:${color}`;
       button.textContent = lines.join('\n'); button.title = clipped ? 'クリックして全文を表示' : 'クリックして原文と訳文を表示';

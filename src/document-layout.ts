@@ -48,7 +48,9 @@ export function readingOrder(blocks: DocumentBlock[]): DocumentBlock[] {
 }
 
 export function pdfBlocks(items: PdfItem[], styles: Record<string, PdfStyle>, transform: number[], pageWidth: number, pageHeight: number): DocumentBlock[] {
-  const fragments: DocumentBlock[] = [];
+  type Fragment = DocumentBlock & { baseline: number; face: string };
+  type Line = Fragment & { members: Fragment[] };
+  const fragments: Fragment[] = [];
   for (const item of items) {
     if (!item.str.trim()) continue;
     const a = item.transform, v = transform;
@@ -56,48 +58,99 @@ export function pdfBlocks(items: PdfItem[], styles: Record<string, PdfStyle>, tr
       v[0] * a[2] + v[2] * a[3], v[1] * a[2] + v[3] * a[3],
       v[0] * a[4] + v[2] * a[5] + v[4], v[1] * a[4] + v[3] * a[5] + v[5]];
     const style = styles[item.fontName];
-    // Keep vertical/rotated glyphs and mathematical fonts on the original page.
-    if (style?.vertical || Math.abs(Math.atan2(matrix[1], matrix[0])) > .15 || /(?:CM(?:R|MI|SY|EX)|math|symbol)/i.test(item.fontName + ' ' + style?.fontFamily)) continue;
+    // Keep rotated glyphs on the original page. Inline mathematical glyphs must
+    // stay with their sentence, even when their font has different metrics.
+    if (style?.vertical || Math.abs(Math.atan2(matrix[1], matrix[0])) > .15) continue;
     const height = Math.hypot(matrix[2], matrix[3]);
     const scale = Math.hypot(v[0], v[1]);
     const region = { x: matrix[4] / pageWidth, y: (matrix[5] - height * (style?.ascent ?? .85)) / pageHeight,
-      width: item.width * scale / pageWidth, height: height / pageHeight };
+      width: item.width * scale / pageWidth, height: height * ((style?.ascent ?? .85) - (style?.descent ?? -.15)) / pageHeight };
     if (region.width <= 0 || height <= 0 || !Object.values(region).every(Number.isFinite)
       || region.x >= 1 || region.y >= 1 || region.x + region.width <= 0 || region.y + region.height <= 0) continue;
-    fragments.push({ ...region, text: item.str, font: height / pageHeight, regions: [region] });
+    fragments.push({ ...region, text: item.str, font: height / pageHeight, regions: [region], baseline: matrix[5] / pageHeight, face: item.fontName });
   }
-  const lines: DocumentBlock[] = [];
-  for (const fragment of fragments.sort((a, b) => a.y - b.y || a.x - b.x)) {
-    const line = [...lines].reverse().find(line => Math.abs(line.y - fragment.y) < Math.min(line.font, fragment.font) * .4
-      && Math.abs(line.font - fragment.font) < line.font * .3
-      && fragment.x >= line.x && fragment.x - line.x - line.width < line.font * pageHeight / pageWidth * 1.8);
-    if (line) {
-      const gap = (fragment.x - line.x - line.width) * pageWidth;
-      line.text = gap < fragment.font * pageHeight * .15 ? line.text + fragment.text : join(line.text, fragment.text);
-      line.regions.push(...fragment.regions); Object.assign(line, bounds(line.regions));
-    } else lines.push({ ...fragment, regions: [...fragment.regions] });
+  // Compare baselines, not font-dependent ascents. Sort horizontally only after
+  // finding the row: bold/italic runs can otherwise arrive in the wrong order.
+  const rows: Fragment[][] = [];
+  for (const fragment of fragments.sort((a, b) => b.font - a.font || a.baseline - b.baseline || a.x - b.x)) {
+    const row = rows.filter(row => {
+      const anchor = row[0], distance = Math.abs(anchor.baseline - fragment.baseline);
+      return distance < Math.min(anchor.font, fragment.font) * .2
+        || (fragment.font < anchor.font * .85 && distance < anchor.font * .65
+          && row.some(part => fragment.x < part.x + part.width + anchor.font * pageHeight / pageWidth * .6
+            && fragment.x + fragment.width > part.x - anchor.font * pageHeight / pageWidth * .6));
+    }).sort((a, b) => Math.abs(a[0].baseline - fragment.baseline) - Math.abs(b[0].baseline - fragment.baseline))[0];
+    if (row) row.push(fragment); else rows.push([fragment]);
   }
-  const groups: DocumentBlock[] = [];
-  for (const line of lines.sort((a, b) => a.y - b.y || a.x - b.x)) {
+  const lines: Line[] = [];
+  for (const row of rows) {
+    let line: Line | undefined;
+    for (const fragment of row.sort((a, b) => a.x - b.x || a.baseline - b.baseline)) {
+      const gap = line ? (fragment.x - line.x - line.width) * pageWidth : Infinity;
+      if (line && gap < Math.max(line.font, fragment.font) * pageHeight * 1.5) {
+        if (line.members.some(part => part.text === fragment.text && Math.abs(part.x - fragment.x) < .0001)) continue;
+        line.text = gap < Math.min(line.font, fragment.font) * pageHeight * .15 ? line.text + fragment.text : join(line.text, fragment.text);
+        line.members.push(fragment); line.regions.push(...fragment.regions);
+        Object.assign(line, bounds(line.regions));
+        if (fragment.font > line.font) { line.font = fragment.font; line.baseline = fragment.baseline; }
+      } else {
+        line = { ...fragment, regions: [...fragment.regions], members: [fragment] }; lines.push(line);
+      }
+    }
+  }
+  for (const line of lines) {
+    const faces = new Map<string, number>();
+    for (const part of line.members) faces.set(part.face, (faces.get(part.face) ?? 0) + part.text.length);
+    line.face = [...faces].sort((a, b) => b[1] - a[1])[0][0];
+  }
+  // Font bounding boxes can be taller than the line spacing (especially when
+  // italic and math fonts are mixed). Divide that slack at the gap between
+  // baselines, keeping masks and translations inside their own line bands.
+  for (const line of lines) {
+    let top = Math.max(0, line.y), bottom = Math.min(1, line.y + line.height);
+    for (const other of lines) {
+      if (other === line || other.x >= line.x + line.width || other.x + other.width <= line.x) continue;
+      const distance = other.baseline - line.baseline;
+      if (Math.abs(distance) < Math.max(line.font, other.font) * .75) continue;
+      const boundary = (line.baseline - line.font * .35 + other.baseline - other.font * .35) / 2;
+      if (distance < 0) top = Math.max(top, boundary); else bottom = Math.min(bottom, boundary);
+    }
+    line.y = top; line.height = Math.max(0, bottom - top);
+    line.regions = [{ x: line.x, y: top, width: line.width, height: line.height }];
+  }
+  const groups: (DocumentBlock & { lines: Line[] })[] = [];
+  for (const line of lines.sort((a, b) => a.baseline - b.baseline || a.x - b.x)) {
     line.text = line.text.trim();
-    // Page numbers, addresses and stand-alone equations are not prose.
-    if (!/\p{L}/u.test(line.text) || /^(?:https?:\/\/|www\.)\S+$/.test(line.text)
-      || (/^[\w.+-]+@[\w.-]+$/.test(line.text))
-      || (/[=∑∫√]/.test(line.text) && line.text.split(/\s+/).filter(s => /^[a-z]{3,}$/i.test(s)).length < 3)) continue;
+    // Keep isolated variables, equations, page numbers and addresses intact.
+    if (!/\p{L}{2,}|[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(line.text) || /^[A-Z]{1,2}$/.test(line.text)
+      || /^(?:https?:\/\/|www\.)\S+$/.test(line.text) || /^[\w.+-]+@[\w.-]+$/.test(line.text)
+      || (/[\p{Sm}πθσϕτℓη]/u.test(line.text) && line.text.split(/\s+/).filter(s => /^\p{L}{3,}$/u.test(s)).length < 3)) continue;
     const previous = groups.filter(block => {
-      const bottom = block.y + block.height;
+      const last = block.lines[block.lines.length - 1];
+      const gap = line.baseline - last.baseline;
       const overlap = Math.min(block.x + block.width, line.x + line.width) - Math.max(block.x, line.x);
-      return line.y >= bottom - line.font * .2 && line.y - bottom < line.font * .85
-        && overlap > Math.min(block.width, line.width) * .6
-        && Math.abs(block.font - line.font) < line.font * .2
-        && Math.abs(block.x - line.x) < line.font * pageHeight / pageWidth * 2;
+      const em = line.font * pageHeight / pageWidth;
+      if (gap < line.font * .8 || gap > line.font * 1.7 || overlap < Math.min(block.width, line.width) * .6
+        || Math.abs(block.font - line.font) > line.font * .15 || Math.abs(block.x - line.x) > em * 2
+        || line.x > last.x + em * .6 || last.x + last.width < block.x + block.width - em * 2) return false;
+      // Cells in a table must keep their own row; joining the labels vertically
+      // would erase the correspondence with the neighbouring numeric cells.
+      if (lines.some(other => other !== line && Math.abs(other.baseline - line.baseline) < line.font * .2
+        && /^[-+−]?[\d.,%() ]+$/.test(other.text))) return false;
+      // A heading with a distinct face is a separate paragraph; mixed inline
+      // styles do not create a new block.
+      if (last.face !== line.face && last.text.length < 80 && !/[.!?,;:。！？]$/.test(last.text)) return false;
+      const area = bounds([block, line]);
+      return !lines.some(other => other !== line && !block.lines.includes(other)
+        && other.x < area.x + area.width && other.x + other.width > area.x
+        && other.y < area.y + area.height - .00001 && other.y + other.height > area.y + .00001);
     }).sort((a, b) => b.y + b.height - a.y - a.height)[0];
     if (previous) {
-      previous.text = join(previous.text, line.text);
+      previous.text = join(previous.text, line.text); previous.lines.push(line);
       previous.regions.push(bounds(line.regions)); Object.assign(previous, bounds(previous.regions));
-    } else groups.push({ ...line, regions: [bounds(line.regions)] });
+    } else groups.push({ ...line, regions: [bounds(line.regions)], lines: [line] });
   }
-  return readingOrder(groups);
+  return readingOrder(groups.map(({ text, font, regions, x, y, width, height }) => ({ text, font, regions, x, y, width, height })));
 }
 
 export function splitDocumentText(text: string, limit = 2000): string[] {
