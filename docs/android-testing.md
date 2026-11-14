@@ -2,7 +2,7 @@
 
 ## 配布用APK
 
-READMEのAndroidビルド環境を用意し、[Tauriの署名手順](https://v2.tauri.app/distribute/sign/android/)に従って署名鍵を作成します。`src-tauri/gen/android/keystore.properties`に次を設定します（Gitの対象外です）。
+[Androidのビルド環境](README.md#android開発版)を用意し、[Tauriの署名手順](https://v2.tauri.app/distribute/sign/android/)に従って署名鍵を作成します。`src-tauri/gen/android/keystore.properties`に次を設定します（Gitの対象外です）。
 
 ```properties
 storeFile=/絶対パス/release.jks
