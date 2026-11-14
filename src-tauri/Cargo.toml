@@ -1,6 +1,6 @@
 [package]
 name = "anywhere-plamo"
-version = "0.2.6"
+version = "0.2.7"
 description = "A small, local translation app powered by PLaMo"
 edition = "2021"
 rust-version = "1.90"
