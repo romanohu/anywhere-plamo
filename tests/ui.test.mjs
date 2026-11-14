@@ -73,6 +73,13 @@ async function fixture(t, options = {}) {
   const calls = [];
   const listeners = new Map();
   const state = {
+    modelId: '0.8b-q4',
+    models: [
+      { id: '0.8b-q2', name: '最小 · 0.8B Q2_K', description: '容量優先。精度が下がります。', size: 410138816, ready: false },
+      { id: '0.8b-q3', name: '軽量 · 0.8B Q3_K_M', description: '軽量', size: 486385856, ready: false },
+      { id: '0.8b-q4', name: '標準 · 0.8B Q4_K_M', description: '標準', size: 573126848, ready: options.modelReady ?? true },
+      { id: '2b-q4', name: '品質重視 · 2B Q4_K_M', description: 'メモリ使用量と待ち時間が増えます。', size: 1807203040, ready: false },
+    ],
     modelReady: options.modelReady ?? true, runtimeAvailable: true,
     shortcutAvailable: true, wayland: false, resident: true,
     shortcut: 'Ctrl+Shift+KeyJ', defaultShortcut: 'Ctrl+Shift+KeyJ', shortcutSupported: true, shortcutPopup: false,
@@ -185,10 +192,16 @@ async function fixture(t, options = {}) {
             channel.onmessage({ kind: 'token', text: 'こんにちは、' });
             channel.onmessage({ kind: 'token', text: '世界。' });
             return { truncated: !!options.truncated };
+          case 'set_translation_model':
+            if (options.modelError) throw options.modelError;
+            state.modelId = args.id;
+            state.modelReady = state.models.find(model => model.id === args.id).ready;
+            listeners.get('translation-model-changed')?.({ payload: null });
+            return;
           case 'download_model':
             channel = args.onEvent;
             return new Promise((resolve, reject) => {
-              finishOperation = () => { state.modelReady = true; resolve(); };
+              finishOperation = () => { state.modelReady = true; state.models.find(model => model.id === state.modelId).ready = true; resolve(); };
               rejectOperation = reject;
             });
           case 'cancel_operation':
@@ -238,6 +251,7 @@ async function fixture(t, options = {}) {
     },
     lensDelay: () => lensDelay,
     showWindow() { listeners.get('window-shown')?.({ payload: null }); },
+    modelChanged() { listeners.get('translation-model-changed')?.({ payload: null }); },
     passthrough(enabled) { state.lensPassthrough = enabled; listeners.get('lens-passthrough-changed')?.({ payload: enabled }); },
     lensShortcutChanged() { listeners.get('lens-shortcut-changed')?.({ payload: null }); },
     moveLens() { listeners.get('lens-changed')?.({ payload: null }); },
@@ -261,6 +275,62 @@ test('browser preview clearly disables translation and model download', async t 
   assert.equal(f.byId('download-button').disabled, true);
   assert.equal(f.byId('update-button').disabled, true);
   assert.equal(f.calls.length, 0);
+});
+
+test('model selection downloads only the chosen weights and reuses installed models', async t => {
+  const f = await fixture(t);
+  const select = f.byId('translation-model');
+  assert.equal(select.value, '0.8b-q4');
+  assert.equal(select.options.length, 4);
+  const choose = id => { select.value = id; select.dispatchEvent(new f.window.Event('change')); };
+  choose('2b-q4');
+  await until(() => !select.disabled && f.state.modelId === '2b-q4');
+  assert.equal(f.byId('download-section').hidden, false);
+  assert.match(f.byId('setup-banner').textContent, /1\.81 GB/);
+  assert.equal(f.byId('camera-button').disabled, true);
+  assert.equal(f.calls.some(call => call.command === 'download_model'), false);
+  f.click('download-button');
+  assert.equal(select.disabled, true);
+  choose('0.8b-q2');
+  assert.equal(select.value, '2b-q4');
+  f.finish();
+  await until(() => !select.disabled && f.byId('download-section').hidden);
+  assert.equal(f.byId('camera-button').disabled, false);
+  choose('0.8b-q4');
+  await until(() => !select.disabled && f.state.modelId === '0.8b-q4');
+  assert.equal(f.byId('download-section').hidden, true);
+  choose('2b-q4');
+  await until(() => !select.disabled && f.state.modelId === '2b-q4');
+  assert.equal(f.byId('download-section').hidden, true);
+  assert.equal(f.calls.filter(call => call.command === 'download_model').length, 1);
+  assert.equal(f.calls.filter(call => call.command === 'prepare_engine').length, 4);
+});
+
+test('failed model changes retain the active model and show the reason', async t => {
+  const f = await fixture(t, { modelError: 'OCRレンズを閉じてからモデルを変更してください。' });
+  const select = f.byId('translation-model');
+  select.value = '0.8b-q3';
+  select.dispatchEvent(new f.window.Event('change'));
+  await until(() => !select.disabled);
+  assert.equal(select.value, '0.8b-q4');
+  assert.equal(f.state.modelReady, true);
+  assert.match(f.byId('download-message').textContent, /レンズを閉じて/);
+});
+
+test('model changes are blocked while translating and reflected across windows', async t => {
+  const f = await fixture(t, { holdTranslation: true });
+  f.input('Hello'); f.click('translate-button');
+  await until(() => f.channels.length === 1);
+  assert.equal(f.byId('translation-model').disabled, true);
+  f.send({ kind: 'token', text: '古いモデルの訳文' });
+  f.finish({ truncated: false });
+  await until(() => !f.byId('translation-model').disabled);
+  f.state.modelId = '0.8b-q3';
+  f.state.modelReady = false;
+  f.modelChanged();
+  await until(() => f.byId('translation-model').value === '0.8b-q3');
+  assert.equal(f.byId('translation').textContent, '');
+  assert.equal(f.byId('download-section').hidden, false);
 });
 
 test('updates are checked only on request and installed only after the second click', async t => {

@@ -1,6 +1,8 @@
 export interface AppStatus {
   platform?: 'android';
   modelReady: boolean;
+  modelId: string;
+  models: { id: string; name: string; description: string; size: number; ready: boolean }[];
   runtimeAvailable: boolean;
   shortcutAvailable: boolean;
   shortcut: string;

@@ -24,6 +24,7 @@ const dialog = element<HTMLDialogElement>('settings-dialog');
 const dictionaryButton = element<HTMLButtonElement>('dictionary-button');
 const dictionaryDialog = element<HTMLDialogElement>('dictionary-dialog');
 const downloadButton = element<HTMLButtonElement>('download-button');
+const modelSelect = element<HTMLSelectElement>('translation-model');
 const preloadModel = element<HTMLInputElement>('preload-model');
 const autoDirection = element<HTMLInputElement>('auto-direction');
 const shortcutPopup = element<HTMLInputElement>('shortcut-popup');
@@ -45,7 +46,7 @@ const mac = /Mac/.test(navigator.platform);
 const popup = new URLSearchParams(location.search).has('popup');
 const lens = new URLSearchParams(location.search).has('lens');
 const lensSelect = new URLSearchParams(location.search).has('lens-select');
-let status: AppStatus = { modelReady: false, runtimeAvailable: false, shortcutAvailable: false, shortcut: '', defaultShortcut: '', shortcutSupported: false, shortcutPopup: false, wayland: false, resident: false, lensSupported: false, ocrAvailable: false, lensUsesSelection: false, lensShortcut: '', defaultLensShortcut: '', lensShortcutAvailable: false, lensOpenShortcut: '', defaultLensOpenShortcut: '', lensOpenShortcutAvailable: false, lensPassthrough: false };
+let status: AppStatus = { modelId: '0.8b-q4', models: [], modelReady: false, runtimeAvailable: false, shortcutAvailable: false, shortcut: '', defaultShortcut: '', shortcutSupported: false, shortcutPopup: false, wayland: false, resident: false, lensSupported: false, ocrAvailable: false, lensUsesSelection: false, lensShortcut: '', defaultLensShortcut: '', lensShortcutAvailable: false, lensOpenShortcut: '', defaultLensOpenShortcut: '', lensOpenShortcutAvailable: false, lensPassthrough: false };
 let shortcutDraft = '';
 let recordingShortcut = false;
 let startingShortcut = false;
@@ -53,6 +54,7 @@ let savingShortcut = false;
 let savingPopup = false;
 let busy = false;
 let downloading = false;
+let changingModel = false;
 let cancelling = false;
 let openingScreenLens = false;
 let generation = 0;
@@ -98,18 +100,19 @@ function showError(error: unknown): void {
 
 function updateControls(): void {
   const hasText = source.value.trim().length > 0;
-  translateButton.disabled = cancelling || downloading || (!busy && (!hasText || !isDesktop));
+  translateButton.disabled = changingModel || cancelling || downloading || (!busy && (!hasText || !isDesktop));
   translateButton.classList.toggle('is-busy', busy);
   element('translate-label').textContent = cancelling ? '中断中…' : busy ? '中断' : '翻訳';
   element('translate-arrow').textContent = busy ? '■' : '→';
   source.readOnly = busy || cancelling || readingMode;
   target.disabled = busy || cancelling;
-  pasteButton.disabled = busy || cancelling || downloading;
+  pasteButton.disabled = changingModel || busy || cancelling || downloading;
   clearButton.disabled = busy || cancelling || !source.value;
   copyButton.disabled = busy || !result.textContent;
-  downloadButton.disabled = busy || cancelling || downloading || !status.runtimeAvailable;
-  element<HTMLButtonElement>('camera-button').disabled = busy || cancelling || downloading || !status.ocrAvailable || !status.modelReady;
-  if (status.platform === 'android') element<HTMLButtonElement>('lens-button').disabled = openingScreenLens || busy || cancelling || downloading || !status.modelReady;
+  modelSelect.disabled = !isDesktop || changingModel || busy || cancelling || downloading;
+  downloadButton.disabled = changingModel || busy || cancelling || downloading || !status.runtimeAvailable;
+  element<HTMLButtonElement>('camera-button').disabled = changingModel || busy || cancelling || downloading || !status.ocrAvailable || !status.modelReady;
+  if (status.platform === 'android') element<HTMLButtonElement>('lens-button').disabled = changingModel || openingScreenLens || busy || cancelling || downloading || !status.modelReady;
   element('character-count').textContent = `${source.value.length.toLocaleString()} / 12,000`;
 }
 
@@ -136,7 +139,23 @@ function resetResult(): void {
 }
 
 async function refreshStatus(): Promise<void> {
+  const previousModel = status.modelId;
   status = await invoke<AppStatus>('get_status');
+  if (previousModel !== status.modelId) {
+    preparationRequested = false;
+    await camera?.close();
+    resetResult();
+  }
+  modelSelect.replaceChildren(...status.models.map(model => {
+    const option = document.createElement('option');
+    option.value = model.id;
+    option.textContent = `${model.name} · ${modelSize(model.size)}${model.ready ? ' · 取得済み' : ''}`;
+    return option;
+  }));
+  modelSelect.value = status.modelId;
+  const model = status.models.find(model => model.id === status.modelId);
+  element('model-description').textContent = model?.description ?? '';
+  element('setup-banner').querySelector('p')!.textContent = model ? `${modelSize(model.size)}・初回のみ` : '';
   document.body.classList.toggle('mobile', status.platform === 'android');
   element('shortcut-section').hidden = status.platform === 'android';
   element('update-section').hidden = popup || status.platform === 'android';
@@ -153,6 +172,30 @@ async function refreshStatus(): Promise<void> {
   renderShortcut();
   updateControls();
   prepareEngine();
+}
+
+function modelSize(bytes: number): string {
+  return bytes >= 1_000_000_000 ? `${(bytes / 1_000_000_000).toFixed(2)} GB` : `${Math.round(bytes / 1_000_000)} MB`;
+}
+
+async function selectModel(): Promise<void> {
+  if (changingModel || downloading || busy || cancelling) { modelSelect.value = status.modelId; return; }
+  const id = modelSelect.value;
+  if (id === status.modelId) return;
+  changingModel = true;
+  updateControls();
+  element('download-message').textContent = '';
+  try {
+    await camera?.close();
+    await invoke('set_translation_model', { id });
+    await refreshStatus();
+  } catch (error) {
+    modelSelect.value = status.modelId;
+    element('download-message').textContent = String(error);
+  } finally {
+    changingModel = false;
+    updateControls();
+  }
 }
 
 function currentShortcut(): { binding: string; default: string; available: boolean } {
@@ -363,7 +406,7 @@ async function cancel(clearPending = true): Promise<void> {
 
 async function translate(): Promise<void> {
   if (busy) return cancel();
-  if (cancelling || downloading || !source.value.trim()) return;
+  if (changingModel || cancelling || downloading || !source.value.trim()) return;
   if (!status.modelReady || !status.runtimeAvailable) { openSettings(); return; }
   resetResult();
   busy = true;
@@ -476,7 +519,7 @@ async function takePending(): Promise<void> {
 }
 
 async function download(): Promise<void> {
-  if (downloading || busy || cancelling) return;
+  if (changingModel || downloading || busy || cancelling) return;
   downloading = true;
   cancelling = false;
   element('download-section').hidden = true;
@@ -629,6 +672,7 @@ shortcutPopup.addEventListener('change', async () => {
   }
 });
 downloadButton.addEventListener('click', () => { void download(); });
+modelSelect.addEventListener('change', () => { void selectModel(); });
 preloadModel.addEventListener('change', () => {
   try { localStorage.setItem('preload-model', String(preloadModel.checked)); } catch { /* Optional preference. */ }
   prepareEngine();
@@ -708,6 +752,9 @@ async function init(): Promise<void> {
       target.value = language;
       resetResult();
       void translate();
+    });
+    await window.__TAURI__!.event.listen('translation-model-changed', () => {
+      void refreshStatus().catch(showError);
     });
     document.addEventListener('visibilitychange', () => {
       if (!document.hidden) return;

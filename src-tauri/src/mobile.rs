@@ -111,6 +111,7 @@ impl MobileOcr {
 fn get_status(state: tauri::State<'_, AppState>) -> serde_json::Value {
     serde_json::json!({
         "platform": "android", "modelReady": model::ready(&state.directory), "runtimeAvailable": true,
+        "modelId": model::selected(&state.directory).id, "models": model::choices(&state.directory),
         "ocrAvailable": true, "lensSupported": true, "shortcutAvailable": false,
         "shortcut": "", "defaultShortcut": "", "shortcutSupported": false, "shortcutPopup": false,
         "wayland": false, "resident": false, "lensUsesSelection": false, "lensShortcut": "",
@@ -121,6 +122,7 @@ fn get_status(state: tauri::State<'_, AppState>) -> serde_json::Value {
 
 #[tauri::command]
 async fn download_model(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     on_event: Channel<ProgressEvent>,
 ) -> Result<(), String> {
@@ -129,7 +131,9 @@ async fn download_model(
     if model::ready(&state.directory) {
         return Ok(());
     }
-    model::download(&state.directory, &on_event, &operation.token).await
+    model::download(&state.directory, &on_event, &operation.token).await?;
+    let _ = app.emit("translation-model-changed", ());
+    Ok(())
 }
 
 #[tauri::command]
@@ -149,13 +153,16 @@ async fn prepare_engine(state: tauri::State<'_, AppState>) -> Result<(), String>
         *preparing = Some(cancel.clone());
     }
     let engine = state.engine.clone();
-    let path = model::path(&state.directory);
+    let directory = state.directory.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let mut engine = engine
             .lock()
             .map_err(|_| "翻訳エンジンを準備できません。")?;
         if engine.is_none() {
-            *engine = Some(engine::Engine::start(&path, &cancel)?);
+            if !model::ready(&directory) {
+                return Err("設定画面から翻訳モデルをダウンロードしてください。".into());
+            }
+            *engine = Some(engine::Engine::start(&model::path(&directory), &cancel)?);
         }
         Ok(())
     })
@@ -186,7 +193,7 @@ async fn translate(
     }
     let engine = state.engine.clone();
     let cancel = operation.token.clone();
-    let path = model::path(&state.directory);
+    let directory = state.directory.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let mut engine = engine
             .lock()
@@ -195,10 +202,13 @@ async fn translate(
             return Err("CANCELLED".into());
         }
         if engine.is_none() {
+            if !model::ready(&directory) {
+                return Err("設定画面から翻訳モデルをダウンロードしてください。".into());
+            }
             on_event
                 .send(ProgressEvent::Loading)
                 .map_err(|_| "画面との接続が切れました。")?;
-            *engine = Some(engine::Engine::start(&path, &cancel)?);
+            *engine = Some(engine::Engine::start(&model::path(&directory), &cancel)?);
         }
         engine
             .as_mut()
@@ -325,6 +335,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_status,
             download_model,
+            model::set_translation_model,
             prepare_engine,
             translate,
             cancel_operation,

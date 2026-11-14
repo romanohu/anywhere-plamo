@@ -232,6 +232,9 @@ impl AppState {
         engine: &mut Option<engine::Engine>,
         cancel: &CancellationToken,
     ) -> Result<(), String> {
+        if !model::ready(&self.directory) {
+            return Err("設定画面から翻訳モデルをダウンロードしてください。".into());
+        }
         // Drop a stopped process before attempting another launch.
         *engine = None;
         *engine =
@@ -244,6 +247,8 @@ impl AppState {
 #[serde(rename_all = "camelCase")]
 struct AppStatus {
     model_ready: bool,
+    model_id: &'static str,
+    models: Vec<model::Choice>,
     runtime_available: bool,
     shortcut_available: bool,
     shortcut: String,
@@ -277,6 +282,8 @@ fn get_status(state: tauri::State<'_, AppState>) -> AppStatus {
         .expect("lens open shortcut state poisoned");
     AppStatus {
         model_ready: model::ready(&state.directory),
+        model_id: model::selected(&state.directory).id,
+        models: model::choices(&state.directory),
         runtime_available: state.binary.is_file(),
         shortcut_available: shortcut.available,
         shortcut: shortcut::label(shortcut.binding),
@@ -484,7 +491,9 @@ async fn download_model(
     if model::ready(&state.directory) {
         return Ok(());
     }
-    model::download(&state.directory, &on_event, &operation.token).await
+    model::download(&state.directory, &on_event, &operation.token).await?;
+    let _ = window.app_handle().emit("translation-model-changed", ());
+    Ok(())
 }
 
 #[tauri::command]
@@ -942,6 +951,7 @@ pub fn run() {
             set_shortcut_popup,
             set_shortcut_recording,
             download_model,
+            model::set_translation_model,
             prepare_engine,
             translate,
             cancel_operation,
@@ -1387,6 +1397,32 @@ mod tests {
         assert!(!pending.popup.dismissible);
         pending.finish_popup(next);
         assert!(pending.popup.dismissible);
+    }
+
+    #[test]
+    fn model_switch_preserves_selection_while_any_consumer_is_busy() {
+        use crate::{model, Ordering};
+        let mut state = state();
+        state.directory =
+            std::env::temp_dir().join(format!("plamo-switch-{}", uuid::Uuid::new_v4()));
+        for label in ["main", "popup", "lens"] {
+            let operation = state.begin(label).unwrap();
+            assert!(model::switch(&state, "2b-q4").is_err());
+            assert_eq!(model::selected(&state.directory).id, "0.8b-q4");
+            drop(operation);
+        }
+        let download = state.download.try_lock().unwrap();
+        assert!(model::switch(&state, "2b-q4").is_err());
+        drop(download);
+        let preparation = state.engine.try_lock().unwrap();
+        assert!(model::switch(&state, "2b-q4").is_err());
+        drop(preparation);
+        state.lens_open.store(true, Ordering::Relaxed);
+        assert!(model::switch(&state, "2b-q4").is_err());
+        state.lens_open.store(false, Ordering::Relaxed);
+        model::switch(&state, "2b-q4").unwrap();
+        assert_eq!(model::selected(&state.directory).id, "2b-q4");
+        std::fs::remove_dir_all(&state.directory).unwrap();
     }
 
     fn state() -> AppState {

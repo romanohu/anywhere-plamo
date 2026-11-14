@@ -417,6 +417,9 @@ export async function initLens(): Promise<void> {
     await window.__TAURI__!.event.listen('ocr-settings-changed', () => {
       invalidate(auto ? instruction() : 'OCR設定を変更しました。「更新」で再読取', true);
     });
+    await window.__TAURI__!.event.listen('translation-model-changed', () => {
+      invalidate(auto ? instruction() : 'モデルを変更しました。「更新」で再翻訳', true);
+    });
     await onWindowHidden(() => { visible = false; showAgain = false; selectedRefresh = false; invalidate(instruction(), true); });
     await window.__TAURI__!.event.listen('window-shown', () => { void shown(); });
     const app = await invoke<AppStatus>('get_status');

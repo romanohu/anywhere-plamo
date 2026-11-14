@@ -10,7 +10,8 @@ The MIT license in this repository covers Anywhere Plamo's original source code.
 | ONNX Runtime | MIT | https://github.com/microsoft/onnxruntime |
 | OpenCV (Android) | Apache-2.0; bundled components retain their notices | https://github.com/opencv/opencv |
 | Python and OCR dependencies | PSF-2.0 and their respective licenses (bundled in `ocr/licenses`) | https://www.python.org/ · https://pypi.org/project/rapidocr/ |
-| PLaMo 3 Translate 0.8B GGUF (Q4_K_M) | [PLaMo Community License](https://plamo.preferredai.jp/info/plamo-community-license-ja) | https://huggingface.co/pfnet/plamo-3-translate-0.8b-GGUF |
+| PLaMo 3 Translate 0.8B GGUF (Q2_K, Q3_K_M, Q4_K_M) | [PLaMo Community License](https://plamo.preferredai.jp/info/plamo-community-license-ja) | https://huggingface.co/pfnet/plamo-3-translate-0.8b-GGUF |
+| PLaMo 3 Translate 2B GGUF (Q4_K_M) | [PLaMo Community License](https://plamo.preferredai.jp/info/plamo-community-license-ja) | https://huggingface.co/pfnet/plamo-3-translate-2b-GGUF |
 
 The model is downloaded separately from PFN's official distribution. It is not
 relicensed under MIT. The [official model card](https://huggingface.co/pfnet/plamo-3-translate-0.8b-GGUF#license)
