@@ -92,6 +92,10 @@ impl Engine {
                 "8192",
                 "--parallel",
                 "1",
+                // The app caches final translations. Keep only the live slot's KV prefix,
+                // rather than llama-server's additional (default 8 GiB) prompt snapshots.
+                "--cache-ram",
+                "0",
                 "--no-warmup",
                 "--log-disable",
             ])

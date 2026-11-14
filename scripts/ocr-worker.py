@@ -1,9 +1,12 @@
 """Offline PP-OCRv6 worker. One JSON request/response per line on stdin/stdout."""
+from collections import OrderedDict
+import hashlib
 import json
 import os
 from pathlib import Path
 import socket
 import sys
+import time
 
 os.environ.update(OMP_NUM_THREADS="2", OPENBLAS_NUM_THREADS="1", DO_NOT_TRACK="1")
 
@@ -22,6 +25,7 @@ import cv2
 import numpy as np
 import onnxruntime
 from rapidocr import LangRec, ModelType, OCRVersion, RapidOCR
+from rapidocr.ch_ppocr_rec import TextRecOutput
 
 cv2.setNumThreads(2)
 onnxruntime.disable_telemetry_events()
@@ -176,13 +180,55 @@ def prefer_korean(text, score, korean, korean_score):
     return hangul >= 2 and korean_score >= .9 and (korean_score > score + .05 or omitted)
 
 
-class MultilingualOCR(RapidOCR):
-    def __init__(self, params, korean):
+class CachedOCR(RapidOCR):
+    CACHE_ENTRIES = 256
+    CACHE_CHARACTERS = 32768
+
+    def __init__(self, params, korean=None):
         super().__init__(params=params)
-        self.korean = RapidOCR(params=korean)
+        self.korean = RapidOCR(params=korean) if korean else None
+        self.cache = OrderedDict()
+        self.cache_characters = 0
 
     def recognize_txt(self, images):
+        started = time.perf_counter()
+        # Always detect and position lines afresh. Reuse recognition only when
+        # every crop pixel and its shape match; never retain captured images.
+        keys = [(image.shape, hashlib.sha256(np.ascontiguousarray(image)).digest()) for image in images]
+        results = [None] * len(images)
+        ratios = [image.shape[1] / image.shape[0] for image in images]
+        order = np.argsort(ratios)
+        batch_size = self.cfg.Rec.rec_batch_num
+        _, height, width = self.cfg.Rec.rec_img_shape
+        for start in range(0, len(images), batch_size):
+            indices = order[start:start + batch_size]
+            # RapidOCR pads every crop to its batch's widest line. Keep that
+            # width in the key and rerun the entire original batch on any miss,
+            # so caching cannot change the remaining lines' normalization.
+            padded_width = int(height * max(width / height, *(ratios[i] for i in indices)))
+            batch_keys = [(*keys[i], padded_width) for i in indices]
+            batch_results = [self.cache.get(key) for key in batch_keys]
+            if any(result is None for result in batch_results):
+                recognized = self.recognize_uncached([images[i] for i in indices])
+                batch_results = list(zip(recognized.txts, recognized.scores))
+                for key, result in zip(batch_keys, batch_results):
+                    previous = self.cache.pop(key, None)
+                    self.cache_characters -= len(previous[0]) if previous else 0
+                    self.cache[key] = result
+                    self.cache_characters += len(result[0])
+            for i, key, result in zip(indices, batch_keys, batch_results):
+                results[i] = result
+                self.cache.move_to_end(key)
+            while len(self.cache) > self.CACHE_ENTRIES or self.cache_characters > self.CACHE_CHARACTERS:
+                self.cache_characters -= len(self.cache.popitem(last=False)[1][0])
+        texts, scores = zip(*results) if results else ((), ())
+        return TextRecOutput(imgs=images, txts=tuple(texts), scores=tuple(scores),
+                             word_results=(None,) * len(images), elapse=time.perf_counter() - started)
+
+    def recognize_uncached(self, images):
         result = super().recognize_txt(images)
+        if self.korean is None:
+            return result
         korean = self.korean.recognize_txt(images)
         texts, scores = list(result.txts), list(result.scores)
         for i, (text, score, candidate, confidence) in enumerate(zip(texts, scores, korean.txts, korean.scores)):
@@ -207,7 +253,7 @@ class Ocr:
             params.update({f'{task}.model_path': str(path), f'{task}.ocr_version': OCRVersion.PPOCRV6,
                            f'{task}.model_type': ModelType.SMALL})
         if korean_path is None:
-            self.engine = RapidOCR(params=params)
+            self.engine = CachedOCR(params=params)
             return
         if not korean_path.is_file():
             raise FileNotFoundError(korean_path.name)
@@ -215,7 +261,7 @@ class Ocr:
                   'Rec.ocr_version': OCRVersion.PPOCRV5, 'Rec.model_type': ModelType.MOBILE,
                   'Rec.lang_type': LangRec.KOREAN}
         # Detect/crop only once, then recognize those same lines with both models.
-        self.engine = MultilingualOCR(params, korean)
+        self.engine = CachedOCR(params, korean)
 
     def recognize(self, path):
         # Never pass strings to RapidOCR: it also accepts URLs as image inputs.

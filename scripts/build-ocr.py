@@ -12,7 +12,7 @@ import venv
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 WORK = ROOT / ".runtime-build"
 OUTPUT = ROOT / "src-tauri/resources/runtime"
-PACKAGES = {"rapidocr": "3.10.0", "onnxruntime": "1.23.2", "opencv-python": "4.11.0.86",
+PACKAGES = {"rapidocr": "3.10.0", "onnxruntime": "1.23.2", "opencv-python-headless": "4.11.0.86",
             "numpy": "2.2.6", "Pillow": "12.0.0", "pyinstaller": "6.22.0"}
 MODELS = {"det": "090f04abcd9d9a7498bc4ebf677e4cb9bdce1fe4197ddb7e529f1ef44e1ff94f",
           "rec": "6f327246b50388f3c176ae304bd95767ea6dc0c9ae92153ef8cbe210b3c14884"}
@@ -41,6 +41,15 @@ def main():
     executable = "ocr-worker.exe" if platform.system() == "Windows" else "ocr-worker"
     if not python.exists():
         venv.EnvBuilder(with_pip=True).create(environment)
+    # OpenCV variants share the cv2 namespace. Remove both the old GUI wheel and
+    # any overlapping variant before installing the pinned headless dependency.
+    opencv = json.loads(subprocess.check_output([str(python), "-c", '''
+import importlib.metadata as m,json
+print(json.dumps([d.metadata['Name'] for d in m.distributions() if d.metadata['Name'].lower().replace('_','-') in
+    {'opencv-python','opencv-python-headless','opencv-contrib-python','opencv-contrib-python-headless'}]))
+'''], text=True))
+    if any(name.lower().replace('_', '-') != 'opencv-python-headless' for name in opencv):
+        subprocess.run([str(python), "-m", "pip", "uninstall", "-y", *opencv], check=True)
     check = "import importlib.metadata as m,json; print(json.dumps({k:m.version(k) for k in " + repr(list(PACKAGES)) + "}))"
     installed = subprocess.run([str(python), "-c", check], capture_output=True, text=True)
     if installed.returncode or json.loads(installed.stdout) != PACKAGES:

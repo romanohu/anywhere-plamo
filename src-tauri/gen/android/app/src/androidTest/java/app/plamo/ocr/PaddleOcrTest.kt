@@ -10,11 +10,41 @@ import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.opencv.core.*
+import org.opencv.imgproc.Imgproc
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 
 @RunWith(AndroidJUnit4::class)
 class PaddleOcrTest {
+    @Test
+    fun localBoxScoresMatchFullFrameIncludingClippedPolygons() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        PaddleOcr(context.assets, AtomicBoolean(false)).use { ocr ->
+            val score = PaddleOcr::class.java.getDeclaredMethod("boxScore", Mat::class.java, Mat::class.java, MatOfPoint::class.java)
+                .apply { isAccessible = true }
+            val probabilities = Mat(120, 160, CvType.CV_32F)
+            val mask = Mat(120, 160, CvType.CV_8U)
+            try {
+                probabilities.put(0, 0, FloatArray(120 * 160) { (it * 17 % 1024) / 1024f })
+                for (x in listOf(-12.0, 0.0, 42.0, 159.0, 175.0)) {
+                    for (angle in listOf(-35.0, 0.0, 70.0)) {
+                        val corners = Array(4) { Point() }
+                        RotatedRect(Point(x, 55.0), Size(44.0, 18.0), angle).points(corners)
+                        val polygon = MatOfPoint(*corners)
+                        try {
+                            mask.setTo(Scalar(0.0))
+                            Imgproc.fillPoly(mask, listOf(polygon), Scalar(1.0))
+                            val expected = Core.mean(probabilities, mask).`val`[0]
+                            mask.setTo(Scalar(255.0))
+                            assertEquals("x=$x angle=$angle", expected, score.invoke(ocr, probabilities, mask, polygon) as Double, 1e-9)
+                        } finally { polygon.release() }
+                    }
+                }
+            } finally { probabilities.release(); mask.release() }
+        }
+    }
+
     @Test
     fun sidewaysEnglishInBothDirections() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext

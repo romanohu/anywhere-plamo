@@ -101,19 +101,23 @@ impl Ocr {
                 child,
             });
         }
+        // Own the process across await points. If this future is dropped (rather
+        // than its token being cancelled), kill_on_drop must discard its pending
+        // response too; otherwise the next frame could receive the previous OCR.
+        let mut running = worker.take().unwrap();
         let result = tokio::select! {
             biased;
             _ = cancel.cancelled() => Err("CANCELLED".into()),
-            result = tokio::time::timeout(Duration::from_secs(60), worker.as_mut().unwrap().read(path)) => {
+            result = tokio::time::timeout(Duration::from_secs(60), running.read(path)) => {
                 result.unwrap_or_else(|_| Err("文字認識がタイムアウトしました。範囲を小さくして再試行してください。".into()))
             }
         };
         if result.is_err() {
             // Discard the pending response on cancellation/error. The next request
             // starts a fresh worker, so stale results cannot reach another frame.
-            if let Some(mut stopped) = worker.take() {
-                let _ = stopped.child.kill().await;
-            }
+            let _ = running.child.kill().await;
+        } else {
+            *worker = Some(running);
         }
         result
     }
@@ -178,6 +182,81 @@ fn parse_response(bytes: &[u8]) -> Result<Vec<TextBlock>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_a_request_discards_its_worker_and_pending_response() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory =
+            std::env::temp_dir().join(format!("plamo-ocr-abort-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(directory.join("ocr")).unwrap();
+        let executable = directory.join(EXECUTABLE);
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\nread -r request\necho $$ > \"$1\"\nexec sleep 30\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let ocr = std::sync::Arc::new(Ocr::default());
+        let operation = ocr.clone();
+        let runtime = directory.clone();
+        let task = tokio::spawn(async move {
+            operation
+                .recognize(
+                    &runtime,
+                    &runtime.join("capture.png"),
+                    &CancellationToken::new(),
+                )
+                .await
+        });
+        let pid = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Ok(value) = std::fs::read_to_string(directory.join("ocr-models")) {
+                    if let Ok(pid) = value.trim().parse::<u32>() {
+                        break pid.to_string();
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(ocr.worker.lock().await.is_none());
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while std::process::Command::new("kill")
+                .args(["-0", &pid])
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("aborted OCR worker remained alive");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\nwhile read -r request; do echo '{\"blocks\":[]}'; done\n",
+        )
+        .unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            ocr.recognize(
+                &directory,
+                &directory.join("next.png"),
+                &CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("next request reused the aborted worker")
+        .unwrap();
+        assert!(result.is_empty());
+        ocr.stop().await;
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[tokio::test]
     #[ignore = "requires bundled OCR and ANYWHERE_PLAMO_KOREAN_MODEL pointing to the optional weight"]

@@ -26,6 +26,25 @@ test('small hand motion, sensor noise and exposure changes preserve a camera sce
   assert.equal(cameraMotion(reference, new Uint8ClampedArray(reference.length)).changed, true);
 });
 
+test('camera motion retains RGB luminance and subpixel movement across all small displacements', () => {
+  const colored = (dx, dy) => {
+    const pixels = frame(dx, dy);
+    for (let y = 0; y < 48; y++) for (let x = 0; x < 64; x++) {
+      const i = (y * 64 + x) * 4;
+      pixels[i + 1] = Math.abs((x - dx) * 17 + (y - dy) * 11) % 256;
+      pixels[i + 2] = Math.abs((x - dx) * 3 + (y - dy) * 23) % 256;
+    }
+    return pixels;
+  };
+  const reference = colored(0, 0);
+  for (let y = -3; y <= 3; y++) for (let x = -3; x <= 3; x++) {
+    const result = cameraMotion(reference, colored(x, y));
+    assert.equal(result.changed, false);
+    assert.equal(result.x, x / 64);
+    assert.equal(result.y, y / 48);
+  }
+});
+
 test('dense multi-column camera translations stay bounded and never overlap', () => {
   const blocks = Array.from({ length: 10 }, (_, i) => ({ text: 'A long original paragraph', x: .04 + i % 2 * .5,
     y: .08 + Math.floor(i / 2) * .17, width: .4, height: .14,
@@ -61,4 +80,14 @@ test('even coincident OCR boxes cannot stack markers on a small camera view', ()
   for (const [i, a] of visible.entries()) for (const b of visible.slice(i + 1)) {
     assert.ok(a.x + a.width <= b.x || b.x + b.width <= a.x || a.y + a.height <= b.y || b.y + b.height <= a.y);
   }
+});
+
+test('untranslated camera blocks do not reserve space or force visible translations into markers', () => {
+  const blocks = Array.from({ length: 2 }, () => ({ text: 'Hello', x: .1, y: .2, width: .5, height: .1 }));
+  const [pending, translated] = cameraLayout(blocks, ['', 'こんにちは'], 400, 600);
+  assert.equal(pending.hidden, true);
+  assert.equal(translated.hidden, undefined);
+  assert.equal(translated.marker, false);
+  assert.equal(translated.x, 40);
+  assert.equal(translated.y, 120);
 });

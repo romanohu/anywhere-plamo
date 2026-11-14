@@ -41,6 +41,7 @@ async function fixture(t, options = {}) {
   const byId = id => window.document.getElementById(id);
   const cameraStreams = [];
   const cameraRequests = [];
+  const cameraEncodings = [];
   let cameraPixel = 0;
   let finishCamera;
   let finishCameraRead;
@@ -50,11 +51,16 @@ async function fixture(t, options = {}) {
     Object.defineProperties(byId('camera-video'), { videoWidth: { value: 1920 }, videoHeight: { value: 1080 } });
     byId('camera-video').play = async () => {};
     window.HTMLCanvasElement.prototype.getContext = () => ({ drawImage() {}, save() {}, restore() {}, translate() {}, rotate() {}, resetTransform() {}, getImageData() { return { data: new window.Uint8ClampedArray(64 * 48 * 4).fill(cameraPixel) }; } });
-    window.HTMLCanvasElement.prototype.toDataURL = () => 'data:image/png;base64,dGVzdA==';
+    window.HTMLCanvasElement.prototype.toDataURL = () => { throw new Error('Synchronous camera encoding blocks the UI'); };
+    window.HTMLCanvasElement.prototype.toBlob = function (callback, type) {
+      const finish = () => callback(options.cameraEncodeNull ? null : new window.Blob(['test'], { type }));
+      cameraEncodings.push({ width: this.width, height: this.height, type, finish });
+      if (!options.holdCameraEncode) finish();
+    };
     Object.defineProperty(window.navigator, 'mediaDevices', { value: { getUserMedia: async constraints => {
       cameraRequests.push(constraints);
       if (options.cameraError) throw new window.DOMException('Denied', options.cameraError);
-      const track = { stopped: 0, stop() { this.stopped++; } };
+      const track = Object.assign(new window.EventTarget(), { stopped: 0, stop() { this.stopped++; } });
       const stream = { getTracks: () => [track], track };
       cameraStreams.push(stream);
       if (options.holdCamera) return new Promise(resolve => { finishCamera = () => resolve(stream); });
@@ -100,6 +106,7 @@ async function fixture(t, options = {}) {
   let finishPending;
   let finishRecording;
   let finishCapture;
+  const statusRequests = [];
   const channels = [];
   let korean = { ready: false, enabled: false, ...options.korean };
   const native = {
@@ -108,7 +115,11 @@ async function fixture(t, options = {}) {
       invoke: async (command, args) => {
         calls.push({ command, args });
         switch (command) {
-          case 'get_status': return { ...state };
+          case 'get_status': {
+            const status = { ...state };
+            if (options.holdStatus) return new Promise(resolve => { statusRequests.push(() => resolve(status)); });
+            return status;
+          }
           case 'get_korean_ocr': return { ...korean };
           case 'set_korean_ocr':
             if (options.koreanError) throw options.koreanError;
@@ -221,7 +232,8 @@ async function fixture(t, options = {}) {
   t.after(() => { dom.window.close(); assert.deepEqual(errors, []); });
   return {
     window, byId, calls, state, channels,
-    cameraStreams, cameraRequests,
+    cameraStreams, cameraRequests, cameraEncodings,
+    finishCameraEncode(index = cameraEncodings.length - 1) { cameraEncodings[index].finish(); },
     finishCamera() { finishCamera(); },
     finishCameraRead() { finishCameraRead(); },
     cameraFrame(value) { cameraPixel = value; },
@@ -244,6 +256,7 @@ async function fixture(t, options = {}) {
     finishPending() { finishPending(); },
     finishRecording() { finishRecording(); },
     finishCapture(text) { finishCapture(captureResult({ kind: 'text', text })); },
+    finishStatus() { statusRequests.shift()(); },
     async tickLens() {
       const pending = [...lensTimers.values()]; lensTimers.clear();
       pending.forEach(callback => callback());
@@ -252,6 +265,7 @@ async function fixture(t, options = {}) {
     lensDelay: () => lensDelay,
     showWindow() { listeners.get('window-shown')?.({ payload: null }); },
     modelChanged() { listeners.get('translation-model-changed')?.({ payload: null }); },
+    ocrChanged() { listeners.get('ocr-settings-changed')?.({ payload: null }); },
     passthrough(enabled) { state.lensPassthrough = enabled; listeners.get('lens-passthrough-changed')?.({ payload: enabled }); },
     lensShortcutChanged() { listeners.get('lens-shortcut-changed')?.({ payload: null }); },
     moveLens() { listeners.get('lens-changed')?.({ payload: null }); },
@@ -1438,7 +1452,7 @@ test('closing during a paragraph translation prevents remaining paragraphs and l
   assert.equal(f.byId('lens-translation').textContent, '');
 });
 
-test('lens checks model readiness on each update, including after a download in the main window', async t => {
+test('lens checks model readiness on each manual update, including after a download in the main window', async t => {
   const f = await fixture(t, { lens: true, modelReady: false });
   f.click('lens-refresh');
   await until(() => f.byId('lens-status').textContent.includes('準備してください'));
@@ -1446,6 +1460,74 @@ test('lens checks model readiness on each update, including after a download in 
   f.state.modelReady = true;
   f.click('lens-refresh');
   await until(() => f.byId('lens-status').textContent.startsWith('更新しました'));
+});
+
+test('automatic lens reuses readiness until settings, an explicit refresh or the visible session change', async t => {
+  const f = await fixture(t, { lens: true, autoLens: true,
+    captureResults: Array.from({ length: 20 }, () => ({ kind: 'unchanged' })) });
+  const checks = () => f.calls.filter(call => call.command === 'get_status').length;
+  await f.tickLens();
+  const initial = checks();
+  for (let index = 0; index < 4; index++) await f.tickLens();
+  f.moveLens();
+  await f.tickLens();
+  assert.equal(checks(), initial, 'settled frames and movement do not reread model receipts');
+  f.ocrChanged();
+  await f.tickLens();
+  assert.equal(checks(), initial + 1);
+  f.modelChanged();
+  await f.tickLens();
+  assert.equal(checks(), initial + 2);
+  f.click('lens-refresh');
+  await f.tickLens();
+  assert.equal(checks(), initial + 3);
+  f.closeWindow();
+  f.showWindow();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  await f.tickLens();
+  assert.equal(checks(), initial + 4);
+  await f.tickLens();
+  assert.equal(checks(), initial + 4);
+});
+
+test('late readiness responses cannot override changed model or OCR settings', async t => {
+  for (const setting of ['modelReady', 'ocrAvailable']) {
+    const options = { lens: true, autoLens: true };
+    const f = await fixture(t, options);
+    options.holdStatus = true;
+    await f.tickLens();
+    f.state[setting] = false;
+    if (setting === 'modelReady') f.modelChanged();
+    else f.ocrChanged();
+    options.holdStatus = false;
+    f.finishStatus();
+    await f.tickLens();
+    await f.tickLens();
+    assert.equal(f.calls.some(call => call.command === 'capture_lens'), false);
+    assert.equal(f.byId('lens-auto').getAttribute('aria-pressed'), 'false');
+    assert.match(f.byId('lens-status').textContent, setting === 'modelReady' ? /準備してください/ : /ocr:build/);
+    f.state[setting] = true;
+    f.click('lens-refresh');
+    await until(() => f.byId('lens-status').textContent.startsWith('更新しました'));
+  }
+});
+
+test('automatic lens preserves backend errors and rechecks readiness before retrying', async t => {
+  const options = { lens: true, autoLens: true };
+  const f = await fixture(t, options);
+  await f.tickLens();
+  const checks = f.calls.filter(call => call.command === 'get_status').length;
+  options.captureError = '文字認識エンジンが見つかりません。';
+  await f.tickLens();
+  assert.equal(f.byId('lens-status').textContent, options.captureError);
+  assert.equal(f.byId('lens-auto').getAttribute('aria-pressed'), 'false');
+  const captures = f.calls.filter(call => call.command === 'capture_lens').length;
+  f.state.runtimeAvailable = false;
+  f.click('lens-auto');
+  await f.tickLens();
+  assert.equal(f.calls.filter(call => call.command === 'get_status').length, checks + 1);
+  assert.equal(f.calls.filter(call => call.command === 'capture_lens').length, captures);
+  assert.match(f.byId('lens-status').textContent, /準備してください/);
 });
 
 test('moving or resizing the lens discards late OCR without translating or refreshing automatically', async t => {
@@ -2037,6 +2119,8 @@ test('camera language changes retranslate frozen images and backgrounding stops 
   f.byId('camera-target').dispatchEvent(new f.window.Event('change'));
   await until(() => f.calls.filter(c => c.command === 'translate').length === 2);
   assert.equal(f.calls.filter(c => c.command === 'translate').at(-1).args.target, 'ko');
+  assert.equal(f.calls.filter(c => c.command === 'recognize_camera').length, 1, 'a frozen image only needs OCR once');
+  assert.equal(f.cameraEncodings.length, 1, 'changing target language reuses the frozen OCR result');
   await until(() => f.byId('camera-status').textContent === '翻訳完了');
   f.click('camera-auto'); await until(() => f.cameraStreams.length === 2);
   await until(() => f.byId('camera-video').srcObject);
@@ -2138,4 +2222,105 @@ test('automatic camera has a bounded initial wait even if motion never fully set
   f.click('camera-button'); await until(() => f.byId('camera-video').srcObject);
   for (let i = 0; i < 10; i++) { f.cameraFrame(i % 2 ? 0 : 200); f.advance(150); await f.tickLens(); }
   assert.equal(f.calls.filter(c => c.command === 'recognize_camera').length, 1);
+});
+
+test('closing during asynchronous camera encoding discards the image and releases the frame', async t => {
+  const f = await fixture(t, { camera: true, holdCameraEncode: true });
+  f.click('camera-button'); await until(() => !f.byId('camera-capture').disabled);
+  f.click('camera-capture'); await until(() => f.cameraEncodings.length === 1);
+  assert.equal(f.cameraEncodings[0].type, 'image/png');
+  assert.equal(f.cameraEncodings[0].width, 1920);
+  assert.equal(f.cameraEncodings[0].height, 1080);
+  f.click('camera-close');
+  assert.equal(f.byId('camera-dialog').open, false);
+  f.finishCameraEncode();
+  await until(() => f.byId('camera-preview').width === 0);
+  assert.equal(f.calls.filter(c => c.command === 'recognize_camera').length, 0);
+  assert.equal(f.cameraStreams[0].track.stopped, 1);
+});
+
+test('a language change during encoding discards the stale frame job before translating the new target', async t => {
+  const f = await fixture(t, { camera: true, holdCameraEncode: true });
+  f.click('camera-button'); await until(() => !f.byId('camera-capture').disabled);
+  f.click('camera-capture'); await until(() => f.cameraEncodings.length === 1);
+  f.byId('camera-target').value = 'ko';
+  f.byId('camera-target').dispatchEvent(new f.window.Event('change'));
+  f.finishCameraEncode(0);
+  await until(() => f.cameraEncodings.length === 2);
+  assert.equal(f.calls.filter(c => c.command === 'recognize_camera').length, 0);
+  f.finishCameraEncode(1);
+  await until(() => f.byId('camera-status').textContent === '翻訳完了');
+  assert.equal(f.calls.filter(c => c.command === 'translate').length, 1);
+  assert.equal(f.calls.find(c => c.command === 'translate').args.target, 'ko');
+});
+
+test('retaking during camera encoding waits for the old job and never recognizes the discarded frame', async t => {
+  const f = await fixture(t, { camera: true, holdCameraEncode: true });
+  f.click('camera-button'); await until(() => !f.byId('camera-capture').disabled);
+  f.click('camera-capture'); await until(() => f.cameraEncodings.length === 1);
+  assert.equal(f.byId('camera-retry').hidden, false);
+  f.click('camera-retry');
+  f.finishCameraEncode();
+  await until(() => f.cameraStreams.length === 2 && !f.byId('camera-capture').disabled);
+  assert.equal(f.calls.filter(c => c.command === 'recognize_camera').length, 0);
+  f.click('camera-capture'); await until(() => f.cameraEncodings.length === 2);
+  f.finishCameraEncode();
+  await until(() => f.byId('camera-status').textContent === '翻訳完了');
+  assert.equal(f.calls.filter(c => c.command === 'recognize_camera').length, 1);
+});
+
+test('camera encoding failure is retryable and never sends an invalid image to OCR', async t => {
+  const options = { camera: true, cameraEncodeNull: true };
+  const f = await fixture(t, options);
+  f.click('camera-button'); await until(() => !f.byId('camera-capture').disabled);
+  f.click('camera-capture');
+  await until(() => f.byId('camera-status').textContent === '撮影画像を作成できません。');
+  assert.equal(f.calls.filter(c => c.command === 'recognize_camera').length, 0);
+  assert.equal(f.byId('camera-retry').hidden, false);
+  options.cameraEncodeNull = false;
+  f.click('camera-retry'); await until(() => !f.byId('camera-capture').disabled);
+  f.click('camera-capture'); await until(() => f.byId('camera-status').textContent === '翻訳完了');
+});
+
+test('reopening the camera after a model change cannot reuse the previous model translation', async t => {
+  const f = await fixture(t, { camera: true, translationOutputs: ['前のモデルの訳文', '新しいモデルの訳文'] });
+  f.click('camera-button'); await until(() => !f.byId('camera-capture').disabled);
+  f.click('camera-capture'); await until(() => f.byId('camera-status').textContent === '翻訳完了');
+  f.click('camera-close'); await until(() => f.byId('camera-preview').width === 0);
+  f.state.modelId = '0.8b-q3'; f.modelChanged();
+  await until(() => f.byId('translation-model').value === '0.8b-q3');
+  f.click('camera-button'); await until(() => !f.byId('camera-capture').disabled);
+  f.click('camera-capture'); await until(() => f.byId('camera-status').textContent === '翻訳完了');
+  assert.equal(f.calls.filter(c => c.command === 'translate').length, 2);
+  assert.equal(f.byId('camera-paragraphs').querySelector('span').textContent, '新しいモデルの訳文');
+});
+
+test('camera streaming updates are batched until the next animation frame', async t => {
+  const f = await fixture(t, { camera: true, holdTranslation: true, manualFrames: true });
+  f.click('camera-button'); await until(() => !f.byId('camera-capture').disabled);
+  f.click('camera-capture'); await until(() => f.channels.length === 1);
+  f.paint();
+  f.send({ kind: 'token', text: '翻訳' });
+  f.send({ kind: 'token', text: 'を' });
+  f.send({ kind: 'token', text: 'まとめて表示' });
+  assert.equal(f.byId('camera-paragraphs').querySelector('span').textContent, '');
+  f.paint();
+  assert.equal(f.byId('camera-paragraphs').querySelector('span').textContent, '翻訳をまとめて表示');
+  f.finish({ truncated: false });
+  await until(() => f.byId('camera-status').textContent === '翻訳完了');
+});
+
+test('losing the camera device cancels work and allows reopening without stale results', async t => {
+  const f = await fixture(t, { camera: true, autoCamera: true, holdTranslation: true });
+  f.click('camera-button'); await until(() => f.byId('camera-video').srcObject);
+  f.advance(350); await f.tickLens();
+  await until(() => f.channels.length === 1);
+  f.cameraStreams[0].track.dispatchEvent(new f.window.Event('ended'));
+  await until(() => f.calls.some(c => c.command === 'cancel_operation'));
+  assert.equal(f.byId('camera-video').srcObject, null);
+  assert.match(f.byId('camera-status').textContent, /接続が切れました/);
+  f.send({ kind: 'token', text: '古い映像の訳文' });
+  assert.equal(f.byId('camera-paragraphs').querySelector('span').textContent, '');
+  f.click('camera-retry'); await until(() => f.cameraStreams.length === 2 && f.byId('camera-video').srcObject);
+  assert.equal(f.cameraStreams[0].track.stopped, 1);
 });

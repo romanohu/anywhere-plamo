@@ -208,9 +208,12 @@ impl Engine {
                 return Ok(TranslationResult { truncated: true });
             }
         }
-        if !stream.output.trim().is_empty() {
-            self.cache.insert(text, target, stream.output);
+        if stream.output.trim().is_empty() {
+            return Err(
+                "訳文が生成されませんでした。文章や翻訳先を変更してお試しください。".into(),
+            );
         }
+        self.cache.insert(text, target, stream.output);
         Ok(TranslationResult { truncated: false })
     }
 }

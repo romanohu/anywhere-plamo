@@ -19,6 +19,7 @@ export async function initLens(): Promise<void> {
   const source = element('lens-source');
   const status = element('lens-status');
   let ready = false;
+  let readinessChecked = false;
   let positioning = false;
   let showAgain = false;
   let selectedRefresh = false;
@@ -192,13 +193,17 @@ export async function initLens(): Promise<void> {
       render();
     }
     try {
-      const app = await invoke<AppStatus>('get_status');
-      if (run !== generation) return;
-      if (!app.modelReady || !app.runtimeAvailable) {
-        throw new Error('通常の翻訳画面でモデルと翻訳エンジンを準備してください。');
-      }
-      if (!app.ocrAvailable) {
-        throw new Error('文字認識エンジンが見つかりません。アプリを再インストールしてください。ソース版では npm run ocr:build を実行してください。');
+      // Recheck on explicit retries and session/settings changes, not every frame.
+      if (!background || !readinessChecked) {
+        const app = await invoke<AppStatus>('get_status');
+        if (run !== generation) return;
+        if (!app.modelReady || !app.runtimeAvailable) {
+          throw new Error('通常の翻訳画面でモデルと翻訳エンジンを準備してください。');
+        }
+        if (!app.ocrAvailable) {
+          throw new Error('文字認識エンジンが見つかりません。アプリを再インストールしてください。ソース版では npm run ocr:build を実行してください。');
+        }
+        readinessChecked = true;
       }
       const rect = region.getBoundingClientRect();
       const onEvent = progressChannel(event => {
@@ -297,6 +302,7 @@ export async function initLens(): Promise<void> {
     } catch (error) {
       if (run === generation) {
         const detail = error instanceof Error ? error.message : String(error);
+        readinessChecked = false;
         auto = false;
         // A failed capture pauses polling instead of repeating permission dialogs/errors.
         message(detail === 'CANCELLED' ? '中断しました' : detail, detail !== 'CANCELLED');
@@ -329,6 +335,7 @@ export async function initLens(): Promise<void> {
   });
   automatic.addEventListener('click', () => {
     auto = !auto;
+    if (auto) readinessChecked = false;
     if (!auto) selectedRefresh = false;
     saveAuto();
     if (auto || busy) invalidate(instruction());
@@ -374,6 +381,7 @@ export async function initLens(): Promise<void> {
   document.addEventListener('visibilitychange', () => {
     if (!auto) return;
     visible = !document.hidden;
+    readinessChecked = false;
     invalidate(instruction(), !visible);
   });
   if (!isDesktop) { message('OCRレンズはデスクトップアプリで利用できます。'); return; }
@@ -390,6 +398,7 @@ export async function initLens(): Promise<void> {
     if (!ready) return;
     if (positioning) { showAgain = true; return; }
     visible = true;
+    readinessChecked = false;
     positioning = true;
     invalidate(instruction(), true);
     try {
@@ -415,9 +424,11 @@ export async function initLens(): Promise<void> {
     });
     await window.__TAURI__!.event.listen('lens-changed', moved);
     await window.__TAURI__!.event.listen('ocr-settings-changed', () => {
+      readinessChecked = false;
       invalidate(auto ? instruction() : 'OCR設定を変更しました。「更新」で再読取', true);
     });
     await window.__TAURI__!.event.listen('translation-model-changed', () => {
+      readinessChecked = false;
       invalidate(auto ? instruction() : 'モデルを変更しました。「更新」で再翻訳', true);
     });
     await onWindowHidden(() => { visible = false; showAgain = false; selectedRefresh = false; invalidate(instruction(), true); });

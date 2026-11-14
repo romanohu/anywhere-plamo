@@ -19,7 +19,7 @@ impl Capture {
             .decode(data.strip_prefix("data:image/png;base64,").ok_or(invalid)?)
             .map_err(|_| invalid)?;
         let mut reader =
-            image::ImageReader::with_format(Cursor::new(bytes), image::ImageFormat::Png);
+            image::ImageReader::with_format(Cursor::new(&bytes), image::ImageFormat::Png);
         let mut limits = image::Limits::default();
         limits.max_image_width = Some(2048);
         limits.max_image_height = Some(2048);
@@ -29,6 +29,9 @@ impl Capture {
         if image.width() < 16 || image.height() < 16 {
             return Err(invalid.into());
         }
+        // Validate the entire image, then keep the lossless camera PNG as-is.
+        // Re-encoding the decoded pixels adds CPU work and another full frame.
+        drop(image);
         std::fs::create_dir_all(root).map_err(|_| "画像の保存先を作成できません。")?;
         let directory = root.join(format!("camera-{}", uuid::Uuid::new_v4()));
         let builder = std::fs::DirBuilder::new();
@@ -46,9 +49,7 @@ impl Capture {
             path: directory.join("capture.png"),
             directory,
         };
-        image
-            .to_rgb8()
-            .save(&capture.path)
+        std::fs::write(&capture.path, bytes)
             .map_err(|_| "撮影画像を保存できません。")?;
         Ok(capture)
     }
@@ -123,9 +124,16 @@ mod tests {
     #[test]
     fn private_capture_is_removed_after_use_and_invalid_images_are_rejected() {
         let root = std::env::temp_dir().join(format!("camera-test-{}", uuid::Uuid::new_v4()));
-        let capture = Capture::new(&root, &encoded(32, 24)).unwrap();
+        let input = encoded(32, 24);
+        let capture = Capture::new(&root, &input).unwrap();
         let path = capture.path.clone();
         assert_eq!(image::image_dimensions(&path).unwrap(), (32, 24));
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            base64::engine::general_purpose::STANDARD
+                .decode(input.strip_prefix("data:image/png;base64,").unwrap())
+                .unwrap()
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -145,6 +153,7 @@ mod tests {
             "data:image/png;base64,aW52YWxpZA==".to_owned(),
             encoded(2049, 16),
             encoded(1, 1),
+            input[..input.len() / 2].to_owned(),
         ] {
             assert!(Capture::new(&root, &value).is_err());
         }

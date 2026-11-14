@@ -754,7 +754,7 @@ def camera_checks():
       Object.defineProperty(navigator,'mediaDevices',{value:{getUserMedia:async constraints=>{
         if(constraints.audio!==false)throw new Error('Audio was requested');
         window.cameraRequested++;
-        const stream=new MediaStream();stream.getTracks=()=>[{stop:()=>window.cameraStopped++}];return stream;
+        const stream=new MediaStream();const track=Object.assign(new EventTarget(),{stop:()=>window.cameraStopped++});stream.getTracks=()=>[track];return stream;
       }}});
     """, image)
     wait('window.cameraFixture.complete && window.cameraFixture.naturalWidth > 0')

@@ -13,9 +13,13 @@ export function cameraLayout(blocks: CameraBlock[], translated: string[], width:
     const y = Math.max(0, Math.min(height - 1, block.y * height));
     const w = Math.max(1, Math.min(width - x, block.width * width));
     const h = Math.max(1, Math.min(height - y, block.height * height));
+    const text = translated[index] ?? '';
+    if (!text) {
+      placed.push({ x, y, width: w, height: h, font: 10, marker: false, hidden: true });
+      continue;
+    }
     const lines = (block.regions ?? [block]).map(r => r.height * height).sort((a, b) => a - b);
     let font = Math.max(10, Math.min(16, lines[Math.floor(lines.length / 2)] * .8));
-    const text = translated[index] ?? '';
     const units = Array.from(text).reduce((n, c) => n + (/[\u0000-\u00ff]/u.test(c) ? .6 : 1), 0);
     const fits = (): boolean => Math.ceil(units / Math.max(1, (w - 8) / font)) * font * 1.4 + 6 <= h && w >= font * 3;
     while (font > 10 && !fits()) font = Math.max(10, font - 1);

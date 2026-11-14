@@ -39,12 +39,15 @@ export function initCamera(onText: (text: string, language: string) => void): { 
   let rotation = 0;
   let blocks: Block[] = [];
   let outputs: string[] = [];
+  let spans: HTMLSpanElement[] = [];
+  let frozenBlocks: Block[] | null = null;
   let overlayFrame: number | null = null;
   let paused = false;
   let frozen = false;
   let text = '';
   let automatic = true;
   const translations = new Map<string, string>();
+  let translationSize = 0;
   try { automatic = localStorage.getItem('camera-auto') !== 'false'; } catch { /* Optional preference. */ }
   target.replaceChildren(...Array.from(element<HTMLSelectElement>('target').options, option => option.cloneNode(true)));
 
@@ -62,7 +65,7 @@ export function initCamera(onText: (text: string, language: string) => void): { 
   }
 
   function clearResults(): void {
-    blocks = []; outputs = [];
+    blocks = []; outputs = []; spans = [];
     overlay.replaceChildren(); paragraphs.replaceChildren();
     overlay.style.transform = '';
     transcript.open = false; transcript.hidden = true;
@@ -71,14 +74,19 @@ export function initCamera(onText: (text: string, language: string) => void): { 
 
   function layout(): void {
     overlayFrame = null;
-    const view = stage.parentElement!;
-    if (view.clientWidth && view.clientHeight) {
-      const aspect = Number(stage.style.getPropertyValue('--camera-aspect')) || 4 / 3;
-      const w = Math.min(view.clientWidth, view.clientHeight * aspect);
-      stage.style.width = `${w}px`; stage.style.height = `${w / aspect}px`;
+    if (!dialog.open) return;
+    for (const [index, span] of spans.entries()) {
+      if (span.textContent !== outputs[index]) span.textContent = outputs[index];
     }
-    const width = stage.clientWidth || 480;
-    const height = stage.clientHeight || width / (preview.width / preview.height || 4 / 3);
+    const view = stage.parentElement!;
+    const viewWidth = view.clientWidth, viewHeight = view.clientHeight;
+    let width = stage.clientWidth || 480;
+    let height = stage.clientHeight || width / (preview.width / preview.height || 4 / 3);
+    if (viewWidth && viewHeight) {
+      const aspect = Number(stage.style.getPropertyValue('--camera-aspect')) || 4 / 3;
+      width = Math.min(viewWidth, viewHeight * aspect); height = width / aspect;
+      stage.style.width = `${width}px`; stage.style.height = `${height}px`;
+    }
     const positions = cameraLayout(blocks, outputs, width, height);
     for (const [index, position] of positions.entries()) {
       const button = overlay.children[index] as HTMLButtonElement;
@@ -88,8 +96,16 @@ export function initCamera(onText: (text: string, language: string) => void): { 
       button.textContent = outputs[index] ? position.marker ? String(index + 1) : outputs[index] : '';
       button.hidden = !outputs[index] || !!position.hidden;
       button.setAttribute('aria-label', `訳文 ${index + 1}: ${outputs[index] ?? ''}`);
-      // Browser line breaking can differ from the conservative width estimate.
-      if (!position.marker && button.scrollHeight > button.clientHeight && button.clientHeight > 0) {
+    }
+    // Measure all labels after all style writes. Interleaving these reads with
+    // writes forces a separate browser layout for every OCR block.
+    const overflowing = positions.map((position, index) => {
+      const button = overlay.children[index] as HTMLButtonElement | undefined;
+      return button && !button.hidden && !position.marker && button.clientHeight > 0 && button.scrollHeight > button.clientHeight;
+    });
+    for (const [index, position] of positions.entries()) {
+      if (overflowing[index]) {
+        const button = overlay.children[index] as HTMLButtonElement;
         button.classList.add('is-marker');
         button.style.width = '24px'; button.style.height = '24px';
         button.style.left = `${Math.min(position.x, Math.max(0, width - 24)) / width * 100}%`;
@@ -146,8 +162,11 @@ export function initCamera(onText: (text: string, language: string) => void): { 
     if (dialog.open) dialog.close();
     clearResults();
     previous = recognized = null;
+    frozenBlocks = null;
+    translations.clear();
+    translationSize = 0;
     await cancelWork();
-    preview.width = preview.height = 0;
+    if (!dialog.open) preview.width = preview.height = 0;
   }
 
   function poll(): void {
@@ -174,10 +193,10 @@ export function initCamera(onText: (text: string, language: string) => void): { 
         overlay.style.transform = `translate(${x * 100}%, ${y * 100}%)`;
       }
       if (!recognized && !work && !cancellation && (now - stableSince >= 300 || now - waitingSince >= 1500)) {
-        recognized = pixels.slice();
+        recognized = pixels;
         processFrame(false);
       }
-      previous = pixels.slice();
+      previous = pixels;
     }
     timer = setTimeout(poll, 150);
   }
@@ -190,6 +209,7 @@ export function initCamera(onText: (text: string, language: string) => void): { 
     if (opening !== generation) return;
     const run = ++generation;
     paused = frozen = false;
+    frozenBlocks = null;
     previous = recognized = null;
     clearResults();
     overlay.hidden = false;
@@ -210,6 +230,14 @@ export function initCamera(onText: (text: string, language: string) => void): { 
         return;
       }
       stream = acquired;
+      acquired.getTracks().forEach(track => track.addEventListener('ended', () => {
+        if (stream !== acquired) return;
+        stopCamera();
+        paused = true;
+        void cancelWork();
+        message.textContent = 'カメラとの接続が切れました。再開してください。';
+        render();
+      }));
       video.srcObject = stream;
       await video.play();
       if (run !== generation) return;
@@ -236,7 +264,7 @@ export function initCamera(onText: (text: string, language: string) => void): { 
     }
   }
 
-  function place(block: Block, index: number): HTMLSpanElement {
+  function place(block: Block, index: number): void {
     const button = document.createElement('button');
     button.className = 'camera-block';
     button.type = 'button'; button.hidden = true;
@@ -252,7 +280,19 @@ export function initCamera(onText: (text: string, language: string) => void): { 
     });
     overlay.append(button);
     outputs[index] = '';
-    return span;
+    spans[index] = span;
+  }
+
+  function encodeFrame(): Promise<string> {
+    return new Promise((resolve, reject) => {
+      preview.toBlob(blob => {
+        if (!blob) { reject(new Error('撮影画像を作成できません。')); return; }
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror = () => reject(new Error('撮影画像を読み込めません。'));
+        reader.readAsDataURL(blob);
+      }, 'image/png');
+    });
   }
 
   function processFrame(freeze: boolean): void {
@@ -269,8 +309,10 @@ export function initCamera(onText: (text: string, language: string) => void): { 
           const scale = Math.min(1, 2048 / Math.max(video.videoWidth, video.videoHeight));
           const width = Math.round(video.videoWidth * scale);
           const height = Math.round(video.videoHeight * scale);
-          preview.width = rotation % 180 ? height : width;
-          preview.height = rotation % 180 ? width : height;
+          const rotatedWidth = rotation % 180 ? height : width;
+          const rotatedHeight = rotation % 180 ? width : height;
+          if (preview.width !== rotatedWidth) preview.width = rotatedWidth;
+          if (preview.height !== rotatedHeight) preview.height = rotatedHeight;
           const context = preview.getContext('2d');
           if (!context) throw new Error('撮影画像を作成できません。');
           context.save();
@@ -287,8 +329,15 @@ export function initCamera(onText: (text: string, language: string) => void): { 
         }
         clearResults();
         message.textContent = '文字を読み取り中…';
-        const found = await invoke<Block[]>('recognize_camera', { image: preview.toDataURL('image/png') });
+        render();
+        let found = frozen ? frozenBlocks : null;
+        if (!found) {
+          const image = await encodeFrame();
+          if (run !== generation || !dialog.open) return;
+          found = await invoke<Block[]>('recognize_camera', { image });
+        }
         if (run !== generation || !dialog.open) return;
+        if (frozen) frozenBlocks = found;
         blocks = found;
         text = blocks.map(block => block.text).join('\n\n');
         if (text.length > 12000 || blocks.length > 128) throw new Error('文字が多すぎます。範囲を狭めてください。');
@@ -298,15 +347,15 @@ export function initCamera(onText: (text: string, language: string) => void): { 
         for (const [index, block] of blocks.entries()) {
           if (run !== generation) return;
           const key = `${language}\0${block.text}`;
-          const span = place(block, index);
-          if (translations.has(key)) { span.textContent = outputs[index] = translations.get(key)!; paint(); continue; }
+          place(block, index);
+          if (translations.has(key)) { outputs[index] = translations.get(key)!; paint(); continue; }
           message.textContent = '翻訳中…';
           let output = '';
           let accepting = true;
           const onEvent = progressChannel(event => {
             if (!accepting || run !== generation || event.kind !== 'token') return;
             output += event.text;
-            span.textContent = outputs[index] = output;
+            outputs[index] = output;
             paint();
           });
           let result: { truncated: boolean };
@@ -316,10 +365,10 @@ export function initCamera(onText: (text: string, language: string) => void): { 
           if (result.truncated) throw new Error('訳文が長すぎます。範囲を狭めてください。');
           if (output.trim()) {
             translations.set(key, output);
-            let bytes = [...translations].reduce((sum, [key, value]) => sum + key.length + value.length, 0);
-            while (translations.size > 128 || bytes > 500000) {
+            translationSize += key.length + output.length;
+            while (translations.size > 128 || translationSize > 500000) {
               const key = translations.keys().next().value!;
-              bytes -= key.length + translations.get(key)!.length;
+              translationSize -= key.length + translations.get(key)!.length;
               translations.delete(key);
             }
           }
@@ -377,6 +426,7 @@ export function initCamera(onText: (text: string, language: string) => void): { 
         const context = preview.getContext('2d');
         context?.translate(preview.width, 0); context?.rotate(Math.PI / 2); context?.drawImage(copy, 0, 0);
         context?.resetTransform();
+        frozenBlocks = null;
         stage.style.aspectRatio = String(preview.width / preview.height);
         stage.style.setProperty('--camera-aspect', String(preview.width / preview.height));
         clearResults(); paused = false; processFrame(true);

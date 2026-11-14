@@ -32,7 +32,8 @@ class PaddleOcr(private val assets: AssetManager, private val cancelled: AtomicB
     private var recognizer: Recognizer? = null
     private var korean: Recognizer? = null
     private var koreanPath: String? = null
-    @Volatile private var running: OrtSession.RunOptions? = null
+    private val runLock = Any()
+    private var running: OrtSession.RunOptions? = null
 
     init {
         check(OpenCVLoader.initLocal()) { "画像処理エンジンを起動できません。" }
@@ -40,7 +41,7 @@ class PaddleOcr(private val assets: AssetManager, private val cancelled: AtomicB
     }
 
     private fun checkCancelled() { if (cancelled.get()) error("CANCELLED") }
-    fun cancel() { running?.setTerminate(true) }
+    fun cancel() { synchronized(runLock) { running?.setTerminate(true) } }
     override fun close() {
         detector?.close(); recognizer?.close(); korean?.close()
         detector = null; recognizer = null; korean = null; koreanPath = null
@@ -74,20 +75,16 @@ class PaddleOcr(private val assets: AssetManager, private val cancelled: AtomicB
         } finally { resized.release() }
     }
 
-    private fun run(session: OrtSession, input: OnnxTensor): Pair<FloatArray, LongArray> {
+    private fun <T> run(session: OrtSession, input: OnnxTensor, decode: (OnnxTensor) -> T): T {
         checkCancelled()
         OrtSession.RunOptions().use { options ->
-            running = options
+            synchronized(runLock) { running = options }
             try {
                 checkCancelled()
                 session.run(mapOf(session.inputNames.first() to input), options).use { result ->
-                    val output = result[0] as OnnxTensor
-                    val buffer = output.floatBuffer
-                    val values = FloatArray(buffer.remaining())
-                    buffer.get(values)
-                    return Pair(values, output.info.shape)
+                    return decode(result[0] as OnnxTensor)
                 }
-            } finally { running = null }
+            } finally { synchronized(runLock) { running = null } }
         }
     }
 
@@ -104,7 +101,12 @@ class PaddleOcr(private val assets: AssetManager, private val cancelled: AtomicB
         val ratio = min(1.0, 1280.0 / max(image.cols(), image.rows()))
         val width = max(32, (image.cols() * ratio / 32).roundToInt() * 32)
         val height = max(32, (image.rows() * ratio / 32).roundToInt() * 32)
-        val (values, shape) = tensor(image, width, height).use { run(detector!!, it) }
+        val (values, shape) = tensor(image, width, height).use { input -> run(detector!!, input) { output ->
+            val buffer = output.floatBuffer
+            val values = FloatArray(buffer.remaining())
+            buffer.get(values)
+            Pair(values, output.info.shape)
+        } }
         val h = shape[2].toInt(); val w = shape[3].toInt()
         val probabilities = Mat(h, w, CvType.CV_32F)
         val mask = Mat(h, w, CvType.CV_8U)
@@ -123,9 +125,8 @@ class PaddleOcr(private val assets: AssetManager, private val cancelled: AtomicB
                 val rect = try { Imgproc.minAreaRect(floating) } finally { floating.release() }
                 if (min(rect.size.width, rect.size.height) < 3) continue
                 val polygon = MatOfPoint(*corners(rect))
-                mask.setTo(Scalar(0.0))
-                try { Imgproc.fillPoly(mask, listOf(polygon), Scalar(1.0)) } finally { polygon.release() }
-                if (Core.mean(probabilities, mask).`val`[0] < .5) continue
+                val score = try { boxScore(probabilities, mask, polygon) } finally { polygon.release() }
+                if (score < .5) continue
                 // DB unclip: the minimum enclosing rectangle of a rounded rectangle
                 // offset expands each dimension by twice area * 1.6 / perimeter.
                 val distance = rect.size.width * rect.size.height * 1.6 / (2 * (rect.size.width + rect.size.height))
@@ -139,6 +140,24 @@ class PaddleOcr(private val assets: AssetManager, private val cancelled: AtomicB
             probabilities.release(); mask.release(); hierarchy.release(); kernel.release(); contours.forEach { it.release() }
         }
         return results.sortedWith(compareBy({ it[0].y }, { it[0].x }))
+    }
+
+    private fun boxScore(probabilities: Mat, mask: Mat, polygon: MatOfPoint): Double {
+        val bounds = Imgproc.boundingRect(polygon)
+        val left = max(0, bounds.x); val top = max(0, bounds.y)
+        val right = min(probabilities.cols(), bounds.x + bounds.width)
+        val bottom = min(probabilities.rows(), bounds.y + bounds.height)
+        if (right <= left || bottom <= top) return 0.0
+        val area = Rect(left, top, right - left, bottom - top)
+        val localMask = mask.submat(area)
+        val localValues = probabilities.submat(area)
+        try {
+            // Only touch the text box, instead of clearing and scanning the
+            // entire detection image for every contour.
+            localMask.setTo(Scalar(0.0))
+            Imgproc.fillPoly(localMask, listOf(polygon), Scalar(1.0), Imgproc.LINE_8, 0, Point(-left.toDouble(), -top.toDouble()))
+            return Core.mean(localValues, localMask).`val`[0]
+        } finally { localMask.release(); localValues.release() }
     }
 
     private fun crop(image: Mat, points: Array<Point>): Mat {
@@ -159,21 +178,26 @@ class PaddleOcr(private val assets: AssetManager, private val cancelled: AtomicB
 
     private fun read(image: Mat, model: Recognizer): Pair<String, Double> {
         val width = ceil(48.0 * image.cols() / image.rows()).toInt().coerceIn(1, 4096)
-        val (values, shape) = tensor(image, width, 48, max(320, width)).use { run(model.session, it) }
-        val classes = shape[2].toInt()
-        check(classes == model.characters.size) { "OCR辞書がモデルと一致しません。" }
-        var previous = 0; var count = 0; var score = 0.0
-        val text = StringBuilder()
-        for (time in 0 until shape[1].toInt()) {
-            val offset = time * classes
-            var best = 0
-            for (index in 1 until classes) if (values[offset + index] > values[offset + best]) best = index
-            if (best != 0 && best != previous) {
-                text.append(model.characters[best]); score += values[offset + best]; count++
+        return tensor(image, width, 48, max(320, width)).use { input -> run(model.session, input) { output ->
+            // Decode while the result is alive; copying the full class matrix into
+            // another FloatArray costs several MB for each line.
+            val values = output.floatBuffer
+            val shape = output.info.shape
+            val classes = shape[2].toInt()
+            check(classes == model.characters.size) { "OCR辞書がモデルと一致しません。" }
+            var previous = 0; var count = 0; var score = 0.0
+            val text = StringBuilder()
+            for (time in 0 until shape[1].toInt()) {
+                val offset = time * classes
+                var best = 0
+                for (index in 1 until classes) if (values[offset + index] > values[offset + best]) best = index
+                if (best != 0 && best != previous) {
+                    text.append(model.characters[best]); score += values[offset + best]; count++
+                }
+                previous = best
             }
-            previous = best
-        }
-        return Pair(text.toString().trim(), if (count == 0) 0.0 else score / count)
+            Pair(text.toString().trim(), if (count == 0) 0.0 else score / count)
+        } }
     }
 
     fun recognize(path: String, koreanFile: String?): List<JSONObject> {

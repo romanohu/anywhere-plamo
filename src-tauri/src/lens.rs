@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::{
     fs::File,
-    io::{BufWriter, Write},
+    io::{BufWriter, Read, Write},
 };
 use std::{
     path::{Path, PathBuf},
@@ -157,7 +157,7 @@ fn write_image(path: &Path, image: image::RgbImage) -> Result<(), String> {
     let image = if image.width().max(image.height()) > 4096 {
         image::DynamicImage::ImageRgb8(image)
             .resize(4096, 4096, image::imageops::FilterType::Triangle)
-            .to_rgb8()
+            .into_rgb8()
     } else {
         image
     };
@@ -167,6 +167,33 @@ fn write_image(path: &Path, image: image::RgbImage) -> Result<(), String> {
         .and_then(|_| file.write_all(image.as_raw()))
         .and_then(|_| file.flush())
         .map_err(|_| "読み取り画像を保存できません。".into())
+}
+
+async fn hash_capture(path: &Path, cancel: &CancellationToken) -> Result<[u8; 32], String> {
+    let path = path.to_owned();
+    let cancel = cancel.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        use sha2::{Digest, Sha256};
+        let mut hash = Sha256::new();
+        let mut buffer = [0; 64 * 1024];
+        let mut file = File::open(path).map_err(|_| "読み取り画像を開けません。")?;
+        loop {
+            if cancel.is_cancelled() {
+                return Err("CANCELLED".into());
+            }
+            let count = match file.read(&mut buffer) {
+                Ok(count) => count,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => return Err("読み取り画像を開けません。".into()),
+            };
+            if count == 0 {
+                return Ok(hash.finalize().into());
+            }
+            hash.update(&buffer[..count]);
+        }
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 pub async fn capture(
@@ -225,11 +252,9 @@ pub async fn capture(
         return Err("CANCELLED".into());
     }
     if let Some(watch) = watch {
-        use sha2::{Digest, Sha256};
-        let bytes = tokio::fs::read(&file.path)
-            .await
-            .map_err(|_| "読み取り画像を開けません。")?;
-        let hash = Sha256::digest(&bytes).into();
+        // Every poll checks the whole frame, but does not need another full-size
+        // image allocation or hashing work on the async executor.
+        let hash = hash_capture(&file.path, cancel).await?;
         if let Some(result) = watch
             .lock()
             .map_err(|_| "画面の状態を取得できません。")?
@@ -348,6 +373,69 @@ fn capture_macos(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn streamed_capture_hash_preserves_bytes_and_observes_cancellation() {
+        use sha2::{Digest, Sha256};
+        let file = CaptureFile::new().unwrap();
+        let mut bytes: Vec<u8> = (0..(128 * 1024 + 7)).map(|n| (n % 251) as u8).collect();
+        for length in [0, 1, 65535, 65536, 65537, bytes.len()] {
+            std::fs::write(&file.path, &bytes[..length]).unwrap();
+            let hash = hash_capture(&file.path, &CancellationToken::new())
+                .await
+                .unwrap();
+            assert_eq!(hash.as_slice(), Sha256::digest(&bytes[..length]).as_slice());
+        }
+        let before = hash_capture(&file.path, &CancellationToken::new())
+            .await
+            .unwrap();
+        bytes[65536] ^= 1;
+        std::fs::write(&file.path, &bytes).unwrap();
+        assert_ne!(
+            before,
+            hash_capture(&file.path, &CancellationToken::new())
+                .await
+                .unwrap()
+        );
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        assert_eq!(
+            hash_capture(&file.path, &cancel).await.unwrap_err(),
+            "CANCELLED"
+        );
+        assert!(
+            hash_capture(&file.directory.join("missing"), &CancellationToken::new())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "manual capture hashing benchmark; run with --release --ignored --nocapture"]
+    async fn benchmark_capture_hash_memory_and_time() {
+        use sha2::{Digest, Sha256};
+        let file = CaptureFile::new().unwrap();
+        let bytes: Vec<u8> = (0..4096 * 4096 * 3).map(|n| (n % 251) as u8).collect();
+        let expected = Sha256::digest(&bytes);
+        std::fs::write(&file.path, &bytes).unwrap();
+        drop(bytes);
+        let cancel = CancellationToken::new();
+        let started = Instant::now();
+        for _ in 0..10 {
+            let frame = tokio::fs::read(&file.path).await.unwrap();
+            assert_eq!(Sha256::digest(&frame), expected);
+        }
+        let previous = started.elapsed();
+        let started = Instant::now();
+        for _ in 0..10 {
+            assert_eq!(
+                hash_capture(&file.path, &cancel).await.unwrap().as_slice(),
+                expected.as_slice()
+            );
+        }
+        eprintln!("capture hash4096x4096RGB: previous={:?}, streaming={:?}, previous_buffer={} bytes, streaming_buffer={} bytes",
+            previous / 10, started.elapsed() / 10, 4096 * 4096 * 3, 64 * 1024);
+    }
 
     fn layout_blocks() -> Vec<TextBlock> {
         vec![TextBlock {
@@ -501,6 +589,21 @@ mod tests {
         );
         drop(file);
         assert!(!directory.exists());
+    }
+
+    #[test]
+    fn oversized_captures_preserve_resized_pixels_without_copying_the_owned_buffer() {
+        let file = CaptureFile::new().unwrap();
+        let source = image::RgbImage::from_fn(8192, 16, |x, y| {
+            image::Rgb([(x % 251) as u8, (y * 11) as u8, ((x + y) % 239) as u8])
+        });
+        let expected = image::DynamicImage::ImageRgb8(source.clone())
+            .resize(4096, 4096, image::imageops::FilterType::Triangle)
+            .to_rgb8();
+        write_image(&file.path, source).unwrap();
+        let captured = image::open(&file.path).unwrap().into_rgb8();
+        assert_eq!(captured.dimensions(), (4096, 8));
+        assert_eq!(captured, expected);
     }
 
     #[cfg(unix)]

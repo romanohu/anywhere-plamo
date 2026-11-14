@@ -2,6 +2,7 @@
 import importlib.util
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('ocr_worker', ROOT / 'scripts/ocr-worker.py')
@@ -70,6 +71,83 @@ class LayoutTests(unittest.TestCase):
         self.assertFalse(ocr.prefer_korean('Read this text.', .98, 'Read this text.', .99))
         self.assertFalse(ocr.prefer_korean('本文', .6, '한국어', .7))
         self.assertEqual(ocr.join_text('한국어 문장을', '번역합니다.'), '한국어 문장을 번역합니다.')
+
+
+class RecognitionCacheTests(unittest.TestCase):
+    def setUp(self):
+        self.engine = ocr.CachedOCR({'Global.log_level': 'error'})
+        self.calls = []
+
+        def recognize(images):
+            self.calls.append(images)
+            return ocr.TextRecOutput(imgs=images,
+                txts=tuple(str(int(image.sum())) for image in images),
+                scores=(.99,) * len(images), elapse=0.)
+
+        self.engine.recognize_uncached = recognize
+
+    def test_reordered_crops_reuse_only_exact_pixels_and_shape(self):
+        first = ocr.np.zeros((8, 12, 3), dtype=ocr.np.uint8)
+        second = ocr.np.ones_like(first)
+        initial = self.engine.recognize_txt([first, second])
+        repeated = self.engine.recognize_txt([second.copy(), first.copy()])
+        self.assertEqual(repeated.txts, initial.txts[::-1])
+        self.assertEqual(len(self.calls), 1)
+        changed = first.copy()
+        changed[0, 0, 0] = 1
+        changed_result = self.engine.recognize_txt([first, changed])
+        self.assertEqual(changed_result.txts, ('0', '1'))
+        self.assertEqual(len(self.calls[-1]), 2)
+        self.engine.recognize_txt([first.reshape(12, 8, 3)])
+        self.assertEqual(len(self.calls), 3)
+        # Crop views with different memory strides still have the same pixels.
+        view = ocr.np.zeros((8, 24, 3), dtype=ocr.np.uint8)[:, ::2]
+        self.engine.recognize_txt([view])
+        self.assertEqual(len(self.calls), 3)
+
+    def test_lru_bounds_entries_and_text_without_retaining_images(self):
+        self.engine.CACHE_ENTRIES = 2
+        images = [ocr.np.full((2, 2, 3), n, dtype=ocr.np.uint8) for n in range(3)]
+        self.engine.recognize_txt(images[:2])
+        self.engine.recognize_txt([images[0]])
+        self.engine.recognize_txt([images[2]])
+        self.assertEqual(len(self.engine.cache), 2)
+        self.engine.recognize_txt([images[0]])
+        self.assertEqual(len(self.calls), 2)
+        self.engine.recognize_txt([images[1]])
+        self.assertEqual(len(self.calls), 3)
+        self.assertTrue(all(isinstance(key[1], bytes) and isinstance(value[0], str)
+                            for key, value in self.engine.cache.items()))
+        self.engine.CACHE_CHARACTERS = 1
+        self.engine.recognize_txt([images[2]])
+        self.assertLessEqual(self.engine.cache_characters, 1)
+        self.assertEqual(self.engine.cache_characters, sum(len(value[0]) for value in self.engine.cache.values()))
+
+    def test_batch_padding_is_preserved_when_only_some_crops_change(self):
+        images = [ocr.np.full((8, width, 3), i, dtype=ocr.np.uint8)
+                  for i, width in enumerate([8, 16, 24, 32, 40, 64, 72])]
+        self.engine.recognize_txt(images)
+        self.assertEqual([len(batch) for batch in self.calls], [6, 1])
+        images[0] = images[0].copy()
+        images[0][0, 0, 0] = 1
+        self.engine.recognize_txt(images)
+        self.assertEqual([len(batch) for batch in self.calls], [6, 1, 6])
+        # The sixth line was padded to 384px; alone it must use its own width,
+        # and the first line alone must go back to the recognizer's 320px floor.
+        self.engine.recognize_txt([images[0]])
+        self.assertEqual([len(batch) for batch in self.calls], [6, 1, 6, 1])
+
+    def test_combined_korean_result_is_cached_and_model_instances_are_isolated(self):
+        engine = ocr.CachedOCR({'Global.log_level': 'error'}, {'Global.log_level': 'error'})
+        image = ocr.np.zeros((8, 12, 3), dtype=ocr.np.uint8)
+        with patch.object(ocr.RapidOCR, 'recognize_txt', side_effect=[
+                ocr.TextRecOutput(txts=('WiFi',), scores=(.99,), elapse=.1),
+                ocr.TextRecOutput(txts=('WiFi 비밀번호를 입력하세요',), scores=(.98,), elapse=.1)]) as run:
+            result = engine.recognize_txt([image])
+            self.assertEqual(result.txts, ('WiFi 비밀번호를 입력하세요',))
+            self.assertEqual(engine.recognize_txt([image]).txts, result.txts)
+            self.assertEqual(run.call_count, 2)
+        self.assertEqual(self.engine.recognize_txt([image]).txts, ('0',))
 
 
 if __name__ == '__main__':
