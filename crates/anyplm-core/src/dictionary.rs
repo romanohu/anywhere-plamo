@@ -104,7 +104,11 @@ fn matches(position: usize, entry: &Entry, text: &str) -> bool {
     }
     // An alphanumerical edge requires a non-word neighbour, so CJK text
     // without spaces still replaces while English words stay intact.
-    let starts_word = entry.term.chars().next().is_some_and(|c| c.is_ascii_alphanumeric());
+    let starts_word = entry
+        .term
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric());
     let ends_word = entry
         .term
         .chars()
@@ -135,16 +139,31 @@ mod tests {
     }
 
     fn pairs(values: &[(&str, &str)]) -> Vec<(String, String)> {
-        values.iter().map(|(t, r)| (t.to_string(), r.to_string())).collect()
+        values
+            .iter()
+            .map(|(t, r)| (t.to_string(), r.to_string()))
+            .collect()
     }
 
     #[test]
     fn terms_in_the_source_are_listed_once_and_longer_terms_win() {
         let entries = [entry("dragon", "りゅう"), entry("a dragon", "りゅうきち")];
-        assert_eq!(glossary("a dragon and a cat", &entries), pairs(&[("a dragon", "りゅうきち")]));
-        let entries = [entry("New York", "ニューヨーク"), entry("New York City", "NYC")];
-        assert_eq!(glossary("New York City", &entries), pairs(&[("New York City", "NYC")]));
-        assert_eq!(glossary("New York State, New York", &entries), pairs(&[("New York", "ニューヨーク")]));
+        assert_eq!(
+            glossary("a dragon and a cat", &entries),
+            pairs(&[("a dragon", "りゅうきち")])
+        );
+        let entries = [
+            entry("New York", "ニューヨーク"),
+            entry("New York City", "NYC"),
+        ];
+        assert_eq!(
+            glossary("New York City", &entries),
+            pairs(&[("New York City", "NYC")])
+        );
+        assert_eq!(
+            glossary("New York State, New York", &entries),
+            pairs(&[("New York", "ニューヨーク")])
+        );
         assert!(glossary("Tokyo", &entries).is_empty());
     }
 
@@ -152,9 +171,15 @@ mod tests {
     fn alphanumerical_terms_respect_word_boundaries_but_cjk_does_not() {
         let entries = [entry("cat", "ねこ")];
         assert!(glossary("category cats", &entries).is_empty());
-        assert_eq!(glossary("キャットcatとdog", &entries), pairs(&[("cat", "ねこ")]));
+        assert_eq!(
+            glossary("キャットcatとdog", &entries),
+            pairs(&[("cat", "ねこ")])
+        );
         let entries = [entry("PLaMo", "プラモ")];
-        assert_eq!(glossary("(PLaMo)です", &entries), pairs(&[("PLaMo", "プラモ")]));
+        assert_eq!(
+            glossary("(PLaMo)です", &entries),
+            pairs(&[("PLaMo", "プラモ")])
+        );
     }
 
     #[test]

@@ -1,0 +1,18 @@
+[package]
+name = "anyplm-cli"
+version = "0.2.8"
+description = "Command-line PLaMo translation sharing the Anywhere Plamo app's models and dictionary"
+edition = "2021"
+rust-version = "1.90"
+license = "MIT"
+workspace = "../../src-tauri"
+
+[[bin]]
+name = "plm"
+path = "src/main.rs"
+
+[dependencies]
+anyplm-core = { path = "../anyplm-core" }
+dirs = "7"
+tokio = { version = "1", features = ["rt", "macros", "signal", "io-std", "io-util"] }
+tokio-util = "0.7"

@@ -48,9 +48,34 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "anyplm-cli"
+version = "0.2.8"
+dependencies = [
+ "anyplm-core",
+ "dirs",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "anyplm-core"
+version = "0.2.8"
+dependencies = [
+ "libc",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tokio-util",
+ "uuid",
+]
+
+[[package]]
 name = "anywhere-plamo"
 version = "0.2.8"
 dependencies = [
+ "anyplm-core",
  "arboard",
  "base64 0.22.1",
  "cc",

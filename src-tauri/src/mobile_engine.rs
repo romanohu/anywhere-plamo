@@ -7,8 +7,7 @@ use std::{
 use tauri::ipc::Channel;
 use tokio_util::sync::CancellationToken;
 
-#[path = "translation_cache.rs"]
-mod cache;
+use anyplm_core::translation_cache as cache;
 
 unsafe extern "C" {
     fn plamo_load(

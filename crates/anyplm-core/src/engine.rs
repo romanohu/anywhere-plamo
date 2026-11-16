@@ -6,12 +6,11 @@ use std::{
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
 };
-use tauri::ipc::Channel;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     protocol::{self, SseDecoder},
-    ProgressEvent,
+    Progress, ProgressEvent,
 };
 
 pub const EXECUTABLE: &str = if cfg!(windows) {
@@ -59,6 +58,24 @@ pub async fn select_binary(cpu: &Path, marker: &Path) -> std::path::PathBuf {
     gpu
 }
 
+/// Starts the CUDA server when the device has a GPU, else the CPU server at `cpu`.
+/// A GPU that stops working falls back to the CPU server and is probed again next launch.
+pub async fn start_best(
+    cpu: &Path,
+    model: &Path,
+    marker: &Path,
+    cancel: &CancellationToken,
+) -> Result<Engine, String> {
+    let binary = select_binary(cpu, marker).await;
+    match Engine::start(&binary, model, cancel).await {
+        Err(error) if binary != cpu && error != "CANCELLED" => {
+            let _ = std::fs::remove_file(marker);
+            Engine::start(cpu, model, cancel).await
+        }
+        result => result,
+    }
+}
+
 fn lists_gpu(devices: &str) -> bool {
     devices
         .lines()
@@ -73,9 +90,7 @@ pub struct Engine {
     cache: TranslationCache,
 }
 
-#[path = "translation_cache.rs"]
-mod cache;
-use cache::TranslationCache;
+use crate::translation_cache::TranslationCache;
 
 impl Drop for Engine {
     fn drop(&mut self) {
@@ -120,6 +135,19 @@ impl Engine {
         {
             use std::os::windows::process::CommandExt;
             command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        }
+        // Drop only runs on a clean exit; also stop the server when the app is killed
+        // (e.g. a dev rebuild), so it does not keep the model in memory. The signal follows
+        // the spawning thread, which is a runtime worker that lives as long as the app.
+        #[cfg(target_os = "linux")]
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            command.pre_exec(|| {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
         }
         command
             .arg("--model")
@@ -191,7 +219,7 @@ impl Engine {
         text: &str,
         target: &str,
         glossary: &[(String, String)],
-        channel: &Channel<ProgressEvent>,
+        progress: Progress<'_>,
         cancel: &CancellationToken,
     ) -> Result<TranslationResult, String> {
         // The whole prompt keys the cache so a changed glossary is translated again.
@@ -200,8 +228,7 @@ impl Engine {
             return Err("CANCELLED".into());
         }
         if let Some(output) = self.cache.get(&key, target) {
-            channel
-                .send(ProgressEvent::Token { text: output })
+            progress(ProgressEvent::Token { text: output })
                 .map_err(|_| "画面との接続が切れました。")?;
             return Ok(TranslationResult { truncated: false });
         }
@@ -209,7 +236,7 @@ impl Engine {
         let result = tokio::select! {
             biased;
             _ = cancel.cancelled() => Err("CANCELLED".into()),
-            result = self.translate_text(text, target, glossary, channel, cancel, &mut output) => result,
+            result = self.translate_text(text, target, glossary, progress, cancel, &mut output) => result,
         }?;
         if !result.truncated && !output.trim().is_empty() && !cancel.is_cancelled() {
             self.cache.insert(&key, target, output);
@@ -222,7 +249,7 @@ impl Engine {
         text: &str,
         target: &str,
         glossary: &[(String, String)],
-        channel: &Channel<ProgressEvent>,
+        progress: Progress<'_>,
         cancel: &CancellationToken,
         output: &mut String,
     ) -> Result<TranslationResult, String> {
@@ -230,7 +257,7 @@ impl Engine {
         let input_length = self.input_length(&prompt).await?;
         if input_length <= protocol::MAX_INPUT_TOKENS {
             return self
-                .translate_inner(&prompt, input_length, channel, output)
+                .translate_inner(&prompt, input_length, progress, output)
                 .await;
         }
         let mut chunks = Vec::new();
@@ -271,18 +298,17 @@ impl Engine {
                     input_length,
                 } => {
                     let result = self
-                        .translate_inner(&prompt, input_length, channel, output)
+                        .translate_inner(&prompt, input_length, progress, output)
                         .await?;
                     if result.truncated {
                         return Ok(result);
                     }
                 }
                 TranslationChunk::Separator(text) => {
-                    channel
-                        .send(ProgressEvent::Token {
-                            text: text.to_owned(),
-                        })
-                        .map_err(|_| "画面との接続が切れました。")?;
+                    progress(ProgressEvent::Token {
+                        text: text.to_owned(),
+                    })
+                    .map_err(|_| "画面との接続が切れました。")?;
                     output.push_str(text);
                 }
             }
@@ -314,7 +340,7 @@ impl Engine {
         &self,
         prompt: &str,
         input_length: usize,
-        channel: &Channel<ProgressEvent>,
+        progress: Progress<'_>,
         output: &mut String,
     ) -> Result<TranslationResult, String> {
         let mut response = self
@@ -339,7 +365,7 @@ impl Engine {
             for event in decoder.push(&chunk)? {
                 Self::handle_event(
                     &event,
-                    channel,
+                    progress,
                     &mut completed,
                     &mut truncated,
                     &mut received_text,
@@ -357,7 +383,7 @@ impl Engine {
             for event in decoder.finish()? {
                 Self::handle_event(
                     &event,
-                    channel,
+                    progress,
                     &mut completed,
                     &mut truncated,
                     &mut received_text,
@@ -381,7 +407,7 @@ impl Engine {
 
     fn handle_event(
         event: &str,
-        channel: &Channel<ProgressEvent>,
+        progress: Progress<'_>,
         completed: &mut bool,
         truncated: &mut bool,
         received_text: &mut bool,
@@ -413,11 +439,10 @@ impl Engine {
         {
             *received_text = true;
             output.push_str(text);
-            channel
-                .send(ProgressEvent::Token {
-                    text: text.to_owned(),
-                })
-                .map_err(|_| "画面との接続が切れました。")?;
+            progress(ProgressEvent::Token {
+                text: text.to_owned(),
+            })
+            .map_err(|_| "画面との接続が切れました。")?;
         }
         if let Some(reason) = reason.as_str() {
             *truncated = reason == "length";
@@ -438,7 +463,6 @@ fn connection_error(error: reqwest::Error) -> String {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
-    use tauri::ipc::InvokeResponseBody;
 
     #[test]
     fn gpu_probe_reads_llama_server_device_list() {
@@ -449,36 +473,15 @@ mod tests {
         assert!(!lists_gpu(""));
     }
 
-    #[test]
-    fn translation_cache_separates_languages_and_bounds_memory() {
-        let mut cache = TranslationCache::default();
-        cache.insert("Hello", "ja", "こんにちは".into());
-        cache.insert("Hello", "ko", "안녕하세요".into());
-        assert_eq!(cache.get("Hello", "ja").as_deref(), Some("こんにちは"));
-        assert!(cache.get("Hello", "en").is_none());
-        assert!(cache.get("Hello!", "ja").is_none());
-        for i in 0..127 {
-            cache.insert(&i.to_string(), "ja", "訳文".into());
-        }
-        assert!(cache.get("Hello", "ko").is_none());
-        assert!(cache.get("Hello", "ja").is_some());
-        cache.insert("long", "ja", "x".repeat(2 * 1024 * 1024));
-        assert!(cache.0.is_empty());
-    }
+    type Sink = Box<dyn Fn(ProgressEvent) -> Result<(), ()> + Send + Sync>;
 
-    fn channel() -> (Channel<ProgressEvent>, Arc<Mutex<Vec<String>>>) {
+    fn channel() -> (Sink, Arc<Mutex<Vec<String>>>) {
         let texts = Arc::new(Mutex::new(Vec::new()));
         let output = texts.clone();
-        let channel = Channel::new(move |body| {
-            let InvokeResponseBody::Json(body) = body else {
-                panic!("Expected a JSON token event");
-            };
-            let event: Value = serde_json::from_str(&body).unwrap();
-            assert_eq!(event["kind"], "token");
-            output
-                .lock()
-                .unwrap()
-                .push(event["text"].as_str().unwrap().to_owned());
+        let channel: Sink = Box::new(move |event| {
+            if let ProgressEvent::Token { text } = event {
+                output.lock().unwrap().push(text);
+            }
             Ok(())
         });
         (channel, texts)

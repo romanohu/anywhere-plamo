@@ -1,15 +1,13 @@
 mod camera;
-mod dictionary;
-mod engine;
 mod lens;
 mod lens_select;
 mod model;
 mod ocr_model;
-mod protocol;
 mod selection;
 mod shortcut;
 mod update;
 
+use anyplm_core::{dictionary, engine, protocol};
 use serde::Serialize;
 use std::{
     path::PathBuf,
@@ -28,15 +26,7 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tokio_util::sync::CancellationToken;
 
-#[derive(Clone, Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
-pub enum ProgressEvent {
-    Download { received: u64, total: u64 },
-    Verifying,
-    Loading,
-    Reading,
-    Token { text: String },
-}
+pub use anyplm_core::ProgressEvent;
 
 #[derive(Clone, Serialize)]
 struct PendingClipboard {
@@ -237,17 +227,15 @@ impl AppState {
         }
         // Drop a stopped process before attempting another launch.
         *engine = None;
-        let marker = self.directory.with_file_name("gpu-runtime");
-        let binary = engine::select_binary(&self.binary, &marker).await;
-        let model = model::path(&self.directory);
-        *engine = Some(match engine::Engine::start(&binary, &model, cancel).await {
-            // A GPU that stops working falls back to the CPU server and is probed again next launch.
-            Err(error) if binary != self.binary && error != "CANCELLED" => {
-                let _ = std::fs::remove_file(&marker);
-                engine::Engine::start(&self.binary, &model, cancel).await?
-            }
-            result => result?,
-        });
+        *engine = Some(
+            engine::start_best(
+                &self.binary,
+                &model::path(&self.directory),
+                &self.directory.with_file_name("gpu-runtime"),
+                cancel,
+            )
+            .await?,
+        );
         Ok(())
     }
 }
@@ -534,7 +522,11 @@ async fn download_model(
     if model::ready(&state.directory) {
         return Ok(());
     }
-    model::download(&state.directory, &on_event, &operation.token).await?;
+    model::download(
+        &state.directory,
+        &|event| on_event.send(event).map_err(drop),
+        &operation.token,
+    ).await?;
     let _ = window.app_handle().emit("translation-model-changed", ());
     Ok(())
 }
@@ -583,7 +575,13 @@ async fn translate(
     engine
         .as_mut()
         .ok_or("翻訳エンジンが見つかりません。")?
-        .translate(&text, &target, &glossary, &on_event, &operation.token)
+        .translate(
+            &text,
+            &target,
+            &glossary,
+            &|event| on_event.send(event).map_err(drop),
+            &operation.token,
+        )
         .await
 }
 

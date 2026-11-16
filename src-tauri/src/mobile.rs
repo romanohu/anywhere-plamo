@@ -1,13 +1,11 @@
 mod camera;
-mod dictionary;
 #[path = "mobile_engine.rs"]
 mod engine;
 mod model;
 mod ocr_model;
 mod screen_lens;
-#[allow(dead_code)]
-mod protocol;
 
+use anyplm_core::{dictionary, protocol};
 use serde::Serialize;
 use std::{
     path::PathBuf,
@@ -20,15 +18,7 @@ use tauri::{ipc::Channel, Emitter, Manager};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tokio_util::sync::CancellationToken;
 
-#[derive(Clone, Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
-pub enum ProgressEvent {
-    Download { received: u64, total: u64 },
-    Verifying,
-    Loading,
-    Reading,
-    Token { text: String },
-}
+pub use anyplm_core::ProgressEvent;
 
 struct AppState {
     directory: PathBuf,
@@ -131,7 +121,12 @@ async fn download_model(
     if model::ready(&state.directory) {
         return Ok(());
     }
-    model::download(&state.directory, &on_event, &operation.token).await?;
+    model::download(
+        &state.directory,
+        &|event| on_event.send(event).map_err(drop),
+        &operation.token,
+    )
+    .await?;
     let _ = app.emit("translation-model-changed", ());
     Ok(())
 }
