@@ -1209,7 +1209,8 @@ test('timing records first visible text and completion separately', async t => {
   f.send({ kind: 'token', text: 'の続き' });
   f.finish({ truncated: false });
   await until(() => f.byId('translation-status').textContent.includes('翻訳完了'));
-  assert.equal(f.byId('translation-status').textContent, '1.9秒 · 翻訳完了');
+  // 3 tokens from 0.3s to 1.9s: (3 - 1) / 1.6s
+  assert.equal(f.byId('translation-status').textContent, '1.9秒 · 1.3 tok/s · 翻訳完了');
   assert.equal(f.byId('translation-status').title, '最初の文字まで 0.7秒 · 処理終了まで 1.9秒');
 });
 

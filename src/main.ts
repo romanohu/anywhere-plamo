@@ -485,6 +485,11 @@ async function translate(): Promise<void> {
   popupTerminal = false;
   const started = performance.now();
   let firstToken: number | null = null;
+  // shortcut: one streamed chunk ≈ one token and paragraph gaps count as generation time; read llama-server timings if exact figures are needed.
+  let tokens = 0;
+  let tokenStart = 0;
+  let tokenEnd = 0;
+  const tokenRate = (): string => tokens < 2 ? '' : ` · ${((tokens - 1) / ((tokenEnd - tokenStart) / 1000)).toFixed(1)} tok/s`;
   let acceptingEvents = true;
   const output = document.createTextNode('');
   result.append(output);
@@ -502,13 +507,15 @@ async function translate(): Promise<void> {
         empty.hidden = true;
         result.hidden = false;
         output.appendData(event.text);
-        statusText.textContent = '翻訳中…';
+        tokenEnd = performance.now();
+        if (tokens++ === 0) tokenStart = tokenEnd;
+        statusText.textContent = `翻訳中…${tokenRate()}`;
       }
     });
     const response = await invoke<{ truncated: boolean }>('translate', {
       text: source.value, target: target.value, onEvent: channel,
     });
-    statusText.textContent = `${((performance.now() - started) / 1000).toFixed(1)}秒 · 翻訳完了`;
+    statusText.textContent = `${((performance.now() - started) / 1000).toFixed(1)}秒${tokenRate()} · 翻訳完了`;
     if (response.truncated) {
       statusText.textContent = '訳文が途中で止まりました';
       showError('訳文の長さの上限に達しました。原文を短く分けて翻訳してください。');
