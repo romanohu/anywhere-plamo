@@ -142,6 +142,10 @@
         <p id="download-message" class="setting-description" role="status" aria-live="polite"></p>
         <label class="setting-toggle" title="初回の翻訳を速くします"><input type="checkbox" id="preload-model" checked aria-describedby="preload-description" />起動時にモデルを先読み</label>
         <p class="setting-description" id="preload-description">待機中もメモリを使用。オフは次回起動から。</p>
+        <div id="gpu-setting" hidden>
+          <label class="setting-toggle"><input type="checkbox" id="use-gpu" aria-describedby="gpu-description" />GPUで起動する</label>
+          <p class="setting-description" id="gpu-description">このPCで使えるGPUが見つかりました。オンにすると次の翻訳から速いGPUで動きます。使えないときはCPUで動きます。</p>
+        </div>
       </section>
       <section class="settings-section" id="ocr-settings">
         <label class="setting-toggle"><input type="checkbox" id="korean-ocr" disabled />韓国語OCR</label>

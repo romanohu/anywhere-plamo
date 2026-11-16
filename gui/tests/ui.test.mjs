@@ -189,6 +189,10 @@ async function fixture(t, options = {}) {
             dictionary = args.entries;
             return dictionary;
           case 'export_dictionary': return '/home/user/Downloads/anywhere-plamo-dictionary.csv';
+          case 'set_use_gpu':
+            if (options.gpuError) throw options.gpuError;
+            state.useGpu = args.enabled;
+            return { ...state };
           case 'prepare_engine':
             if (options.prepareError) throw options.prepareError;
             return;
@@ -383,6 +387,37 @@ test('model changes are blocked while translating and reflected across windows',
   await until(() => f.byId('translation-model').value === '0.8b-q3');
   assert.equal(f.byId('translation').textContent, '');
   assert.equal(f.byId('download-section').hidden, false);
+});
+
+test('the GPU choice appears only when a GPU was found and defaults to the CPU', async t => {
+  const hidden = await fixture(t);
+  hidden.click('settings-button');
+  await until(() => hidden.calls.filter(call => call.command === 'get_status').length > 1);
+  assert.equal(hidden.byId('gpu-setting').hidden, true);
+
+  const f = await fixture(t, { status: { gpuAvailable: true, useGpu: false } });
+  f.click('settings-button');
+  await until(() => !f.byId('gpu-setting').hidden);
+  assert.equal(f.byId('use-gpu').checked, false);
+  const prepared = f.calls.filter(call => call.command === 'prepare_engine').length;
+  f.byId('use-gpu').checked = true;
+  f.byId('use-gpu').dispatchEvent(new f.window.Event('change'));
+  await until(() => !f.byId('use-gpu').disabled && f.calls.some(call => call.command === 'set_use_gpu'));
+  assert.deepEqual({ ...f.calls.find(call => call.command === 'set_use_gpu').args }, { enabled: true });
+  assert.equal(f.byId('use-gpu').checked, true);
+  // The engine restarts on the GPU, so it is warmed again.
+  await until(() => f.calls.filter(call => call.command === 'prepare_engine').length > prepared);
+});
+
+test('a refused GPU switch keeps the previous choice and explains why', async t => {
+  const f = await fixture(t, { status: { gpuAvailable: true, useGpu: false }, gpuError: '翻訳・モデルの準備が終わってから切り替えてください。' });
+  f.click('settings-button');
+  await until(() => !f.byId('gpu-setting').hidden);
+  f.byId('use-gpu').checked = true;
+  f.byId('use-gpu').dispatchEvent(new f.window.Event('change'));
+  await until(() => !f.byId('use-gpu').disabled && f.byId('download-message').textContent !== '');
+  assert.equal(f.byId('use-gpu').checked, false);
+  assert.equal(f.byId('download-message').textContent, '翻訳・モデルの準備が終わってから切り替えてください。');
 });
 
 test('updates are checked only on request and installed only after the second click', async t => {

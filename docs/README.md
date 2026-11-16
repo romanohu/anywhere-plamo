@@ -41,6 +41,16 @@ npm run tauri dev
 
 推論エンジンとPaddleOCRの小型モデル・実行環境（日本語・英語、日本語の縦書きを含む）は初回に取得・ビルドされます。配布版ではPythonのインストールは不要です。既存のソース版は `npm run ocr:build` でOCRデータを更新してください。翻訳の推論は既定でLinux・WindowsはCPU、macOSはMetalを使用します。OCRは各OSともCPUで動きます。
 
+LinuxとWindowsでは、NVIDIAのGPU（CUDA）でも翻訳できます。CUDA Toolkitを用意し、CPU版に加えてGPU版の推論エンジンをビルドします。
+
+```sh
+npm run runtime:build -- --backend cuda
+```
+
+GPU版はCPU版と並べて`llama-server-cuda`として置かれます。対象のGPUの世代はビルドするPCの`nvidia-smi`から判定し、見つからなければllama.cppの既定の複数世代向けにビルドします（`CUDAARCHS=89`のように指定もできます）。アプリは既定でCPU版を使い、起動時にGPU版が動くと分かった場合だけ、設定の「翻訳モデル」に「GPUで起動する」を表示します。オンにするとGPU版を使い、起動できなければCPU版に戻ります。GPU版の実行にはCUDAのランタイム（`libcudart`・`libcublas`）が必要です。
+
+AppImageのように中身を変えられない配布版でも、ビルドしたGPU版をデータフォルダの`runtime/llama-server-cuda`（Linuxでは`~/.local/share/app.anywhere-plamo.desktop/runtime/`、Windowsでは`%APPDATA%\app.anywhere-plamo.desktop\runtime\llama-server-cuda.exe`と必要なDLL）に実行できる状態で置くと使えます。同梱のGPU版よりこちらを優先します。
+
 配布用ファイルを作る場合:
 
 ```sh

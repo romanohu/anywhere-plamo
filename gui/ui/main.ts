@@ -27,6 +27,7 @@ const dictionaryDialog = element<HTMLDialogElement>('dictionary-dialog');
 const downloadButton = element<HTMLButtonElement>('download-button');
 const modelSelect = element<HTMLSelectElement>('translation-model');
 const preloadModel = element<HTMLInputElement>('preload-model');
+const useGpu = element<HTMLInputElement>('use-gpu');
 const autoDirection = element<HTMLInputElement>('auto-direction');
 const shortcutPopup = element<HTMLInputElement>('shortcut-popup');
 const statusText = element<HTMLSpanElement>('translation-status');
@@ -170,6 +171,8 @@ async function refreshStatus(): Promise<void> {
   element('setup-banner').hidden = status.modelReady && status.runtimeAvailable;
   element('model-tag').textContent = status.modelReady ? '準備完了' : '未準備';
   element('download-section').hidden = status.modelReady;
+  element('gpu-setting').hidden = !status.gpuAvailable;
+  useGpu.checked = !!status.useGpu;
   downloadButton.disabled = !status.runtimeAvailable;
   element('download-message').textContent = !status.runtimeAvailable
     ? '翻訳エンジンが見つかりません。アプリを再インストールしてください。' : '';
@@ -752,6 +755,21 @@ shortcutPopup.addEventListener('change', async () => {
 });
 downloadButton.addEventListener('click', () => { void download(); });
 modelSelect.addEventListener('change', () => { void selectModel(); });
+useGpu.addEventListener('change', async () => {
+  useGpu.disabled = true;
+  element('download-message').textContent = '';
+  try {
+    status = await invoke<AppStatus>('set_use_gpu', { enabled: useGpu.checked });
+    // The engine restarts on the chosen hardware; warm it again when preloading.
+    preparationRequested = false;
+    prepareEngine();
+  } catch (error) {
+    element('download-message').textContent = String(error);
+  } finally {
+    useGpu.checked = !!status.useGpu;
+    useGpu.disabled = false;
+  }
+});
 preloadModel.addEventListener('change', () => {
   try { localStorage.setItem('preload-model', String(preloadModel.checked)); } catch { /* Optional preference. */ }
   prepareEngine();

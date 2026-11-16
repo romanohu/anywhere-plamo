@@ -9,6 +9,9 @@ export interface AppStatus {
   defaultShortcut: string;
   shortcutSupported: boolean;
   shortcutPopup: boolean;
+  /** Absent on Android, which has no GPU choice. */
+  gpuAvailable?: boolean;
+  useGpu?: boolean;
   wayland: boolean;
   resident: boolean;
   lensSupported: boolean;

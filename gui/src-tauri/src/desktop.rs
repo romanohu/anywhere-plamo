@@ -122,6 +122,9 @@ struct AppState {
     lens_selection: Mutex<Option<lens_select::Pending>>,
     shortcut_recording: Mutex<Option<String>>,
     shortcut_popup: AtomicBool,
+    /// Probed once at launch; the settings only offer the GPU when it is true.
+    gpu_available: std::sync::OnceLock<bool>,
+    use_gpu: AtomicBool,
     settings: PathBuf,
     dictionary_path: PathBuf,
     dictionary: Mutex<Vec<dictionary::Entry>>,
@@ -143,6 +146,11 @@ impl Drop for Operation<'_> {
 }
 
 impl AppState {
+    /// The CUDA server, looking in the data folder before the bundled resources.
+    fn gpu_server(&self) -> Option<PathBuf> {
+        engine::gpu_server(&self.binary, self.directory.parent()?)
+    }
+
     fn operation(&self, label: &str) -> &Mutex<Option<CancellationToken>> {
         match label {
             "popup" => &self.popup_operation,
@@ -231,7 +239,11 @@ impl AppState {
             engine::start_best(
                 &self.binary,
                 &model::path(&self.directory),
-                &self.directory.with_file_name("gpu-runtime"),
+                self.use_gpu
+                    .load(Ordering::Relaxed)
+                    .then(|| self.gpu_server())
+                    .flatten()
+                    .as_deref(),
                 cancel,
             )
             .await?,
@@ -254,6 +266,8 @@ struct AppStatus {
     wayland: bool,
     resident: bool,
     shortcut_popup: bool,
+    gpu_available: bool,
+    use_gpu: bool,
     lens_supported: bool,
     ocr_available: bool,
     lens_uses_selection: bool,
@@ -289,6 +303,8 @@ fn get_status(state: tauri::State<'_, AppState>) -> AppStatus {
         wayland: state.wayland,
         resident: state.resident.load(Ordering::Relaxed),
         shortcut_popup: state.shortcut_popup.load(Ordering::Relaxed),
+        gpu_available: state.gpu_available.get().copied().unwrap_or(false),
+        use_gpu: state.use_gpu.load(Ordering::Relaxed),
         lens_supported: cfg!(any(
             target_os = "macos",
             target_os = "linux",
@@ -390,6 +406,21 @@ fn set_shortcut(
 }
 
 #[tauri::command]
+fn set_use_gpu(state: tauri::State<'_, AppState>, enabled: bool) -> Result<AppStatus, String> {
+    // Switching restarts the engine, so wait for running work as a model change does.
+    let mut engine = state
+        .engine
+        .try_lock()
+        .map_err(|_| "翻訳・モデルの準備が終わってから切り替えてください。")?;
+    let data = state.directory.parent().ok_or("保存先が見つかりません。")?;
+    engine::set_gpu_enabled(data, enabled)?;
+    state.use_gpu.store(enabled, Ordering::Relaxed);
+    *engine = None;
+    drop(engine);
+    Ok(get_status(state))
+}
+
+#[tauri::command]
 fn set_shortcut_popup(
     state: tauri::State<'_, AppState>,
     enabled: bool,
@@ -459,9 +490,7 @@ fn set_dictionary(
         })
         // The first occurrence keeps the term when the list carries duplicates.
         .fold(Vec::new(), |mut unique, entry| {
-            if !entry.term.is_empty()
-                && !unique.iter().any(|kept| kept.term == entry.term)
-            {
+            if !entry.term.is_empty() && !unique.iter().any(|kept| kept.term == entry.term) {
                 unique.push(entry);
             }
             unique
@@ -493,7 +522,11 @@ fn write_new_csv(directory: &std::path::Path, csv: &str) -> Result<PathBuf, Stri
             format!("anywhere-plamo-dictionary-{index}.csv")
         };
         let path = directory.join(name);
-        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
             Ok(mut file) => {
                 file.write_all(csv.as_bytes())
                     .and_then(|_| file.sync_all())
@@ -526,7 +559,8 @@ async fn download_model(
         &state.directory,
         &|event| on_event.send(event).map_err(drop),
         &operation.token,
-    ).await?;
+    )
+    .await?;
     let _ = window.app_handle().emit("translation-model-changed", ());
     Ok(())
 }
@@ -605,10 +639,12 @@ async fn recognize_camera(
         .path()
         .app_cache_dir()
         .map_err(|error| error.to_string())?;
-    let capture = tauri::async_runtime::spawn_blocking(move || camera::Capture::new(&cache, &image))
-        .await
-        .map_err(|error| error.to_string())??;
-    state.ocr
+    let capture =
+        tauri::async_runtime::spawn_blocking(move || camera::Capture::new(&cache, &image))
+            .await
+            .map_err(|error| error.to_string())??;
+    state
+        .ocr
         .recognize(&state.ocr_runtime, &capture.path, &operation.token)
         .await
 }
@@ -989,6 +1025,7 @@ pub fn run() {
             get_status,
             set_shortcut,
             set_shortcut_popup,
+            set_use_gpu,
             set_shortcut_recording,
             download_model,
             model::set_translation_model,
@@ -1080,6 +1117,8 @@ pub fn run() {
                 lens_selection: Mutex::new(None),
                 shortcut_recording: Mutex::new(None),
                 shortcut_popup: AtomicBool::new(shortcut::load_popup(&settings)),
+                gpu_available: std::sync::OnceLock::new(),
+                use_gpu: AtomicBool::new(engine::gpu_enabled(&app_directory)),
                 settings,
                 dictionary_path,
                 dictionary,
@@ -1106,6 +1145,16 @@ pub fn run() {
                 .build(app);
             let state = app.state::<AppState>();
             state.resident.store(tray.is_ok(), Ordering::Relaxed);
+            // Probe in the background so a slow GPU driver never delays the window.
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let state = handle.state::<AppState>();
+                let found = match state.gpu_server() {
+                    Some(gpu) => engine::gpu_available(&gpu).await,
+                    None => false,
+                };
+                let _ = state.gpu_available.set(found);
+            });
             if !wayland {
                 // The X11 hotkey backend must not be initialized on pure Wayland.
                 // A failed hotkey setup should still leave the translator usable.
@@ -1324,13 +1373,15 @@ mod tests {
 
     #[test]
     fn dictionary_exports_never_overwrite_earlier_files() {
-        let directory =
-            std::env::temp_dir().join(format!("plamo-export-{}", uuid::Uuid::new_v4()));
+        let directory = std::env::temp_dir().join(format!("plamo-export-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&directory).unwrap();
         let first = super::write_new_csv(&directory, "a").unwrap();
         let second = super::write_new_csv(&directory, "b").unwrap();
         assert_eq!(first.file_name().unwrap(), "anywhere-plamo-dictionary.csv");
-        assert_eq!(second.file_name().unwrap(), "anywhere-plamo-dictionary-2.csv");
+        assert_eq!(
+            second.file_name().unwrap(),
+            "anywhere-plamo-dictionary-2.csv"
+        );
         assert_eq!(std::fs::read_to_string(&first).unwrap(), "a");
         assert_eq!(std::fs::read_to_string(&second).unwrap(), "b");
         std::fs::remove_dir_all(&directory).unwrap();
@@ -1517,6 +1568,8 @@ mod tests {
             lens_selection: Mutex::new(None),
             shortcut_recording: Mutex::new(None),
             shortcut_popup: AtomicBool::new(false),
+            gpu_available: std::sync::OnceLock::new(),
+            use_gpu: AtomicBool::new(false),
             settings: PathBuf::new(),
             dictionary_path: PathBuf::new(),
             dictionary: Mutex::new(Vec::new()),

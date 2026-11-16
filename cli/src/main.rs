@@ -230,8 +230,10 @@ impl Session {
         let engine = if self.exact_server {
             engine::Engine::start(&self.binary, &model, cancel).await
         } else {
-            let marker = self.directory.join("gpu-runtime");
-            engine::start_best(&self.binary, &model, &marker, cancel).await
+            let gpu = engine::gpu_enabled(&self.directory)
+                .then(|| engine::gpu_server(&self.binary, &self.directory))
+                .flatten();
+            engine::start_best(&self.binary, &model, gpu.as_deref(), cancel).await
         };
         self.engine = Some(engine.map_err(cancelled_or)?);
         Ok(())

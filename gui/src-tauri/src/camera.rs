@@ -49,8 +49,7 @@ impl Capture {
             path: directory.join("capture.png"),
             directory,
         };
-        std::fs::write(&capture.path, bytes)
-            .map_err(|_| "撮影画像を保存できません。")?;
+        std::fs::write(&capture.path, bytes).map_err(|_| "撮影画像を保存できません。")?;
         Ok(capture)
     }
 }
