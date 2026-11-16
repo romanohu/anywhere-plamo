@@ -433,7 +433,7 @@ fn desktop() -> Result<(), Error> {
         match child.try_wait() {
             Ok(Some(status)) if !status.success() => {
                 return Err(failed(format!(
-                    "アプリがすぐに終了しました（{status}）。devbox の中から実行しているか確認してください。"
+                    "アプリがすぐに終了しました（{status}）。アプリに必要なライブラリがそろっているか確認してください。"
                 )))
             }
             // A second launch hands over to the running app and exits cleanly.
