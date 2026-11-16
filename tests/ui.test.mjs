@@ -188,6 +188,7 @@ async function fixture(t, options = {}) {
             if (options.dictionaryError) throw options.dictionaryError;
             dictionary = args.entries;
             return dictionary;
+          case 'export_dictionary': return '/home/user/Downloads/anywhere-plamo-dictionary.csv';
           case 'prepare_engine':
             if (options.prepareError) throw options.prepareError;
             return;
@@ -601,6 +602,28 @@ test('the dictionary dialog loads saved entries and persists additions through t
     { term: 'dragon', replacement: 'りゅうきち', enabled: true },
     { term: 'PLaMo', replacement: 'プラモ', enabled: true },
   ]);
+});
+
+test('dictionary CSV imports quoted rows into the draft and exports a file that imports again', async t => {
+  const f = await fixture(t, { dictionary: [{ term: 'dragon', replacement: 'りゅう', enabled: true }] });
+  f.click('dictionary-button');
+  await until(() => f.byId('dictionary-dialog').open);
+  const load = parts => {
+    Object.defineProperty(f.byId('dictionary-csv'), 'files', { configurable: true, value: [new f.window.File(parts, 'dictionary.csv')] });
+    f.byId('dictionary-csv').dispatchEvent(new f.window.Event('change'));
+  };
+  load(['\uFEFF原語,訳語,有効\r\ndragon,ドラゴン,\r\n"New York, NY","ニューヨーク ""NY""",無効\r\n,空\r\nPLaMo,プラモ']);
+  await until(() => f.byId('dictionary-message').textContent.startsWith('CSVから'));
+  assert.equal(f.byId('dictionary-message').textContent, 'CSVから2件追加、1件更新しました。保存すると反映されます。');
+  assert.equal(f.byId('dictionary-entries').children.length, 3);
+  assert.equal(f.calls.some(call => call.command === 'set_dictionary'), false);
+  // Excel's default Japanese CSV: 猫,ねこ in Shift_JIS.
+  load([new Uint8Array([0x94, 0x4c, 0x2c, 0x82, 0xcb, 0x82, 0xb1])]);
+  await until(() => f.byId('dictionary-entries').children.length === 4);
+  f.click('dictionary-export');
+  await until(() => f.byId('dictionary-message').textContent.endsWith('に書き出しました。'));
+  assert.equal(f.calls.findLast(call => call.command === 'export_dictionary').args.csv,
+    '\uFEFF原語,訳語,有効\r\ndragon,ドラゴン,有効\r\n"New York, NY","ニューヨーク ""NY""",無効\r\nPLaMo,プラモ,有効\r\n猫,ねこ,有効\r\n');
 });
 
 test('dictionary drafts reject empty and duplicate terms and deletions only affect the draft', async t => {

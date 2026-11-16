@@ -476,6 +476,40 @@ fn set_dictionary(
     Ok(entries)
 }
 
+/// Writes the dictionary CSV built by the page into Downloads and returns its path.
+#[tauri::command]
+fn export_dictionary(app: tauri::AppHandle, csv: String) -> Result<String, String> {
+    let directory = app
+        .path()
+        .download_dir()
+        .map_err(|_| "ダウンロードフォルダが見つかりません。")?;
+    write_new_csv(&directory, &csv).map(|path| path.display().to_string())
+}
+
+/// Never overwrites an earlier export: picks the first free numbered name.
+fn write_new_csv(directory: &std::path::Path, csv: &str) -> Result<PathBuf, String> {
+    use std::io::Write;
+    for index in 1..1000 {
+        let name = if index == 1 {
+            "anywhere-plamo-dictionary.csv".to_owned()
+        } else {
+            format!("anywhere-plamo-dictionary-{index}.csv")
+        };
+        let path = directory.join(name);
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                file.write_all(csv.as_bytes())
+                    .and_then(|_| file.sync_all())
+                    .map_err(|_| "CSVを書き出せませんでした。")?;
+                return Ok(path);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return Err("CSVを書き出せませんでした。".into()),
+        }
+    }
+    Err("ダウンロードフォルダに書き出し済みのCSVが多すぎます。".into())
+}
+
 #[tauri::command]
 async fn download_model(
     window: tauri::WebviewWindow,
@@ -519,14 +553,13 @@ async fn translate(
     target: String,
     on_event: Channel<ProgressEvent>,
 ) -> Result<engine::TranslationResult, String> {
-    // The registered glossary rewrites the source before validation, so the
-    // character limit counts the text the model actually receives.
-    let text = state
+    // Only the registered terms that occur in the source reach PLaMo's glossary.
+    let glossary = state
         .dictionary
         .lock()
-        .map(|entries| dictionary::apply(&text, &entries))
+        .map(|entries| dictionary::glossary(&text, &entries))
         .map_err(|_| "辞書を読み込めません。")?;
-    protocol::prompt(&text, &target)?;
+    protocol::prompt_with_glossary(&text, &target, &glossary)?;
     let operation = state.begin(window.label())?;
     if !model::ready(&state.directory) {
         return Err("設定画面から翻訳モデルをダウンロードしてください。".into());
@@ -541,7 +574,7 @@ async fn translate(
     engine
         .as_mut()
         .ok_or("翻訳エンジンが見つかりません。")?
-        .translate(&text, &target, &on_event, &operation.token)
+        .translate(&text, &target, &glossary, &on_event, &operation.token)
         .await
 }
 
@@ -966,6 +999,7 @@ pub fn run() {
             take_pending_clipboard,
             get_dictionary,
             set_dictionary,
+            export_dictionary,
             hide_window,
             finish_popup_request,
             open_model_license,
@@ -1280,6 +1314,20 @@ mod tests {
     use super::{AppState, PendingClipboard, PendingRequests};
     use std::{path::PathBuf, sync::atomic::AtomicBool, sync::Mutex, time::Duration};
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn dictionary_exports_never_overwrite_earlier_files() {
+        let directory =
+            std::env::temp_dir().join(format!("plamo-export-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let first = super::write_new_csv(&directory, "a").unwrap();
+        let second = super::write_new_csv(&directory, "b").unwrap();
+        assert_eq!(first.file_name().unwrap(), "anywhere-plamo-dictionary.csv");
+        assert_eq!(second.file_name().unwrap(), "anywhere-plamo-dictionary-2.csv");
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "a");
+        assert_eq!(std::fs::read_to_string(&second).unwrap(), "b");
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
 
     fn text(request: u64, value: &str) -> PendingClipboard {
         PendingClipboard {

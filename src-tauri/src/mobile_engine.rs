@@ -136,14 +136,17 @@ impl Engine {
         &mut self,
         text: &str,
         target: &str,
+        glossary: &[(String, String)],
         channel: &Channel<ProgressEvent>,
         cancel: &CancellationToken,
     ) -> Result<TranslationResult, String> {
-        let prompt = protocol::prompt(text, target)?;
+        let prompt = protocol::prompt_with_glossary(text, target, glossary)?;
+        // The whole prompt keys the cache so a changed glossary is translated again.
+        let key = prompt.clone();
         if cancel.is_cancelled() {
             return Err("CANCELLED".into());
         }
-        if let Some(text) = self.cache.get(text, target) {
+        if let Some(text) = self.cache.get(&key, target) {
             channel
                 .send(ProgressEvent::Token { text })
                 .map_err(|_| "画面との接続が切れました。")?;
@@ -157,7 +160,12 @@ impl Engine {
                 match part {
                     protocol::Paragraph::Separator(value) => chunks.push((value.to_owned(), true)),
                     protocol::Paragraph::Text(value) => {
-                        let prompt = protocol::prompt(value, target)?;
+                        let glossary: Vec<_> = glossary
+                            .iter()
+                            .filter(|(term, _)| value.contains(term.as_str()))
+                            .cloned()
+                            .collect();
+                        let prompt = protocol::prompt_with_glossary(value, target, &glossary)?;
                         if self.length(&prompt)? > protocol::MAX_INPUT_TOKENS {
                             return Err(
                                 "1段落が長すぎます。空行を入れて、さらに短い段落に分けてください。"
@@ -213,7 +221,7 @@ impl Engine {
                 "訳文が生成されませんでした。文章や翻訳先を変更してお試しください。".into(),
             );
         }
-        self.cache.insert(text, target, stream.output);
+        self.cache.insert(&key, target, stream.output);
         Ok(TranslationResult { truncated: false })
     }
 }

@@ -474,7 +474,7 @@ mod tests {
                     Ok(())
                 });
                 let result = engine
-                    .translate(source, target, &channel, &cancel)
+                    .translate(source, target, &[], &channel, &cancel)
                     .await
                     .unwrap();
                 let output = output.lock().unwrap();

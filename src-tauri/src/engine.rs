@@ -145,14 +145,16 @@ impl Engine {
         &mut self,
         text: &str,
         target: &str,
+        glossary: &[(String, String)],
         channel: &Channel<ProgressEvent>,
         cancel: &CancellationToken,
     ) -> Result<TranslationResult, String> {
-        protocol::prompt(text, target)?;
+        // The whole prompt keys the cache so a changed glossary is translated again.
+        let key = protocol::prompt_with_glossary(text, target, glossary)?;
         if cancel.is_cancelled() {
             return Err("CANCELLED".into());
         }
-        if let Some(output) = self.cache.get(text, target) {
+        if let Some(output) = self.cache.get(&key, target) {
             channel
                 .send(ProgressEvent::Token { text: output })
                 .map_err(|_| "画面との接続が切れました。")?;
@@ -162,10 +164,10 @@ impl Engine {
         let result = tokio::select! {
             biased;
             _ = cancel.cancelled() => Err("CANCELLED".into()),
-            result = self.translate_text(text, target, channel, cancel, &mut output) => result,
+            result = self.translate_text(text, target, glossary, channel, cancel, &mut output) => result,
         }?;
         if !result.truncated && !output.trim().is_empty() && !cancel.is_cancelled() {
-            self.cache.insert(text, target, output);
+            self.cache.insert(&key, target, output);
         }
         Ok(result)
     }
@@ -174,11 +176,12 @@ impl Engine {
         &self,
         text: &str,
         target: &str,
+        glossary: &[(String, String)],
         channel: &Channel<ProgressEvent>,
         cancel: &CancellationToken,
         output: &mut String,
     ) -> Result<TranslationResult, String> {
-        let prompt = protocol::prompt(text, target)?;
+        let prompt = protocol::prompt_with_glossary(text, target, glossary)?;
         let input_length = self.input_length(&prompt).await?;
         if input_length <= protocol::MAX_INPUT_TOKENS {
             return self
@@ -189,7 +192,12 @@ impl Engine {
         for part in protocol::paragraphs(text) {
             match part {
                 protocol::Paragraph::Text(text) => {
-                    let prompt = protocol::prompt(text, target)?;
+                    let glossary: Vec<_> = glossary
+                        .iter()
+                        .filter(|(term, _)| text.contains(term.as_str()))
+                        .cloned()
+                        .collect();
+                    let prompt = protocol::prompt_with_glossary(text, target, &glossary)?;
                     let input_length = self.input_length(&prompt).await?;
                     if input_length > protocol::MAX_INPUT_TOKENS {
                         return Err(
