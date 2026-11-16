@@ -519,14 +519,13 @@ async fn translate(
     target: String,
     on_event: Channel<ProgressEvent>,
 ) -> Result<engine::TranslationResult, String> {
-    // The registered glossary rewrites the source before validation, so the
-    // character limit counts the text the model actually receives.
-    let text = state
+    // Only the registered terms that occur in the source reach PLaMo's glossary.
+    let glossary = state
         .dictionary
         .lock()
-        .map(|entries| dictionary::apply(&text, &entries))
+        .map(|entries| dictionary::glossary(&text, &entries))
         .map_err(|_| "辞書を読み込めません。")?;
-    protocol::prompt(&text, &target)?;
+    protocol::prompt_with_glossary(&text, &target, &glossary)?;
     let operation = state.begin(window.label())?;
     if !model::ready(&state.directory) {
         return Err("設定画面から翻訳モデルをダウンロードしてください。".into());
@@ -541,7 +540,7 @@ async fn translate(
     engine
         .as_mut()
         .ok_or("翻訳エンジンが見つかりません。")?
-        .translate(&text, &target, &on_event, &operation.token)
+        .translate(&text, &target, &glossary, &on_event, &operation.token)
         .await
 }
 
