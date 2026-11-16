@@ -16,6 +16,38 @@ SOURCE = WORK / f"llama.cpp-{REVISION}"
 OUTPUT = ROOT / "src-tauri/resources/runtime"
 
 
+NVIDIA_SMI_PATHS = ("/usr/bin/nvidia-smi", "/usr/local/bin/nvidia-smi", "/usr/lib/wsl/lib/nvidia-smi",
+                    r"C:\Windows\System32\nvidia-smi.exe")
+
+
+def parse_compute_caps(output):
+    """Turn nvidia-smi compute_cap lines such as '8.9' into a CMake list such as '89'."""
+    caps = []
+    for line in output.splitlines():
+        major, dot, minor = line.strip().partition(".")
+        if dot and major.isdigit() and minor.isdigit() and major + minor not in caps:
+            caps.append(major + minor)
+    return ";".join(caps)
+
+
+def cuda_architectures():
+    """CUDAARCHS if set, else the installed GPUs; searches known nvidia-smi locations when PATH has none."""
+    if os.environ.get("CUDAARCHS"):
+        return os.environ["CUDAARCHS"]
+    for nvidia_smi in dict.fromkeys([shutil.which("nvidia-smi"), *NVIDIA_SMI_PATHS]):
+        if not nvidia_smi or not os.path.isfile(nvidia_smi):
+            continue
+        try:
+            output = subprocess.run([nvidia_smi, "--query-gpu=compute_cap", "--format=csv,noheader"],
+                                    capture_output=True, text=True, check=True, timeout=10).stdout
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if architectures := parse_compute_caps(output):
+            return architectures
+    print("No NVIDIA GPU found; building for ggml's default CUDA architectures.", flush=True)
+    return ""
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--backend', choices=('cpu', 'cuda', 'vulkan', 'metal'),
@@ -53,6 +85,10 @@ def main():
         "-DLLAMA_BUILD_SERVER=ON", "-DLLAMA_BUILD_UI=OFF",
         "-DLLAMA_USE_PREBUILT_UI=OFF", "-DLLAMA_SUBPROCESS=OFF",
     ]
+    # Target only the installed GPUs instead of ggml's slow multi-arch default when they can be found.
+    if options.backend == 'cuda' and (architectures := cuda_architectures()):
+        print(f"CUDA architectures: {architectures}", flush=True)
+        args.append(f"-DCMAKE_CUDA_ARCHITECTURES={architectures}")
     if platform.system() == "Darwin":
         args += ["-DGGML_METAL_EMBED_LIBRARY=ON", "-DCMAKE_OSX_DEPLOYMENT_TARGET=13.3"]
     if platform.system() == "Windows":
@@ -65,7 +101,9 @@ def main():
     binary = build / "bin" / executable
     if not binary.is_file():
         binary = build / "bin/Release" / executable
-    shutil.copy2(binary, OUTPUT / executable)
+    # The CUDA server sits beside the CPU one; the app uses it when it can see a GPU, else falls back.
+    installed = executable.replace("llama-server", "llama-server-cuda") if options.backend == "cuda" else executable
+    shutil.copy2(binary, OUTPUT / installed)
     # CUDA builds can produce required runtime DLLs next to the executable.
     if platform.system() == "Windows":
         for library in binary.parent.glob("*.dll"):
@@ -84,8 +122,9 @@ def main():
                 target = licenses / file.relative_to(SOURCE)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(file, target)
-    (OUTPUT / "VERSION").write_text(f"llama.cpp {REVISION}\nbackend {options.backend}\n", encoding="utf-8")
-    print(f"Runtime ready: {OUTPUT / executable}")
+    version = "VERSION-cuda" if options.backend == "cuda" else "VERSION"
+    (OUTPUT / version).write_text(f"llama.cpp {REVISION}\nbackend {options.backend}\n", encoding="utf-8")
+    print(f"Runtime ready: {OUTPUT / installed}")
     subprocess.run([sys.executable, str(ROOT / "scripts/build-ocr.py")], check=True)
 
 

@@ -20,6 +20,51 @@ pub const EXECUTABLE: &str = if cfg!(windows) {
     "llama-server"
 };
 
+pub const GPU_EXECUTABLE: &str = if cfg!(windows) {
+    "llama-server-cuda.exe"
+} else {
+    "llama-server-cuda"
+};
+
+/// Picks the CUDA server next to `cpu` when it can see a GPU, else `cpu`.
+/// `marker` records a confirmed GPU so later launches skip the probe; without it the GPU is probed again.
+pub async fn select_binary(cpu: &Path, marker: &Path) -> std::path::PathBuf {
+    let gpu = cpu.with_file_name(GPU_EXECUTABLE);
+    if !gpu.is_file() {
+        return cpu.to_owned();
+    }
+    if marker.is_file() {
+        return gpu;
+    }
+    let mut command = tokio::process::Command::new(&gpu);
+    #[cfg(windows)]
+    command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    command
+        .arg("--list-devices")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    // A missing CUDA runtime fails to start; a missing GPU lists "(none)".
+    let found = tokio::time::timeout(Duration::from_secs(15), command.output())
+        .await
+        .is_ok_and(|output| {
+            output.is_ok_and(|output| {
+                output.status.success() && lists_gpu(&String::from_utf8_lossy(&output.stdout))
+            })
+        });
+    if !found {
+        return cpu.to_owned();
+    }
+    let _ = std::fs::write(marker, "");
+    gpu
+}
+
+fn lists_gpu(devices: &str) -> bool {
+    devices
+        .lines()
+        .any(|line| line.trim_start().starts_with("CUDA") && line.contains(':'))
+}
+
 pub struct Engine {
     child: Child,
     url: String,
@@ -394,6 +439,15 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
     use tauri::ipc::InvokeResponseBody;
+
+    #[test]
+    fn gpu_probe_reads_llama_server_device_list() {
+        assert!(lists_gpu(
+            "Available devices:\n  CUDA0: NVIDIA GeForce RTX 4060 (7798 MiB, 3858 MiB free)\n"
+        ));
+        assert!(!lists_gpu("Available devices:\n  (none)\n"));
+        assert!(!lists_gpu(""));
+    }
 
     #[test]
     fn translation_cache_separates_languages_and_bounds_memory() {

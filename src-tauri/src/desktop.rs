@@ -237,8 +237,17 @@ impl AppState {
         }
         // Drop a stopped process before attempting another launch.
         *engine = None;
-        *engine =
-            Some(engine::Engine::start(&self.binary, &model::path(&self.directory), cancel).await?);
+        let marker = self.directory.with_file_name("gpu-runtime");
+        let binary = engine::select_binary(&self.binary, &marker).await;
+        let model = model::path(&self.directory);
+        *engine = Some(match engine::Engine::start(&binary, &model, cancel).await {
+            // A GPU that stops working falls back to the CPU server and is probed again next launch.
+            Err(error) if binary != self.binary && error != "CANCELLED" => {
+                let _ = std::fs::remove_file(&marker);
+                engine::Engine::start(&self.binary, &model, cancel).await?
+            }
+            result => result?,
+        });
         Ok(())
     }
 }
