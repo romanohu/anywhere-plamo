@@ -43,6 +43,7 @@ const dictionaryReplacement = element<HTMLInputElement>('dictionary-replacement'
 const dictionaryAdd = element<HTMLButtonElement>('dictionary-add');
 const dictionarySave = element<HTMLButtonElement>('dictionary-save');
 const dictionaryMessage = element('dictionary-message');
+const dictionaryCsv = element<HTMLInputElement>('dictionary-csv');
 const mac = /Mac/.test(navigator.platform);
 const popup = new URLSearchParams(location.search).has('popup');
 const lens = new URLSearchParams(location.search).has('lens');
@@ -348,6 +349,70 @@ function addDictionaryEntry(): void {
   dictionaryTerm.focus();
 }
 
+// Rows are term, replacement and an optional enabled flag; a first row naming the columns is skipped.
+function parseDictionaryCsv(text: string): DictionaryEntry[] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = '';
+  let quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (quoted) {
+      if (c === '"' && text[i + 1] === '"') { field += '"'; i++; } else if (c === '"') quoted = false; else field += c;
+    } else if (c === '"') quoted = true;
+    else if (c === ',') { row.push(field); field = ''; }
+    else if (c === '\n' || c === '\r') {
+      if (c === '\r' && text[i + 1] === '\n') i++;
+      row.push(field); rows.push(row); row = []; field = '';
+    } else field += c;
+  }
+  if (field || row.length) { row.push(field); rows.push(row); }
+  if (/^(term|source|原語)$/i.test(rows[0]?.[0]?.trim() ?? '')) rows.shift();
+  return rows
+    .map(([term = '', replacement = '', enabled = '']) => ({
+      term: term.trim(), replacement: replacement.trim(), enabled: !/^(false|0|no|無効)$/i.test(enabled.trim()),
+    }))
+    .filter(entry => entry.term);
+}
+
+async function importDictionaryCsv(): Promise<void> {
+  const file = dictionaryCsv.files?.[0];
+  dictionaryCsv.value = '';
+  if (!file) return;
+  if (file.size > 1024 * 1024) { dictionaryMessage.textContent = 'CSVは1MBまでです。'; return; }
+  const bytes = await new Promise<Uint8Array>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(new Uint8Array(reader.result as ArrayBuffer));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsArrayBuffer(file);
+  });
+  let text: string;
+  // Excel on Japanese Windows writes Shift_JIS unless "CSV UTF-8" is chosen.
+  try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch { text = new TextDecoder('shift_jis').decode(bytes); }
+  let added = 0;
+  let updated = 0;
+  for (const entry of parseDictionaryCsv(text)) {
+    const existing = dictionaryDraft.find(item => item.term === entry.term);
+    if (existing) { Object.assign(existing, entry); updated++; } else { dictionaryDraft.push(entry); added++; }
+  }
+  renderDictionary();
+  dictionaryMessage.textContent = added + updated === 0
+    ? 'CSVに登録できる行がありませんでした。1列目に原語、2列目に訳語を書いてください。'
+    : `CSVから${added}件追加、${updated}件更新しました。保存すると反映されます。`;
+}
+
+async function exportDictionaryCsv(): Promise<void> {
+  const cell = (value: string) => /[",\r\n]/.test(value) ? `"${value.replaceAll('"', '""')}"` : value;
+  // The BOM lets Excel read UTF-8; the header row is skipped when imported again.
+  const csv = '﻿原語,訳語,有効\r\n'
+    + dictionaryDraft.map(entry => [entry.term, entry.replacement, entry.enabled ? '有効' : '無効'].map(cell).join(',') + '\r\n').join('');
+  try {
+    dictionaryMessage.textContent = `${await invoke<string>('export_dictionary', { csv })} に書き出しました。`;
+  } catch (error) {
+    dictionaryMessage.textContent = String(error);
+  }
+}
+
 async function saveDictionary(): Promise<void> {
   if (dictionarySaving) return;
   dictionarySaving = true;
@@ -588,6 +653,9 @@ dictionaryButton.addEventListener('click', () => { void openDictionary(); });
 element('dictionary-close').addEventListener('click', () => dictionaryDialog.close());
 dictionaryAdd.addEventListener('click', addDictionaryEntry);
 dictionarySave.addEventListener('click', () => { void saveDictionary(); });
+element('dictionary-import').addEventListener('click', () => dictionaryCsv.click());
+dictionaryCsv.addEventListener('change', () => { void importDictionaryCsv(); });
+element('dictionary-export').addEventListener('click', () => { void exportDictionaryCsv(); });
 [dictionaryTerm, dictionaryReplacement].forEach(input => {
   // Japanese conversion commits on the first Enter and registers on the
   // second. WebKit reports the committing Enter as a plain keydown right
