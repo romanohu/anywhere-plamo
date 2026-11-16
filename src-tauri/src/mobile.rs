@@ -181,12 +181,12 @@ async fn translate(
     target: String,
     on_event: Channel<ProgressEvent>,
 ) -> Result<engine::TranslationResult, String> {
-    let text = state
+    let glossary = state
         .dictionary
         .lock()
-        .map(|entries| dictionary::apply(&text, &entries))
+        .map(|entries| dictionary::glossary(&text, &entries))
         .map_err(|_| "辞書を読み込めません。")?;
-    protocol::prompt(&text, &target)?;
+    protocol::prompt_with_glossary(&text, &target, &glossary)?;
     let operation = state.begin("main")?;
     if !model::ready(&state.directory) {
         return Err("設定画面から翻訳モデルをダウンロードしてください。".into());
@@ -213,7 +213,7 @@ async fn translate(
         engine
             .as_mut()
             .unwrap()
-            .translate(&text, &target, &on_event, &cancel)
+            .translate(&text, &target, &glossary, &on_event, &cancel)
     })
     .await
     .map_err(|error| error.to_string())?

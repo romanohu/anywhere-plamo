@@ -95,15 +95,16 @@ async fn translate(
     cancel: &CancellationToken,
 ) -> Result<String, String> {
     let state = app.state::<AppState>();
-    let text = state
+    let glossary = state
         .dictionary
         .lock()
-        .map(|entries| dictionary::apply(text, &entries))
+        .map(|entries| dictionary::glossary(text, &entries))
         .map_err(|_| "辞書を読み込めません。")?;
-    protocol::prompt(&text, target)?;
+    protocol::prompt_with_glossary(text, target, &glossary)?;
     let engine = state.engine.clone();
     let path = model::path(&state.directory);
     let cancel = cancel.clone();
+    let text = text.to_owned();
     let target = target.to_owned();
     tauri::async_runtime::spawn_blocking(move || {
         let output = Arc::new(Mutex::new(String::new()));
@@ -133,7 +134,7 @@ async fn translate(
         let result = engine
             .as_mut()
             .unwrap()
-            .translate(&text, &target, &channel, &cancel)?;
+            .translate(&text, &target, &glossary, &channel, &cancel)?;
         if result.truncated {
             return Err("訳文が長すぎます。枠を狭めてください。".into());
         }
