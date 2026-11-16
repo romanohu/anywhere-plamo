@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { pdfBlocks, readingOrder, splitDocumentText, wrapText } from '../src/document-layout.ts';
+import { pdfBlocks, readingOrder, splitDocumentText, wrapText } from '../ui/document-layout.ts';
 
 const style = { f: { ascent: .8, fontFamily: 'sans-serif' } };
 const item = (str, x, y, width = 100, size = 12) => ({ str, dir: 'ltr', width, height: size, transform: [size, 0, 0, size, x, y], fontName: 'f' });

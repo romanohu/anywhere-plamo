@@ -11,11 +11,12 @@ password=鍵のパスワード
 ```
 
 ```sh
+cd gui
 npm run android:prepare
 npm run tauri -- android build --apk --target aarch64
 ```
 
-成果物は`src-tauri/gen/android/app/build/outputs/apk/universal/release/`です。署名設定がない場合は未署名APKになるため、公開前にAndroid SDKの`apksigner verify --verbose 対象.apk`で確認します。更新には同じ署名鍵が必要です。鍵とパスワードを安全な場所にバックアップし、GitやReleasesには含めないでください。デバッグ版とは署名が異なるため、デバッグ版からの導入はアンインストールが必要です。
+成果物は`gui/src-tauri/gen/android/app/build/outputs/apk/universal/release/`です。署名設定がない場合は未署名APKになるため、公開前にAndroid SDKの`apksigner verify --verbose 対象.apk`で確認します。更新には同じ署名鍵が必要です。鍵とパスワードを安全な場所にバックアップし、GitやReleasesには含めないでください。デバッグ版とは署名が異なるため、デバッグ版からの導入はアンインストールが必要です。
 
 ## 画面操作の検証
 

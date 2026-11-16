@@ -21,7 +21,7 @@ def main():
     spec = importlib.util.spec_from_file_location('worker', args.worker)
     worker = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(worker)
-    engine = worker.Ocr(root / 'src-tauri/resources/runtime/ocr-models', args.korean_model)
+    engine = worker.Ocr(root / 'gui/src-tauri/resources/runtime/ocr-models', args.korean_model)
     fixtures = sorted((root / 'tests/fixtures').glob('ocr-*.png'))
     comic = root / '.runtime-build/verification/ocr-candidates/images/comic-1.png'
     if comic.is_file():

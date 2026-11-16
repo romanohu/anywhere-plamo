@@ -21,12 +21,12 @@ class UpdateTests(unittest.TestCase):
         cls.cli = [shutil.which('npm') or 'npm', 'run', 'tauri', '--']
         key = cls.directory / 'test.key'
         subprocess.run([*cls.cli, 'signer', 'generate', '--ci', '-p', '', '-w', str(key)],
-                       cwd=ROOT, check=True, capture_output=True)
+                       cwd=ROOT / 'gui', check=True, capture_output=True)
         cls.config = {'version': '0.2.2', 'plugins': {'updater': {'pubkey': key.with_suffix('.key.pub').read_text().strip()}}}
         cls.artifact = cls.directory / 'test.AppImage'
         cls.artifact.write_bytes(b'\x7fELFtest update')
         subprocess.run([*cls.cli, 'signer', 'sign', '-f', str(key), '-p', '', '--app-version', '0.2.2', str(cls.artifact)],
-                       cwd=ROOT, check=True, capture_output=True)
+                       cwd=ROOT / 'gui', check=True, capture_output=True)
         cls.signature = pathlib.Path(str(cls.artifact) + '.sig').read_text().strip()
 
     @classmethod
@@ -42,7 +42,7 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(set(merged['platforms']), {'darwin-aarch64', 'linux-x86_64'})
 
     def test_rejects_mismatched_key_version_or_release(self):
-        production = json.loads((ROOT / 'src-tauri/tauri.conf.json').read_text())
+        production = json.loads((ROOT / 'gui/src-tauri/tauri.conf.json').read_text())
         with self.assertRaisesRegex(ValueError, 'key does not match'):
             release.check_signature(self.signature, production['plugins']['updater']['pubkey'], '0.2.2')
         with self.assertRaisesRegex(ValueError, 'signed version'):

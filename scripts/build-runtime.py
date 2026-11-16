@@ -13,7 +13,7 @@ REVISION = "cd959bae99ff4bed22bef2604f45241c09bbb8c8"  # llama.cpp v0.9.0
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 WORK = ROOT / ".runtime-build"
 SOURCE = WORK / f"llama.cpp-{REVISION}"
-OUTPUT = ROOT / "src-tauri/resources/runtime"
+OUTPUT = ROOT / "gui/src-tauri/resources/runtime"
 
 
 NVIDIA_SMI_PATHS = ("/usr/bin/nvidia-smi", "/usr/local/bin/nvidia-smi", "/usr/lib/wsl/lib/nvidia-smi",

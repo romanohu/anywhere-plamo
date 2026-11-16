@@ -1,0 +1,13 @@
+# The translation core, the plm CLI and the Tauri app side by side.
+[workspace]
+members = ["core", "cli", "gui/src-tauri"]
+# gui/src-tauri's Android-only OCR plugin joins the workspace as a path dependency but
+# cannot build on desktop, so plain cargo commands cover only these.
+default-members = ["core", "cli", "gui/src-tauri"]
+resolver = "2"
+
+# Profiles only apply at the workspace root.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

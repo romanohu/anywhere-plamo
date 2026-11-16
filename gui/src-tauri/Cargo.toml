@@ -6,12 +6,6 @@ edition = "2021"
 rust-version = "1.90"
 license = "MIT"
 
-# The workspace root stays here so target/ and Cargo.lock keep their paths.
-[workspace]
-members = ["../crates/anyplm-core", "../crates/anyplm-cli"]
-# The Android-only OCR plugin cannot build on desktop.
-exclude = ["ocr-mobile"]
-
 [lib]
 name = "anywhere_plamo_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
@@ -21,7 +15,7 @@ tauri-build = { version = "2", features = [] }
 cc = "1"
 
 [dependencies]
-anyplm-core = { path = "../crates/anyplm-core" }
+anyplm-core = { path = "../../core" }
 tauri = { version = "2", features = ["image-png"] }
 tauri-plugin-clipboard-manager = "2"
 serde = { version = "1", features = ["derive"] }
@@ -60,11 +54,6 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.62", features = ["Win32_Graphics_Gdi", "Win32_Graphics_Dwm", "Win32_System_Com", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_UI_Accessibility", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
-
-[profile.release]
-lto = "thin"
-codegen-units = 1
-strip = true
 
 [dev-dependencies]
 tauri = { version = "2", features = ["test"] }

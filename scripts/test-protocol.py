@@ -8,6 +8,6 @@ with tempfile.TemporaryDirectory(prefix="anywhere-plamo-tests-") as directory:
     binary = pathlib.Path(directory) / "protocol-tests"
     subprocess.run([
         "rustc", "--edition=2021", "--test",
-        str(root / "crates/anyplm-core/src/protocol.rs"), "-o", str(binary),
+        str(root / "core/src/protocol.rs"), "-o", str(binary),
     ], check=True)
     subprocess.run([str(binary)], check=True)

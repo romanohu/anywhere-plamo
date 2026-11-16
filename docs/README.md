@@ -27,13 +27,13 @@ sudo apt install build-essential cmake pkg-config python3-venv libwebkit2gtk-4.1
 
 macOSではXcode Command Line ToolsとCMakeを用意してください。
 
-Windows 11 x64版は開発中で、実機動作は未確認です。Visual Studio Build Toolsの「C++によるデスクトップ開発」、WebView2、Visual C++再頒布可能パッケージを用意してください。以下の`npm run runtime:build`は`py -3.12 scripts/build-runtime.py`に置き換えます。CPUが既定で、Vulkan SDKを用意すれば`--backend vulkan`でGPU版をビルドできます。
+Windows 11 x64版は開発中で、実機動作は未確認です。Visual Studio Build Toolsの「C++によるデスクトップ開発」、WebView2、Visual C++再頒布可能パッケージを用意してください。以下の`npm run runtime:build`は`py -3.12 ../scripts/build-runtime.py`に置き換えます。CPUが既定で、Vulkan SDKを用意すれば`--backend vulkan`でGPU版をビルドできます。
 
-リポジトリのディレクトリで実行します。
+アプリ（GUI）は`gui/`にあります。`npm`のコマンドは`gui/`で実行します。
 
 ```sh
 git clone https://github.com/romanohu/anywhere-plamo.git
-cd anywhere-plamo
+cd anywhere-plamo/gui
 npm ci
 npm run runtime:build
 npm run tauri dev
@@ -44,13 +44,13 @@ npm run tauri dev
 配布用ファイルを作る場合:
 
 ```sh
-python3 scripts/collect-licenses.py
+python3 ../scripts/collect-licenses.py
 npm run tauri build
 ```
 
-成果物は`src-tauri/target/release/bundle/`に生成されます。アプリ内更新用の配布物とMacの継続した署名については[更新の配布手順](updating.md)を参照してください。
+成果物は`target/release/bundle/`に生成されます。アプリ内更新用の配布物とMacの継続した署名については[更新の配布手順](updating.md)を参照してください。
 
-Windowsでは`py -3.12 scripts/collect-licenses.py`の後、`npm run tauri -- build --bundles nsis`でインストーラーを作ります。画面取得・選択翻訳・表示倍率を実機で確認してから配布してください。
+Windowsでは`py -3.12 ../scripts/collect-licenses.py`の後、`npm run tauri -- build --bundles nsis`でインストーラーを作ります。画面取得・選択翻訳・表示倍率を実機で確認してから配布してください。
 
 ### Android（開発版）
 
@@ -60,12 +60,13 @@ Android版のビルドには、上記に加えてJDK 17以上、Android SDK（AP
 
 ```sh
 rustup target add aarch64-linux-android
+cd gui
 npm ci
 npm run android:prepare
 npm run tauri -- android build --debug --apk --target aarch64
 ```
 
-検証用APKは`src-tauri/gen/android/app/build/outputs/apk/universal/debug/`に生成されます。翻訳モデルは初回起動後に取得します。Android版は文章の入力・貼り付け、カメラ翻訳、他のアプリに重ねる画面OCRレンズに対応します。レンズは初回に重ね表示と画面共有を許可して使います。
+検証用APKは`gui/src-tauri/gen/android/app/build/outputs/apk/universal/debug/`に生成されます。翻訳モデルは初回起動後に取得します。Android版は文章の入力・貼り付け、カメラ翻訳、他のアプリに重ねる画面OCRレンズに対応します。レンズは初回に重ね表示と画面共有を許可して使います。
 
 署名付きAPKの作成は[Android配布手順](android-testing.md#配布用apk)を参照してください。
 

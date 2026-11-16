@@ -36,21 +36,27 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential cmake pkg-config libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev libfuse2t64
       - name: Install frontend dependencies
+        working-directory: gui
         run: |
           if test -f package-lock.json; then npm ci; else npm install; fi
       - run: npm run build
+        working-directory: gui
       - run: npm run test:ui
+        working-directory: gui
       - run: npm run test:protocol
-      - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
-      - run: cargo test --manifest-path src-tauri/Cargo.toml
+        working-directory: gui
+      - run: cargo fmt -p anyplm-core -p anyplm-cli -p anywhere-plamo --check
+      - run: cargo test
       - run: npm run runtime:build
+        working-directory: gui
       - run: python3 scripts/collect-licenses.py
       - name: Package desktop app
+        working-directory: gui
         run: npm run tauri build -- --bundles ${{ matrix.bundles }}
       - name: Verify macOS bundle
         if: runner.os == 'macOS'
         run: |
-          app="src-tauri/target/release/bundle/macos/Anywhere Plamo.app"
+          app="target/release/bundle/macos/Anywhere Plamo.app"
           runtime="$app/Contents/Resources/resources/runtime/llama-server"
           codesign --verify --deep --strict "$app"
           codesign --verify --strict "$runtime"
@@ -59,9 +65,9 @@ jobs:
         with:
           name: anywhere-plamo-${{ matrix.os }}
           path: |
-            src-tauri/target/release/bundle/deb/*.deb
-            src-tauri/target/release/bundle/appimage/*.AppImage
-            src-tauri/target/release/bundle/dmg/*.dmg
+            target/release/bundle/deb/*.deb
+            target/release/bundle/appimage/*.AppImage
+            target/release/bundle/dmg/*.dmg
           if-no-files-found: error
 
   release:

@@ -15,22 +15,23 @@ v0.2.1 以前には更新機能がないため、この機能を含む版を最�
 
 ## ローカルでビルドする
 
-リリースするときに、`package.json`、`package-lock.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock`、`src-tauri/tauri.conf.json` と設定画面のバージョンをそろえて上げます。同じバージョンの配布物に差し替えても、アプリは更新対象にしません。
+リリースするときに、`gui/package.json`、`gui/package-lock.json`、`gui/src-tauri/Cargo.toml`、`core/Cargo.toml`、`cli/Cargo.toml`、`Cargo.lock`、`gui/src-tauri/tauri.conf.json` と設定画面のバージョンをそろえて上げます。同じバージョンの配布物に差し替えても、アプリは更新対象にしません。
 
-Mac の例:
+Mac の例（`gui/`で実行します）:
 
 ```sh
+cd gui
 npm ci
 npm run runtime:build
 export TAURI_SIGNING_PRIVATE_KEY="/安全な場所/signing.key"
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
 export APPLE_SIGNING_IDENTITY="Anywhere Plamo Local"
-python3 scripts/build-update.py
+python3 ../scripts/build-update.py
 ```
 
 Mac は `.app.tar.gz` と `.dmg`、Linux は AppImage、Windows は NSIS インストーラーを作ります。各 OS・アーキテクチャの実機でビルドしてください。Windows は Python の呼び出しを `py -3.12` に置き換え、環境変数を PowerShell などで設定します。スクリプトはアップロードや Actions の実行を行いません。
 
-更新用ファイル、`.sig`、`latest.json` は `.runtime-build/updates/<version>/` に生成されます。初回インストール用の `.dmg` は `src-tauri/target/release/bundle/dmg/` にあります。複数の環境を配布するときは、別環境の同じバージョンの `latest.json` を `--merge /path/to/latest.json` で読み込んでビルドし、全環境の項目をまとめてください。
+更新用ファイル、`.sig`、`latest.json` は `.runtime-build/updates/<version>/` に生成されます。初回インストール用の `.dmg` は `target/release/bundle/dmg/` にあります。複数の環境を配布するときは、別環境の同じバージョンの `latest.json` を `--merge /path/to/latest.json` で読み込んでビルドし、全環境の項目をまとめてください。
 
 ## 公開前に確認する
 

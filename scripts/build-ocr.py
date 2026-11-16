@@ -11,7 +11,7 @@ import venv
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 WORK = ROOT / ".runtime-build"
-OUTPUT = ROOT / "src-tauri/resources/runtime"
+OUTPUT = ROOT / "gui/src-tauri/resources/runtime"
 PACKAGES = {"rapidocr": "3.10.0", "onnxruntime": "1.23.2", "opencv-python-headless": "4.11.0.86",
             "numpy": "2.2.6", "Pillow": "12.0.0", "pyinstaller": "6.22.0"}
 MODELS = {"det": "090f04abcd9d9a7498bc4ebf677e4cb9bdce1fe4197ddb7e529f1ef44e1ff94f",

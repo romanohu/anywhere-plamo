@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parent.parent
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--model', type=Path, required=True)
-    parser.add_argument('--server', type=Path, default=ROOT / 'src-tauri/resources/runtime/llama-server')
+    parser.add_argument('--server', type=Path, default=ROOT / 'gui/src-tauri/resources/runtime/llama-server')
     parser.add_argument('--threads', type=int,
                         help='Generation threads; omitted uses the runtime default. Use 8 to measure the app limit on larger CPUs.')
     parser.add_argument('--threads-batch', type=int)

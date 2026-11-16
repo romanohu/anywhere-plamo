@@ -58,7 +58,7 @@ int main(int argc, char ** argv) {
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--model', type=Path, required=True)
-    parser.add_argument('--source', type=Path, default=ROOT / 'src-tauri/src/translation.cpp',
+    parser.add_argument('--source', type=Path, default=ROOT / 'gui/src-tauri/src/translation.cpp',
                         help='Use a saved older translation.cpp for a before/after comparison.')
     parser.add_argument('--runtime-build', type=Path, default=ROOT / '.runtime-build/build-cpu')
     parser.add_argument('--runs', type=int, default=3)

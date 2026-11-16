@@ -7,10 +7,10 @@ import subprocess
 
 root = pathlib.Path(__file__).resolve().parent.parent
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument('--output', type=pathlib.Path, default=root / 'src-tauri/resources/runtime/rust-licenses')
+parser.add_argument('--output', type=pathlib.Path, default=root / 'gui/src-tauri/resources/runtime/rust-licenses')
 args = parser.parse_args()
 metadata = json.loads(subprocess.check_output([
-    "cargo", "metadata", "--format-version=1", "--manifest-path", str(root / "src-tauri/Cargo.toml"),
+    "cargo", "metadata", "--format-version=1", "--manifest-path", str(root / "gui/src-tauri/Cargo.toml"),
 ], text=True))
 destination = args.output
 destination.mkdir(parents=True, exist_ok=True)

@@ -20,7 +20,7 @@ import urllib.request
 from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument('--app', type=Path, default=ROOT / 'src-tauri/target/debug/anywhere-plamo')
+parser.add_argument('--app', type=Path, default=ROOT / 'target/debug/anywhere-plamo')
 parser.add_argument('--comic', type=Path, help='Optional local PHD comic 156 image for OCR lens regression checks')
 parser.add_argument('--korean-model', type=Path, help='Optional Korean ONNX weight for offline lens tests')
 parser.add_argument('--camera', action='store_true', help='Use fixture video frames with real local OCR and translation')

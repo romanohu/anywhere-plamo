@@ -134,7 +134,8 @@ mod tests {
     #[tokio::test]
     async fn signed_updates_replace_only_the_app_and_reject_tampering() {
         let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../../tests/fixtures/update-signed.json")).unwrap();
+            serde_json::from_str(include_str!("../../../tests/fixtures/update-signed.json"))
+                .unwrap();
         let mut context = tauri::test::mock_context(tauri::test::noop_assets());
         context.config_mut().plugins.0.insert(
             "updater".into(),

@@ -32,7 +32,7 @@ def main():
         with tarfile.open(archive) as package:
             package.extractall(work, filter='data')
         archive.unlink()
-    output = ROOT / 'src-tauri/resources/android'
+    output = ROOT / 'gui/src-tauri/resources/android'
     include = output / 'include'
     include.mkdir(parents=True, exist_ok=True)
     for directory in [source / 'include', source / 'ggml/include']:
@@ -57,10 +57,10 @@ def main():
             library = next(build.rglob(f'lib{name}.a'))
             shutil.copy2(library, destination / library.name)
         # Use the NDK's 16 KB aligned C++ runtime instead of the older OpenCV copy.
-        jni = ROOT / 'src-tauri/gen/android/app/src/main/jniLibs' / abi
+        jni = ROOT / 'gui/src-tauri/gen/android/app/src/main/jniLibs' / abi
         jni.mkdir(parents=True, exist_ok=True)
         shutil.copy2(llvm / 'sysroot/usr/lib' / triple / 'libc++_shared.so', jni / 'libc++_shared.so')
-    assets = ROOT / 'src-tauri/ocr-mobile/android/src/main/assets'
+    assets = ROOT / 'gui/src-tauri/ocr-mobile/android/src/main/assets'
     models = assets / 'ocr'
     models.mkdir(parents=True, exist_ok=True)
     for task, checksum in OCR['MODELS'].items():
@@ -69,7 +69,7 @@ def main():
         shutil.copy2(model, models / name)
     licenses = assets / 'licenses'
     licenses.mkdir(exist_ok=True)
-    shutil.copytree(ROOT / 'src-tauri/ocr-mobile/licenses', licenses, dirs_exist_ok=True)
+    shutil.copytree(ROOT / 'gui/src-tauri/ocr-mobile/licenses', licenses, dirs_exist_ok=True)
     shutil.copy2(source / 'LICENSE', licenses / 'llama.cpp-LICENSE')
     shutil.copy2(ROOT / 'LICENSE', licenses / 'Anywhere-Plamo-LICENSE')
     shutil.copy2(llvm / 'NOTICE', licenses / 'LLVM-NOTICE')
@@ -81,7 +81,7 @@ def main():
                 shutil.copy2(file, destination)
     # PaddleOCR / RapidOCR model notices are also kept in the Android package.
     for name in ['LICENSE', 'NOTICE']:
-        path = ROOT / 'src-tauri/ocr-mobile' / name
+        path = ROOT / 'gui/src-tauri/ocr-mobile' / name
         if path.exists():
             shutil.copy2(path, licenses / f'OCR-{name}')
     subprocess.run([sys.executable, str(ROOT / 'scripts/collect-licenses.py'), '--output', str(licenses / 'rust')], check=True)
