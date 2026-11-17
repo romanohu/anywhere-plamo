@@ -1,5 +1,4 @@
 mod camera;
-use plamo_core::{dictionary, engine, protocol};
 mod lens;
 mod lens_select;
 mod model;
@@ -8,6 +7,7 @@ mod selection;
 mod shortcut;
 mod update;
 
+use anyplm_core::{dictionary, engine, protocol};
 use serde::Serialize;
 use std::{
     path::PathBuf,
@@ -26,15 +26,7 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tokio_util::sync::CancellationToken;
 
-#[derive(Clone, Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
-pub enum ProgressEvent {
-    Download { received: u64, total: u64 },
-    Verifying,
-    Loading,
-    Reading,
-    Token { text: String },
-}
+pub use anyplm_core::ProgressEvent;
 
 #[derive(Clone, Serialize)]
 struct PendingClipboard {
@@ -115,7 +107,7 @@ struct AppState {
     lens_passthrough: AtomicBool,
     lens_bounds: Mutex<Option<LensBounds>>,
     lens_watch: Mutex<lens::Watch>,
-    translation: plamo_core::Service,
+    translation: anyplm_core::Service,
     preparation: CancellationToken,
     updating: AtomicBool,
     operation: Mutex<Option<CancellationToken>>,
@@ -130,6 +122,9 @@ struct AppState {
     lens_selection: Mutex<Option<lens_select::Pending>>,
     shortcut_recording: Mutex<Option<String>>,
     shortcut_popup: AtomicBool,
+    /// Probed once at launch; the settings only offer the GPU when it is true.
+    gpu_available: std::sync::OnceLock<bool>,
+    use_gpu: AtomicBool,
     settings: PathBuf,
     dictionary_path: PathBuf,
     dictionary: Mutex<Vec<dictionary::Entry>>,
@@ -151,6 +146,18 @@ impl Drop for Operation<'_> {
 }
 
 impl AppState {
+    /// The CUDA server, looking in the data folder before the bundled resources.
+    fn gpu_server(&self) -> Option<PathBuf> {
+        engine::gpu_server(&self.binary, self.directory.parent()?)
+    }
+
+    fn selected_gpu(&self) -> Option<PathBuf> {
+        self.use_gpu
+            .load(Ordering::Relaxed)
+            .then(|| self.gpu_server())
+            .flatten()
+    }
+
     fn operation(&self, label: &str) -> &Mutex<Option<CancellationToken>> {
         match label {
             "popup" => &self.popup_operation,
@@ -229,6 +236,8 @@ struct AppStatus {
     wayland: bool,
     resident: bool,
     shortcut_popup: bool,
+    gpu_available: bool,
+    use_gpu: bool,
     lens_supported: bool,
     ocr_available: bool,
     lens_uses_selection: bool,
@@ -264,6 +273,8 @@ fn get_status(state: tauri::State<'_, AppState>) -> AppStatus {
         wayland: state.wayland,
         resident: state.resident.load(Ordering::Relaxed),
         shortcut_popup: state.shortcut_popup.load(Ordering::Relaxed),
+        gpu_available: state.gpu_available.get().copied().unwrap_or(false),
+        use_gpu: state.use_gpu.load(Ordering::Relaxed),
         lens_supported: cfg!(any(
             target_os = "macos",
             target_os = "linux",
@@ -365,6 +376,17 @@ fn set_shortcut(
 }
 
 #[tauri::command]
+fn set_use_gpu(state: tauri::State<'_, AppState>, enabled: bool) -> Result<AppStatus, String> {
+    // Switching restarts the engine, so wait for running work as a model change does.
+    let data = state.directory.parent().ok_or("保存先が見つかりません。")?;
+    state.translation.try_reset(|| {
+        engine::set_gpu_enabled(data, enabled)?;
+        Ok(state.use_gpu.swap(enabled, Ordering::Relaxed) != enabled)
+    })?;
+    Ok(get_status(state))
+}
+
+#[tauri::command]
 fn set_shortcut_popup(
     state: tauri::State<'_, AppState>,
     enabled: bool,
@@ -446,6 +468,44 @@ fn set_dictionary(
     Ok(entries)
 }
 
+/// Writes the dictionary CSV built by the page into Downloads and returns its path.
+#[tauri::command]
+fn export_dictionary(app: tauri::AppHandle, csv: String) -> Result<String, String> {
+    let directory = app
+        .path()
+        .download_dir()
+        .map_err(|_| "ダウンロードフォルダが見つかりません。")?;
+    write_new_csv(&directory, &csv).map(|path| path.display().to_string())
+}
+
+/// Never overwrites an earlier export: picks the first free numbered name.
+fn write_new_csv(directory: &std::path::Path, csv: &str) -> Result<PathBuf, String> {
+    use std::io::Write;
+    for index in 1..1000 {
+        let name = if index == 1 {
+            "anywhere-plamo-dictionary.csv".to_owned()
+        } else {
+            format!("anywhere-plamo-dictionary-{index}.csv")
+        };
+        let path = directory.join(name);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                file.write_all(csv.as_bytes())
+                    .and_then(|_| file.sync_all())
+                    .map_err(|_| "CSVを書き出せませんでした。")?;
+                return Ok(path);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return Err("CSVを書き出せませんでした。".into()),
+        }
+    }
+    Err("ダウンロードフォルダに書き出し済みのCSVが多すぎます。".into())
+}
+
 #[tauri::command]
 async fn download_model(
     window: tauri::WebviewWindow,
@@ -461,7 +521,12 @@ async fn download_model(
     if model::ready(&state.directory) {
         return Ok(());
     }
-    model::download(&state.directory, &on_event, &operation.token).await?;
+    model::download(
+        &state.directory,
+        &|event| on_event.send(event).map_err(drop),
+        &operation.token,
+    )
+    .await?;
     let _ = window.app_handle().emit("translation-model-changed", ());
     Ok(())
 }
@@ -479,6 +544,7 @@ async fn prepare_engine(state: tauri::State<'_, AppState>) -> Result<(), String>
         .prepare(
             &state.binary,
             &model::path(&state.directory),
+            state.selected_gpu().as_deref(),
             &state.preparation,
         )
         .await?;
@@ -503,8 +569,10 @@ async fn translate(
         .map_err(|_| "辞書を読み込めません。")?
         .clone();
     let path = model::path(&state.directory);
-    let settings = plamo_core::Settings {
+    let gpu = state.selected_gpu();
+    let settings = anyplm_core::Settings {
         binary: &state.binary,
+        gpu_binary: gpu.as_deref(),
         model: &path,
         target: &target,
         dictionary: &entries,
@@ -516,8 +584,8 @@ async fn translate(
             &text,
             &mut |event| {
                 let event = match event {
-                    plamo_core::Event::Loading => ProgressEvent::Loading,
-                    plamo_core::Event::Token(text) => ProgressEvent::Token { text },
+                    anyplm_core::Event::Loading => ProgressEvent::Loading,
+                    anyplm_core::Event::Token(text) => ProgressEvent::Token { text },
                 };
                 on_event
                     .send(event)
@@ -534,8 +602,8 @@ async fn translate_blocks(
     state: tauri::State<'_, AppState>,
     texts: Vec<String>,
     target: String,
-    options: plamo_core::BatchOptions,
-    on_event: Channel<plamo_core::BatchEvent>,
+    options: anyplm_core::BatchOptions,
+    on_event: Channel<anyplm_core::BatchEvent>,
 ) -> Result<(), String> {
     let operation = state.begin(window.label())?;
     if !model::ready(&state.directory) {
@@ -547,8 +615,10 @@ async fn translate_blocks(
         .map_err(|_| "辞書を読み込めません。")?
         .clone();
     let path = model::path(&state.directory);
-    let settings = plamo_core::Settings {
+    let gpu = state.selected_gpu();
+    let settings = anyplm_core::Settings {
         binary: &state.binary,
+        gpu_binary: gpu.as_deref(),
         model: &path,
         target: &target,
         dictionary: &entries,
@@ -975,6 +1045,7 @@ pub fn run() {
             get_status,
             set_shortcut,
             set_shortcut_popup,
+            set_use_gpu,
             set_shortcut_recording,
             download_model,
             model::set_translation_model,
@@ -993,6 +1064,7 @@ pub fn run() {
             take_pending_clipboard,
             get_dictionary,
             set_dictionary,
+            export_dictionary,
             hide_window,
             finish_popup_request,
             open_model_license,
@@ -1039,7 +1111,7 @@ pub fn run() {
                 lens_passthrough: AtomicBool::new(false),
                 lens_bounds: Mutex::new(None),
                 lens_watch: Mutex::new(lens::Watch::default()),
-                translation: plamo_core::Service::default(),
+                translation: anyplm_core::Service::default(),
                 preparation: CancellationToken::new(),
                 updating: AtomicBool::new(false),
                 operation: Mutex::new(None),
@@ -1066,6 +1138,8 @@ pub fn run() {
                 lens_selection: Mutex::new(None),
                 shortcut_recording: Mutex::new(None),
                 shortcut_popup: AtomicBool::new(shortcut::load_popup(&settings)),
+                gpu_available: std::sync::OnceLock::new(),
+                use_gpu: AtomicBool::new(engine::gpu_enabled(&app_directory)),
                 settings,
                 dictionary_path,
                 dictionary,
@@ -1092,6 +1166,16 @@ pub fn run() {
                 .build(app);
             let state = app.state::<AppState>();
             state.resident.store(tray.is_ok(), Ordering::Relaxed);
+            // Probe in the background so a slow GPU driver never delays the window.
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let state = handle.state::<AppState>();
+                let found = match state.gpu_server() {
+                    Some(gpu) => engine::gpu_available(&gpu).await,
+                    None => false,
+                };
+                let _ = state.gpu_available.set(found);
+            });
             if !wayland {
                 // The X11 hotkey backend must not be initialized on pure Wayland.
                 // A failed hotkey setup should still leave the translator usable.
@@ -1308,6 +1392,22 @@ mod tests {
     use std::{path::PathBuf, sync::atomic::AtomicBool, sync::Mutex};
     use tokio_util::sync::CancellationToken;
 
+    #[test]
+    fn dictionary_exports_never_overwrite_earlier_files() {
+        let directory = std::env::temp_dir().join(format!("plamo-export-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let first = super::write_new_csv(&directory, "a").unwrap();
+        let second = super::write_new_csv(&directory, "b").unwrap();
+        assert_eq!(first.file_name().unwrap(), "anywhere-plamo-dictionary.csv");
+        assert_eq!(
+            second.file_name().unwrap(),
+            "anywhere-plamo-dictionary-2.csv"
+        );
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "a");
+        assert_eq!(std::fs::read_to_string(&second).unwrap(), "b");
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
     fn text(request: u64, value: &str) -> PendingClipboard {
         PendingClipboard {
             request,
@@ -1459,7 +1559,7 @@ mod tests {
             lens_passthrough: AtomicBool::new(false),
             lens_bounds: Mutex::new(None),
             lens_watch: Mutex::new(crate::lens::Watch::default()),
-            translation: plamo_core::Service::default(),
+            translation: anyplm_core::Service::default(),
             preparation: CancellationToken::new(),
             updating: AtomicBool::new(false),
             operation: Mutex::new(None),
@@ -1486,6 +1586,8 @@ mod tests {
             lens_selection: Mutex::new(None),
             shortcut_recording: Mutex::new(None),
             shortcut_popup: AtomicBool::new(false),
+            gpu_available: std::sync::OnceLock::new(),
+            use_gpu: AtomicBool::new(false),
             settings: PathBuf::new(),
             dictionary_path: PathBuf::new(),
             dictionary: Mutex::new(Vec::new()),
@@ -1547,6 +1649,7 @@ mod tests {
                 .prepare(
                     &state.binary,
                     &crate::model::path(&state.directory),
+                    None,
                     &lens.token
                 )
                 .await

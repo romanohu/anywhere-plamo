@@ -142,6 +142,10 @@
         <p id="download-message" class="setting-description" role="status" aria-live="polite"></p>
         <label class="setting-toggle" title="初回の翻訳を速くします"><input type="checkbox" id="preload-model" checked aria-describedby="preload-description" />起動時にモデルを先読み</label>
         <p class="setting-description" id="preload-description">待機中もメモリを使用。オフは次回起動から。</p>
+        <div id="gpu-setting" hidden>
+          <label class="setting-toggle"><input type="checkbox" id="use-gpu" aria-describedby="gpu-description" />GPUで起動する</label>
+          <p class="setting-description" id="gpu-description">このPCで使えるGPUが見つかりました。オンにすると次の翻訳から速いGPUで動きます。使えないときはCPUで動きます。</p>
+        </div>
       </section>
       <section class="settings-section" id="ocr-settings">
         <label class="setting-toggle"><input type="checkbox" id="korean-ocr" disabled />韓国語OCR</label>
@@ -160,7 +164,7 @@
     <dialog id="dictionary-dialog" aria-labelledby="dictionary-title">
       <div class="dialog-header"><h2 id="dictionary-title">辞書</h2><button class="icon-button" id="dictionary-close" aria-label="閉じる"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
       <section class="settings-section">
-        <p class="setting-description">登録した語句を訳語に置き換えてから翻訳します。訳語は翻訳先の言語で書いてください。</p>
+        <p class="setting-description">原文に登録した語句があれば、その訳語を使うようモデルに指示します。訳語は翻訳先の言語で書いてください。</p>
         <div id="dictionary-entries"></div>
         <p class="setting-description" id="dictionary-empty">登録された語句はありません。</p>
         <div class="dictionary-form">
@@ -170,7 +174,7 @@
         </div>
         <p class="setting-description" id="dictionary-message" role="status" aria-live="polite"></p>
       </section>
-      <section class="settings-section about"><button class="button small" id="dictionary-save">保存</button></section>
+      <section class="settings-section about"><button class="text-button" id="dictionary-import">CSVを読み込む</button><button class="text-button" id="dictionary-export">CSVに書き出す</button><input type="file" id="dictionary-csv" accept=".csv,text/csv" hidden /><button class="button small" id="dictionary-save">保存</button></section>
     </dialog>
     <script type="module" src="/main.ts"></script>
   </body>

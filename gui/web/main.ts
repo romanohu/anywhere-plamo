@@ -27,6 +27,7 @@ const dictionaryDialog = element<HTMLDialogElement>('dictionary-dialog');
 const downloadButton = element<HTMLButtonElement>('download-button');
 const modelSelect = element<HTMLSelectElement>('translation-model');
 const preloadModel = element<HTMLInputElement>('preload-model');
+const useGpu = element<HTMLInputElement>('use-gpu');
 const autoDirection = element<HTMLInputElement>('auto-direction');
 const shortcutPopup = element<HTMLInputElement>('shortcut-popup');
 const statusText = element<HTMLSpanElement>('translation-status');
@@ -43,6 +44,7 @@ const dictionaryReplacement = element<HTMLInputElement>('dictionary-replacement'
 const dictionaryAdd = element<HTMLButtonElement>('dictionary-add');
 const dictionarySave = element<HTMLButtonElement>('dictionary-save');
 const dictionaryMessage = element('dictionary-message');
+const dictionaryCsv = element<HTMLInputElement>('dictionary-csv');
 const mac = /Mac/.test(navigator.platform);
 const popup = new URLSearchParams(location.search).has('popup');
 const lens = new URLSearchParams(location.search).has('lens');
@@ -164,6 +166,8 @@ async function refreshStatus(): Promise<void> {
   element('setup-banner').hidden = status.modelReady && status.runtimeAvailable;
   element('model-tag').textContent = status.modelReady ? '準備完了' : '未準備';
   element('download-section').hidden = status.modelReady;
+  element('gpu-setting').hidden = !status.gpuAvailable;
+  useGpu.checked = !!status.useGpu;
   downloadButton.disabled = !status.runtimeAvailable;
   element('download-message').textContent = !status.runtimeAvailable
     ? '翻訳エンジンが見つかりません。アプリを再インストールしてください。' : '';
@@ -343,6 +347,70 @@ function addDictionaryEntry(): void {
   dictionaryTerm.focus();
 }
 
+// Rows are term, replacement and an optional enabled flag; a first row naming the columns is skipped.
+function parseDictionaryCsv(text: string): DictionaryEntry[] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = '';
+  let quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (quoted) {
+      if (c === '"' && text[i + 1] === '"') { field += '"'; i++; } else if (c === '"') quoted = false; else field += c;
+    } else if (c === '"') quoted = true;
+    else if (c === ',') { row.push(field); field = ''; }
+    else if (c === '\n' || c === '\r') {
+      if (c === '\r' && text[i + 1] === '\n') i++;
+      row.push(field); rows.push(row); row = []; field = '';
+    } else field += c;
+  }
+  if (field || row.length) { row.push(field); rows.push(row); }
+  if (/^(term|source|原語)$/i.test(rows[0]?.[0]?.trim() ?? '')) rows.shift();
+  return rows
+    .map(([term = '', replacement = '', enabled = '']) => ({
+      term: term.trim(), replacement: replacement.trim(), enabled: !/^(false|0|no|無効)$/i.test(enabled.trim()),
+    }))
+    .filter(entry => entry.term);
+}
+
+async function importDictionaryCsv(): Promise<void> {
+  const file = dictionaryCsv.files?.[0];
+  dictionaryCsv.value = '';
+  if (!file) return;
+  if (file.size > 1024 * 1024) { dictionaryMessage.textContent = 'CSVは1MBまでです。'; return; }
+  const bytes = await new Promise<Uint8Array>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(new Uint8Array(reader.result as ArrayBuffer));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsArrayBuffer(file);
+  });
+  let text: string;
+  // Excel on Japanese Windows writes Shift_JIS unless "CSV UTF-8" is chosen.
+  try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch { text = new TextDecoder('shift_jis').decode(bytes); }
+  let added = 0;
+  let updated = 0;
+  for (const entry of parseDictionaryCsv(text)) {
+    const existing = dictionaryDraft.find(item => item.term === entry.term);
+    if (existing) { Object.assign(existing, entry); updated++; } else { dictionaryDraft.push(entry); added++; }
+  }
+  renderDictionary();
+  dictionaryMessage.textContent = added + updated === 0
+    ? 'CSVに登録できる行がありませんでした。1列目に原語、2列目に訳語を書いてください。'
+    : `CSVから${added}件追加、${updated}件更新しました。保存すると反映されます。`;
+}
+
+async function exportDictionaryCsv(): Promise<void> {
+  const cell = (value: string) => /[",\r\n]/.test(value) ? `"${value.replaceAll('"', '""')}"` : value;
+  // The BOM lets Excel read UTF-8; the header row is skipped when imported again.
+  const csv = '﻿原語,訳語,有効\r\n'
+    + dictionaryDraft.map(entry => [entry.term, entry.replacement, entry.enabled ? '有効' : '無効'].map(cell).join(',') + '\r\n').join('');
+  try {
+    dictionaryMessage.textContent = `${await invoke<string>('export_dictionary', { csv })} に書き出しました。`;
+  } catch (error) {
+    dictionaryMessage.textContent = String(error);
+  }
+}
+
 async function saveDictionary(): Promise<void> {
   if (dictionarySaving) return;
   dictionarySaving = true;
@@ -415,6 +483,11 @@ async function translate(): Promise<void> {
   popupTerminal = false;
   const started = performance.now();
   let firstToken: number | null = null;
+  // shortcut: one streamed chunk ≈ one token and paragraph gaps count as generation time; read llama-server timings if exact figures are needed.
+  let tokens = 0;
+  let tokenStart = 0;
+  let tokenEnd = 0;
+  const tokenRate = (): string => tokens < 2 || tokenEnd <= tokenStart ? '' : ` · ${((tokens - 1) / ((tokenEnd - tokenStart) / 1000)).toFixed(1)} tok/s`;
   let acceptingEvents = true;
   const output = document.createTextNode('');
   result.append(output);
@@ -432,13 +505,15 @@ async function translate(): Promise<void> {
         empty.hidden = true;
         result.hidden = false;
         output.appendData(event.text);
-        statusText.textContent = '翻訳中…';
+        tokenEnd = performance.now();
+        if (tokens++ === 0) tokenStart = tokenEnd;
+        statusText.textContent = `翻訳中…${tokenRate()}`;
       }
     });
     const response = await invoke<{ truncated: boolean }>('translate', {
       text: source.value, target: target.value, onEvent: channel,
     });
-    statusText.textContent = `${((performance.now() - started) / 1000).toFixed(1)}秒 · 翻訳完了`;
+    statusText.textContent = `${((performance.now() - started) / 1000).toFixed(1)}秒${tokenRate()} · 翻訳完了`;
     if (response.truncated) {
       statusText.textContent = '訳文が途中で止まりました';
       showError('訳文の長さの上限に達しました。原文を短く分けて翻訳してください。');
@@ -583,6 +658,9 @@ dictionaryButton.addEventListener('click', () => { void openDictionary(); });
 element('dictionary-close').addEventListener('click', () => dictionaryDialog.close());
 dictionaryAdd.addEventListener('click', addDictionaryEntry);
 dictionarySave.addEventListener('click', () => { void saveDictionary(); });
+element('dictionary-import').addEventListener('click', () => dictionaryCsv.click());
+dictionaryCsv.addEventListener('change', () => { void importDictionaryCsv(); });
+element('dictionary-export').addEventListener('click', () => { void exportDictionaryCsv(); });
 [dictionaryTerm, dictionaryReplacement].forEach(input => {
   // Japanese conversion commits on the first Enter and registers on the
   // second. WebKit reports the committing Enter as a plain keydown right
@@ -664,6 +742,21 @@ shortcutPopup.addEventListener('change', async () => {
 });
 downloadButton.addEventListener('click', () => { void download(); });
 modelSelect.addEventListener('change', () => { void selectModel(); });
+useGpu.addEventListener('change', async () => {
+  useGpu.disabled = true;
+  element('download-message').textContent = '';
+  try {
+    status = await invoke<AppStatus>('set_use_gpu', { enabled: useGpu.checked });
+    // The engine restarts on the chosen hardware; warm it again when preloading.
+    preparationRequested = false;
+    prepareEngine();
+  } catch (error) {
+    element('download-message').textContent = String(error);
+  } finally {
+    useGpu.checked = !!status.useGpu;
+    useGpu.disabled = false;
+  }
+});
 preloadModel.addEventListener('change', () => {
   try { localStorage.setItem('preload-model', String(preloadModel.checked)); } catch { /* Optional preference. */ }
   prepareEngine();

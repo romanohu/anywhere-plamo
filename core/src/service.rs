@@ -1,7 +1,7 @@
 use crate::{
     dictionary,
-    engine::{Engine, TranslationResult},
-    protocol,
+    engine::{self, Engine, TranslationResult},
+    protocol, ProgressEvent,
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -10,6 +10,7 @@ use tokio_util::sync::CancellationToken;
 
 pub struct Settings<'a> {
     pub binary: &'a Path,
+    pub gpu_binary: Option<&'a Path>,
     pub model: &'a Path,
     pub target: &'a str,
     pub dictionary: &'a [dictionary::Entry],
@@ -49,6 +50,7 @@ pub struct BatchOptions {
 
 struct Loaded {
     binary: PathBuf,
+    gpu_binary: Option<PathBuf>,
     model: PathBuf,
     engine: Engine,
 }
@@ -74,17 +76,22 @@ impl Service {
         slot: &'a mut Option<Loaded>,
         binary: &Path,
         model: &Path,
+        gpu_binary: Option<&Path>,
         cancel: &CancellationToken,
         emit: &mut (dyn FnMut(Event) -> Result<(), String> + Send),
     ) -> Result<&'a mut Engine, String> {
         if !slot.as_mut().is_some_and(|loaded| {
-            loaded.binary == binary && loaded.model == model && loaded.engine.alive()
+            loaded.binary == binary
+                && loaded.gpu_binary.as_deref() == gpu_binary
+                && loaded.model == model
+                && loaded.engine.alive()
         }) {
             *slot = None;
             emit(Event::Loading)?;
-            let engine = Engine::start(binary, model, cancel).await?;
+            let engine = engine::start_best(binary, model, gpu_binary, cancel).await?;
             *slot = Some(Loaded {
                 binary: binary.into(),
+                gpu_binary: gpu_binary.map(Path::to_owned),
                 model: model.into(),
                 engine,
             });
@@ -96,10 +103,19 @@ impl Service {
         &self,
         binary: &Path,
         model: &Path,
+        gpu_binary: Option<&Path>,
         cancel: &CancellationToken,
     ) -> Result<(), String> {
         let mut slot = self.lock(cancel).await?;
-        Self::load(&mut slot, binary, model, cancel, &mut |_| Ok(())).await?;
+        Self::load(
+            &mut slot,
+            binary,
+            model,
+            gpu_binary,
+            cancel,
+            &mut |_| Ok(()),
+        )
+        .await?;
         Ok(())
     }
 
@@ -127,15 +143,30 @@ impl Service {
         emit: &mut (dyn FnMut(Event) -> Result<(), String> + Send),
         cancel: &CancellationToken,
     ) -> Result<TranslationResult, String> {
-        let text = dictionary::apply(text, settings.dictionary);
-        protocol::prompt(&text, settings.target)?;
+        let glossary = dictionary::glossary(text, settings.dictionary);
+        protocol::prompt_with_glossary(text, settings.target, &glossary)?;
         let mut slot = self.lock(cancel).await?;
-        let engine = Self::load(&mut slot, settings.binary, settings.model, cancel, emit).await?;
+        let engine = Self::load(
+            &mut slot,
+            settings.binary,
+            settings.model,
+            settings.gpu_binary,
+            cancel,
+            emit,
+        )
+        .await?;
+        let sink = std::sync::Mutex::new(emit);
         engine
             .translate(
-                &text,
+                text,
                 settings.target,
-                &mut |text| emit(Event::Token(text)),
+                &glossary,
+                &|event| {
+                    if let ProgressEvent::Token { text } = event {
+                        sink.lock().map_err(|_| ())?(Event::Token(text)).map_err(drop)?;
+                    }
+                    Ok(())
+                },
                 cancel,
             )
             .await
@@ -174,9 +205,10 @@ impl Service {
                 return Err("翻訳する文章を入力してください。".into());
             }
             for part in parts {
-                protocol::prompt(
-                    &dictionary::apply(part, settings.dictionary),
+                protocol::prompt_with_glossary(
+                    part,
                     settings.target,
+                    &dictionary::glossary(part, settings.dictionary),
                 )?;
             }
         }
@@ -319,6 +351,7 @@ mod tests {
         let service = Service::default();
         let settings = Settings {
             binary: Path::new("missing-runtime"),
+            gpu_binary: None,
             model: Path::new("missing-model"),
             target: "ja",
             dictionary: &[],
@@ -356,6 +389,7 @@ mod tests {
         let service = Service::default();
         let settings = Settings {
             binary: Path::new("missing-runtime"),
+            gpu_binary: None,
             model: Path::new("missing-model"),
             target: "ja",
             dictionary: &[],

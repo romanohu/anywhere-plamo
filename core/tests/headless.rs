@@ -1,4 +1,4 @@
-use plamo_core::{dictionary::Entry, BatchEvent, BatchOptions, Event, Service, Settings};
+use anyplm_core::{dictionary::Entry, BatchEvent, BatchOptions, Event, Service, Settings};
 use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 
@@ -12,6 +12,7 @@ async fn real_model_batch_cache_dictionary_and_cancellation() {
     let service = Service::default();
     let settings = Settings {
         binary: &binary,
+        gpu_binary: None,
         model: &model,
         target: "ja",
         dictionary: &[],
@@ -84,22 +85,22 @@ async fn real_model_batch_cache_dictionary_and_cancellation() {
         .unwrap();
     assert_eq!(cached, [outputs[0].1.clone()]);
     let dictionary = [Entry {
-        term: "CODEWORD".into(),
-        replacement: texts[0].clone(),
+        term: "meeting".into(),
+        replacement: "宇宙会議".into(),
         enabled: true,
     }];
     let with_dictionary = Settings {
         dictionary: &dictionary,
         ..settings
     };
-    let mut rewritten = String::new();
+    let mut glossary_tokens = Vec::new();
     service
         .translate(
             &with_dictionary,
-            "CODEWORD",
+            &texts[0],
             &mut |event| {
                 if let Event::Token(text) = event {
-                    rewritten.push_str(&text);
+                    glossary_tokens.push(text);
                 }
                 Ok(())
             },
@@ -107,7 +108,28 @@ async fn real_model_batch_cache_dictionary_and_cancellation() {
         )
         .await
         .unwrap();
-    assert_eq!(rewritten, outputs[0].1);
+    assert!(
+        glossary_tokens.len() > 1,
+        "a changed glossary must bypass the cached translation"
+    );
+    let translated = glossary_tokens.concat();
+    assert!(translated.contains("宇宙会議"), "{translated}");
+    glossary_tokens.clear();
+    service
+        .translate(
+            &with_dictionary,
+            &texts[0],
+            &mut |event| {
+                if let Event::Token(text) = event {
+                    glossary_tokens.push(text);
+                }
+                Ok(())
+            },
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(glossary_tokens, [translated]);
 
     assert_eq!(
         service

@@ -6,6 +6,7 @@
 - [ソースから起動・ビルド](#ソースから起動)
 - [使い方](#使い方)
 - [開発・構成](development.md)
+- [コマンドライン（plm）](#コマンドラインplm)
 - [ライセンス](#ライセンス)
 
 ## セットアップ
@@ -29,7 +30,7 @@ macOSではXcode Command Line ToolsとCMakeを用意してください。
 
 Windows 11 x64版は開発中で、実機動作は未確認です。Visual Studio Build Toolsの「C++によるデスクトップ開発」、WebView2、Visual C++再頒布可能パッケージを用意してください。以下の`npm run runtime:build`は`py -3.12 scripts/build-runtime.py`に置き換えます。CPUが既定で、Vulkan SDKを用意すれば`--backend vulkan`でGPU版をビルドできます。
 
-リポジトリのディレクトリで実行します。
+アプリ（GUI）は`gui/`にあります。`npm`のコマンドはリポジトリ直下で実行します。
 
 ```sh
 git clone https://github.com/romanohu/anywhere-plamo.git
@@ -40,6 +41,16 @@ npm run tauri dev
 ```
 
 推論エンジンとPaddleOCRの小型モデル・実行環境（日本語・英語、日本語の縦書きを含む）は初回に取得・ビルドされます。配布版ではPythonのインストールは不要です。既存のソース版は `npm run ocr:build` でOCRデータを更新してください。翻訳の推論は既定でLinux・WindowsはCPU、macOSはMetalを使用します。OCRは各OSともCPUで動きます。
+
+LinuxとWindowsでは、NVIDIAのGPU（CUDA）でも翻訳できます。CUDA Toolkitを用意し、CPU版に加えてGPU版の推論エンジンをビルドします。
+
+```sh
+npm run runtime:build -- --backend cuda
+```
+
+GPU版はCPU版と並べて`llama-server-cuda`として置かれます。対象のGPUの世代はビルドするPCの`nvidia-smi`から判定し、見つからなければllama.cppの既定の複数世代向けにビルドします（`CUDAARCHS=89`のように指定もできます）。アプリは既定でCPU版を使い、起動時にGPU版が動くと分かった場合だけ、設定の「翻訳モデル」に「GPUで起動する」を表示します。オンにするとGPU版を使い、起動できなければCPU版に戻ります。GPU版の実行にはCUDAのランタイム（`libcudart`・`libcublas`）が必要です。
+
+AppImageのように中身を変えられない配布版でも、ビルドしたGPU版をデータフォルダの`runtime/llama-server-cuda`（Linuxでは`~/.local/share/app.anywhere-plamo.desktop/runtime/`、Windowsでは`%APPDATA%\app.anywhere-plamo.desktop\runtime\llama-server-cuda.exe`と必要なDLL）に実行できる状態で置くと使えます。同梱のGPU版よりこちらを優先します。
 
 配布用ファイルを作る場合:
 
@@ -58,7 +69,7 @@ Windowsでは`py -3.12 scripts/collect-licenses.py`の後、`npm run tauri -- bu
 2. 翻訳先を選び、原文を入力・貼り付けて「翻訳」を押します。`Ctrl+Enter`（Macは`⌘+Enter`）でも実行できます。
 3. 他のアプリでは文章を選択し、`Ctrl+Shift+J`（Macは`⌘+Shift+J`）で翻訳します。取得できない場合は、コピーして「貼り付け」を使ってください。
 
-「辞書」から原語と訳語を登録すると、翻訳の前に原文中の語句を訳語へ置き換えてから翻訳します。訳語は翻訳先の言語で書いてください。メイン画面・選択翻訳・OCRレンズのすべての翻訳に反映されます（変更は「保存」で確定します）。
+「辞書」から原語と訳語を登録すると、原文に登録した語句があれば、その訳語を使うようモデルに指示します（PLaMoの用語集機能を使います）。訳語は翻訳先の言語で書いてください。辞書はCSV（`原語,訳語,有効`）で読み込み・書き出しできます。メイン画面・選択翻訳・OCRレンズのすべての翻訳に反映されます（変更は「保存」で確定します）。
 
 PC版の「ファイル」またはドラッグ＆ドロップでPDF・PNG・JPEG・WebPを開けます。ページの配置を保って訳文を表示し、「原文」で切り替え、段落をクリックすると全文を確認できます。PDFは埋め込みテキストを優先し、スキャンページはOCRで読み取ります。文字抜けがあるページは「画像から読む」で読み直せます。処理は端末内で行い、元のファイルは変更しません。
 
@@ -78,6 +89,21 @@ Mac・X11では「透過」で背後のアプリをクリック・スクロー�
 
 - **Mac**: 「システム設定 → プライバシーとセキュリティ」で、選択翻訳にはアクセシビリティ、OCRには画面収録を許可してください。レンズ全体を1つの画面内に収めます。
 - **Linux**: X11の自動更新にはコンポジター、WaylandのOCRには`xdg-desktop-portal`と対応バックエンドが必要です。Waylandの選択翻訳は、OSのキーボード設定に`anywhere-plamo --translate-selection`を登録します。AppImageは実行ファイルの絶対パスに置き換えてください。
+
+## コマンドライン（plm）
+
+アプリと同じモデル・辞書・GPUの設定を使い、端末から翻訳できます。今はソースからビルドして使います（配布版のアプリには含まれません）。リポジトリのディレクトリで、アプリと同じく`npm run runtime:build`で推論エンジンを用意してから実行します。
+
+```sh
+cargo run -p anyplm-cli -- -p "翻訳する文章"
+```
+
+- `plm`: 対話モード。1行入力するたびに訳します。モデルは読み込んだままなので、2回目以降はすぐに訳せます。`:to <言語>`で翻訳先を固定、`:auto`で自動判定に戻し、`Ctrl+D`か`:quit`で終了します。翻訳中の`Ctrl+C`はその翻訳だけを止めます。
+- `plm -p [文章]`: 訳を出力して終了します。文章を省くと標準入力から読みます。
+- `plm desktop`: アプリを起動します。
+- `plm models`、`plm models use <ID>`、`plm models download [ID]`: モデルの一覧・切り替え・ダウンロード。アプリの設定と共通です。
+
+`--to <言語>`（`ja`・`en`・`ko`・`zh-hans`・`fr`・`de`・`es`）を省くと、日本語は英語へ、英語は日本語へ訳します。`--no-dict`で辞書を使わず、`--server <パス>`で推論エンジンを指定します。推論エンジンは`--server`、環境変数`ANYWHERE_PLAMO_LLAMA_SERVER`、`plm`と同じフォルダの順に探し、開発用ビルドでは`gui/native/resources/runtime/`も探します。訳は標準出力、案内は標準エラー出力に出ます。
 
 ## ライセンス
 

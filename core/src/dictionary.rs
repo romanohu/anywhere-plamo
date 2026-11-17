@@ -1,5 +1,5 @@
-//! A user glossary whose terms are replaced before translation, independent
-//! of the desktop runtime.
+//! A user glossary passed to PLaMo alongside the source text, independent of
+//! the desktop runtime.
 
 use serde::{Deserialize, Serialize};
 use std::{
@@ -67,16 +67,18 @@ impl Drop for PendingSave {
     }
 }
 
-/// Apply the enabled entries to the source text. Longer terms win when
-/// several match at the same position, and alphanumerical terms only match
-/// on word boundaries so "cat" never rewrites "category".
-pub fn apply(text: &str, entries: &[Entry]) -> String {
+/// The enabled entries that occur in the source text, as (term, replacement)
+/// pairs for PLaMo's glossary. Longer terms win when several match at the same
+/// position, and alphanumerical terms only match on word boundaries so "cat"
+/// never matches "category".
+pub fn glossary(text: &str, entries: &[Entry]) -> Vec<(String, String)> {
+    // PLaMo's glossary needs a target term, so entries without one are skipped.
     let mut terms: Vec<&Entry> = entries
         .iter()
-        .filter(|entry| entry.enabled && !entry.term.is_empty())
+        .filter(|entry| entry.enabled && !entry.term.is_empty() && !entry.replacement.is_empty())
         .collect();
     terms.sort_by_key(|entry| std::cmp::Reverse(entry.term.chars().count()));
-    let mut result = String::with_capacity(text.len());
+    let mut found: Vec<(String, String)> = Vec::new();
     let mut cursor = 0;
     while cursor < text.len() {
         let Some((offset, character)) = text[cursor..].char_indices().next() else {
@@ -85,16 +87,15 @@ pub fn apply(text: &str, entries: &[Entry]) -> String {
         let position = cursor + offset;
         match terms.iter().find(|entry| matches(position, entry, text)) {
             Some(entry) => {
-                result.push_str(&entry.replacement);
+                if !found.iter().any(|(term, _)| *term == entry.term) {
+                    found.push((entry.term.clone(), entry.replacement.clone()));
+                }
                 cursor = position + entry.term.len();
             }
-            None => {
-                result.push(character);
-                cursor = position + character.len_utf8();
-            }
+            None => cursor = position + character.len_utf8(),
         }
     }
-    result
+    found
 }
 
 fn matches(position: usize, entry: &Entry, text: &str) -> bool {
@@ -126,7 +127,7 @@ fn matches(position: usize, entry: &Entry, text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply, load, Entry, PendingSave};
+    use super::{glossary, load, Entry, PendingSave};
     use std::fs;
 
     fn entry(term: &str, replacement: &str) -> Entry {
@@ -137,31 +138,48 @@ mod tests {
         }
     }
 
+    fn pairs(values: &[(&str, &str)]) -> Vec<(String, String)> {
+        values
+            .iter()
+            .map(|(t, r)| (t.to_string(), r.to_string()))
+            .collect()
+    }
+
     #[test]
-    fn registered_terms_are_replaced_and_longer_terms_win() {
+    fn terms_in_the_source_are_listed_once_and_longer_terms_win() {
         let entries = [entry("dragon", "りゅう"), entry("a dragon", "りゅうきち")];
         assert_eq!(
-            apply("a dragon and a cat", &entries),
-            "りゅうきち and a cat"
+            glossary("a dragon and a cat", &entries),
+            pairs(&[("a dragon", "りゅうきち")])
         );
         let entries = [
             entry("New York", "ニューヨーク"),
             entry("New York City", "NYC"),
         ];
-        assert_eq!(apply("New York City", &entries), "NYC");
-        assert_eq!(apply("New York State", &entries), "ニューヨーク State");
+        assert_eq!(
+            glossary("New York City", &entries),
+            pairs(&[("New York City", "NYC")])
+        );
+        assert_eq!(
+            glossary("New York State, New York", &entries),
+            pairs(&[("New York", "ニューヨーク")])
+        );
+        assert!(glossary("Tokyo", &entries).is_empty());
     }
 
     #[test]
     fn alphanumerical_terms_respect_word_boundaries_but_cjk_does_not() {
         let entries = [entry("cat", "ねこ")];
+        assert!(glossary("category cats", &entries).is_empty());
         assert_eq!(
-            apply("a cat, category cats", &entries),
-            "a ねこ, category cats"
+            glossary("キャットcatとdog", &entries),
+            pairs(&[("cat", "ねこ")])
         );
-        assert_eq!(apply("キャットcatとdog", &entries), "キャットねことdog");
         let entries = [entry("PLaMo", "プラモ")];
-        assert_eq!(apply("(PLaMo)です", &entries), "(プラモ)です");
+        assert_eq!(
+            glossary("(PLaMo)です", &entries),
+            pairs(&[("PLaMo", "プラモ")])
+        );
     }
 
     #[test]
@@ -172,14 +190,9 @@ mod tests {
                 ..entry("dragon", "りゅう")
             },
             entry("", "空"),
+            entry("cat", ""),
         ];
-        assert_eq!(apply("a dragon", &entries), "a dragon");
-    }
-
-    #[test]
-    fn replacements_are_not_rescanned_as_dictionary_terms() {
-        let entries = [entry("りゅう", "dragon"), entry("dragon", "りゅう")];
-        assert_eq!(apply("りゅうとdragon", &entries), "dragonとりゅう");
+        assert!(glossary("a dragon and a cat", &entries).is_empty());
     }
 
     #[test]

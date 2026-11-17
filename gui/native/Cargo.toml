@@ -26,7 +26,7 @@ uuid = { version = "1", features = ["v4"] }
 image = { version = "0.25", default-features = false, features = ["png", "pnm"] }
 base64 = "0.22"
 
-plamo-core = { path = "../../core" }
+anyplm-core = { path = "../../core" }
 tauri-plugin-single-instance = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-updater = "2"

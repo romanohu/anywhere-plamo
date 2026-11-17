@@ -8,16 +8,97 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::cache::TranslationCache;
-use crate::protocol::{self, SseDecoder};
-
-pub type TokenSink<'a> = dyn FnMut(String) -> Result<(), String> + Send + 'a;
+use crate::{
+    protocol::{self, SseDecoder},
+    Progress, ProgressEvent,
+};
 
 pub const EXECUTABLE: &str = if cfg!(windows) {
     "llama-server.exe"
 } else {
     "llama-server"
 };
+
+pub const GPU_EXECUTABLE: &str = if cfg!(windows) {
+    "llama-server-cuda.exe"
+} else {
+    "llama-server-cuda"
+};
+
+/// The CUDA server: one the user placed in the data folder's `runtime/` (e.g. for an
+/// AppImage, which cannot gain files), else the one shipped beside the CPU server `cpu`.
+pub fn gpu_server(cpu: &Path, data: &Path) -> Option<std::path::PathBuf> {
+    [
+        data.join("runtime").join(GPU_EXECUTABLE),
+        cpu.with_file_name(GPU_EXECUTABLE),
+    ]
+    .into_iter()
+    .find(|path| path.is_file())
+}
+
+/// Whether the CUDA server `gpu` starts and can see a GPU.
+pub async fn gpu_available(gpu: &Path) -> bool {
+    let mut command = tokio::process::Command::new(gpu);
+    #[cfg(windows)]
+    command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    command
+        .arg("--list-devices")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    // A missing CUDA runtime fails to start; a missing GPU lists "(none)".
+    tokio::time::timeout(Duration::from_secs(15), command.output())
+        .await
+        .is_ok_and(|output| {
+            output.is_ok_and(|output| {
+                output.status.success() && lists_gpu(&String::from_utf8_lossy(&output.stdout))
+            })
+        })
+}
+
+/// The user's choice to start on the GPU, kept as an empty file in the app's data
+/// folder so the app and plm share it. The CPU server is the default.
+const GPU_CHOICE: &str = "use-gpu";
+
+pub fn gpu_enabled(data: &Path) -> bool {
+    data.join(GPU_CHOICE).is_file()
+}
+
+pub fn set_gpu_enabled(data: &Path, enabled: bool) -> Result<(), String> {
+    let path = data.join(GPU_CHOICE);
+    let result = if enabled {
+        std::fs::create_dir_all(data).and_then(|_| std::fs::write(&path, ""))
+    } else {
+        std::fs::remove_file(&path).or_else(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => Ok(()),
+            _ => Err(error),
+        })
+    };
+    result.map_err(|_| "GPUの設定を保存できませんでした。".into())
+}
+
+/// Starts the CUDA server `gpu` when one is given, else the CPU server `cpu`.
+/// A GPU server that fails to start falls back to the CPU server.
+pub async fn start_best(
+    cpu: &Path,
+    model: &Path,
+    gpu: Option<&Path>,
+    cancel: &CancellationToken,
+) -> Result<Engine, String> {
+    let Some(gpu) = gpu else {
+        return Engine::start(cpu, model, cancel).await;
+    };
+    match Engine::start(gpu, model, cancel).await {
+        Err(error) if error != "CANCELLED" => Engine::start(cpu, model, cancel).await,
+        result => result,
+    }
+}
+
+fn lists_gpu(devices: &str) -> bool {
+    devices
+        .lines()
+        .any(|line| line.trim_start().starts_with("CUDA") && line.contains(':'))
+}
 
 pub struct Engine {
     child: Child,
@@ -26,6 +107,8 @@ pub struct Engine {
     client: reqwest::Client,
     cache: TranslationCache,
 }
+
+use crate::translation_cache::TranslationCache;
 
 impl Drop for Engine {
     fn drop(&mut self) {
@@ -70,6 +153,19 @@ impl Engine {
         {
             use std::os::windows::process::CommandExt;
             command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        }
+        // Drop only runs on a clean exit; also stop the server when the app is killed
+        // (e.g. a dev rebuild), so it does not keep the model in memory. The signal follows
+        // the spawning thread, which is a runtime worker that lives as long as the app.
+        #[cfg(target_os = "linux")]
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            command.pre_exec(|| {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
         }
         command
             .arg("--model")
@@ -140,25 +236,28 @@ impl Engine {
         &mut self,
         text: &str,
         target: &str,
-        channel: &mut TokenSink<'_>,
+        glossary: &[(String, String)],
+        progress: Progress<'_>,
         cancel: &CancellationToken,
     ) -> Result<TranslationResult, String> {
-        protocol::prompt(text, target)?;
+        // The whole prompt keys the cache so a changed glossary is translated again.
+        let key = protocol::prompt_with_glossary(text, target, glossary)?;
         if cancel.is_cancelled() {
             return Err("CANCELLED".into());
         }
-        if let Some(output) = self.cache.get(text, target) {
-            channel(output)?;
+        if let Some(output) = self.cache.get(&key, target) {
+            progress(ProgressEvent::Token { text: output })
+                .map_err(|_| "画面との接続が切れました。")?;
             return Ok(TranslationResult { truncated: false });
         }
         let mut output = String::new();
         let result = tokio::select! {
             biased;
             _ = cancel.cancelled() => Err("CANCELLED".into()),
-            result = self.translate_text(text, target, channel, cancel, &mut output) => result,
+            result = self.translate_text(text, target, glossary, progress, cancel, &mut output) => result,
         }?;
         if !result.truncated && !output.trim().is_empty() && !cancel.is_cancelled() {
-            self.cache.insert(text, target, output);
+            self.cache.insert(&key, target, output);
         }
         Ok(result)
     }
@@ -167,22 +266,28 @@ impl Engine {
         &self,
         text: &str,
         target: &str,
-        channel: &mut TokenSink<'_>,
+        glossary: &[(String, String)],
+        progress: Progress<'_>,
         cancel: &CancellationToken,
         output: &mut String,
     ) -> Result<TranslationResult, String> {
-        let prompt = protocol::prompt(text, target)?;
+        let prompt = protocol::prompt_with_glossary(text, target, glossary)?;
         let input_length = self.input_length(&prompt).await?;
         if input_length <= protocol::MAX_INPUT_TOKENS {
             return self
-                .translate_inner(&prompt, input_length, channel, output)
+                .translate_inner(&prompt, input_length, progress, output)
                 .await;
         }
         let mut chunks = Vec::new();
         for part in protocol::paragraphs(text) {
             match part {
                 protocol::Paragraph::Text(text) => {
-                    let prompt = protocol::prompt(text, target)?;
+                    let glossary: Vec<_> = glossary
+                        .iter()
+                        .filter(|(term, _)| text.contains(term.as_str()))
+                        .cloned()
+                        .collect();
+                    let prompt = protocol::prompt_with_glossary(text, target, &glossary)?;
                     let input_length = self.input_length(&prompt).await?;
                     if input_length > protocol::MAX_INPUT_TOKENS {
                         return Err(
@@ -211,14 +316,17 @@ impl Engine {
                     input_length,
                 } => {
                     let result = self
-                        .translate_inner(&prompt, input_length, channel, output)
+                        .translate_inner(&prompt, input_length, progress, output)
                         .await?;
                     if result.truncated {
                         return Ok(result);
                     }
                 }
                 TranslationChunk::Separator(text) => {
-                    channel(text.to_owned())?;
+                    progress(ProgressEvent::Token {
+                        text: text.to_owned(),
+                    })
+                    .map_err(|_| "画面との接続が切れました。")?;
                     output.push_str(text);
                 }
             }
@@ -250,7 +358,7 @@ impl Engine {
         &self,
         prompt: &str,
         input_length: usize,
-        channel: &mut TokenSink<'_>,
+        progress: Progress<'_>,
         output: &mut String,
     ) -> Result<TranslationResult, String> {
         let mut response = self
@@ -275,7 +383,7 @@ impl Engine {
             for event in decoder.push(&chunk)? {
                 Self::handle_event(
                     &event,
-                    channel,
+                    progress,
                     &mut completed,
                     &mut truncated,
                     &mut received_text,
@@ -293,7 +401,7 @@ impl Engine {
             for event in decoder.finish()? {
                 Self::handle_event(
                     &event,
-                    channel,
+                    progress,
                     &mut completed,
                     &mut truncated,
                     &mut received_text,
@@ -317,7 +425,7 @@ impl Engine {
 
     fn handle_event(
         event: &str,
-        channel: &mut TokenSink<'_>,
+        progress: Progress<'_>,
         completed: &mut bool,
         truncated: &mut bool,
         received_text: &mut bool,
@@ -349,7 +457,10 @@ impl Engine {
         {
             *received_text = true;
             output.push_str(text);
-            channel(text.to_owned())?;
+            progress(ProgressEvent::Token {
+                text: text.to_owned(),
+            })
+            .map_err(|_| "画面との接続が切れました。")?;
         }
         if let Some(reason) = reason.as_str() {
             *truncated = reason == "length";
@@ -372,48 +483,67 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     #[test]
-    fn translation_cache_separates_languages_and_bounds_memory() {
-        let mut cache = TranslationCache::default();
-        cache.insert("Hello", "ja", "こんにちは".into());
-        cache.insert("Hello", "ko", "안녕하세요".into());
-        assert_eq!(cache.get("Hello", "ja").as_deref(), Some("こんにちは"));
-        assert!(cache.get("Hello", "en").is_none());
-        assert!(cache.get("Hello!", "ja").is_none());
-        for i in 0..127 {
-            cache.insert(&i.to_string(), "ja", "訳文".into());
-        }
-        assert!(cache.get("Hello", "ko").is_none());
-        assert!(cache.get("Hello", "ja").is_some());
-        cache.insert("long", "ja", "x".repeat(2 * 1024 * 1024));
-        assert!(cache.0.is_empty());
+    fn gpu_server_prefers_one_placed_in_the_data_folder() {
+        let root = std::env::temp_dir().join(format!("plamo-server-{}", uuid::Uuid::new_v4()));
+        let (app, data) = (root.join("app"), root.join("data"));
+        std::fs::create_dir_all(&app).unwrap();
+        let cpu = app.join(EXECUTABLE);
+        assert_eq!(gpu_server(&cpu, &data), None);
+        std::fs::write(app.join(GPU_EXECUTABLE), "").unwrap();
+        assert_eq!(gpu_server(&cpu, &data), Some(app.join(GPU_EXECUTABLE)));
+        std::fs::create_dir_all(data.join("runtime")).unwrap();
+        std::fs::write(data.join("runtime").join(GPU_EXECUTABLE), "").unwrap();
+        assert_eq!(
+            gpu_server(&cpu, &data),
+            Some(data.join("runtime").join(GPU_EXECUTABLE))
+        );
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
-    type RecordedTokens = Arc<Mutex<Vec<String>>>;
+    #[test]
+    fn gpu_choice_defaults_to_cpu_and_round_trips() {
+        let data = std::env::temp_dir().join(format!("plamo-gpu-{}", uuid::Uuid::new_v4()));
+        assert!(!gpu_enabled(&data));
+        set_gpu_enabled(&data, true).unwrap();
+        assert!(gpu_enabled(&data));
+        set_gpu_enabled(&data, false).unwrap();
+        set_gpu_enabled(&data, false).unwrap();
+        assert!(!gpu_enabled(&data));
+        std::fs::remove_dir_all(&data).unwrap();
+    }
 
-    fn channel() -> (
-        impl FnMut(String) -> Result<(), String> + Send,
-        RecordedTokens,
-    ) {
+    #[test]
+    fn gpu_probe_reads_llama_server_device_list() {
+        assert!(lists_gpu(
+            "Available devices:\n  CUDA0: NVIDIA GeForce RTX 4060 (7798 MiB, 3858 MiB free)\n"
+        ));
+        assert!(!lists_gpu("Available devices:\n  (none)\n"));
+        assert!(!lists_gpu(""));
+    }
+
+    type Sink = Box<dyn Fn(ProgressEvent) -> Result<(), ()> + Send + Sync>;
+
+    fn channel() -> (Sink, Arc<Mutex<Vec<String>>>) {
         let texts = Arc::new(Mutex::new(Vec::new()));
         let output = texts.clone();
-        (
-            move |text| {
+        let channel: Sink = Box::new(move |event| {
+            if let ProgressEvent::Token { text } = event {
                 output.lock().unwrap().push(text);
-                Ok(())
-            },
-            texts,
-        )
+            }
+            Ok(())
+        });
+        (channel, texts)
     }
 
     #[test]
     fn streams_text_and_requires_a_known_finish_reason() {
         for reason in ["stop", "length"] {
-            let (mut channel, texts) = channel();
+            let (channel, texts) = channel();
             let mut output = String::new();
             let (mut completed, mut truncated, mut received) = (false, false, false);
             Engine::handle_event(
                 r#"{"choices":[{"text":"こんにちは","finish_reason":null}]}"#,
-                &mut channel,
+                &channel,
                 &mut completed,
                 &mut truncated,
                 &mut received,
@@ -424,7 +554,7 @@ mod tests {
             assert!(received);
             Engine::handle_event(
                 &json!({"choices": [{"text": "🍃", "finish_reason": reason}]}).to_string(),
-                &mut channel,
+                &channel,
                 &mut completed,
                 &mut truncated,
                 &mut received,
@@ -437,7 +567,7 @@ mod tests {
             assert_eq!(output, "こんにちは🍃");
             Engine::handle_event(
                 "[DONE]",
-                &mut channel,
+                &channel,
                 &mut completed,
                 &mut truncated,
                 &mut received,
@@ -449,11 +579,11 @@ mod tests {
 
     #[test]
     fn done_without_a_finish_reason_rejects_partial_output() {
-        let (mut channel, texts) = channel();
+        let (channel, texts) = channel();
         let (mut completed, mut truncated, mut received) = (false, false, false);
         Engine::handle_event(
             r#"{"choices":[{"text":"partial translation","finish_reason":null}]}"#,
-            &mut channel,
+            &channel,
             &mut completed,
             &mut truncated,
             &mut received,
@@ -462,7 +592,7 @@ mod tests {
         .unwrap();
         assert!(Engine::handle_event(
             "[DONE]",
-            &mut channel,
+            &channel,
             &mut completed,
             &mut truncated,
             &mut received,
@@ -482,11 +612,11 @@ mod tests {
             r#"{"choices":[{"text":"incomplete","finish_reason":"content_filter"}]}"#,
             r#"{"choices":[{"text":"incomplete","finish_reason":42}]}"#,
         ] {
-            let (mut channel, texts) = channel();
+            let (channel, texts) = channel();
             let (mut completed, mut truncated, mut received) = (false, false, false);
             assert!(Engine::handle_event(
                 event,
-                &mut channel,
+                &channel,
                 &mut completed,
                 &mut truncated,
                 &mut received,

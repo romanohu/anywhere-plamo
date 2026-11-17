@@ -15,7 +15,7 @@ v0.2.1 以前には更新機能がないため、この機能を含む版を最�
 
 ## ローカルでビルドする
 
-リリースするときに、`package.json`、`package-lock.json`、`gui/native/Cargo.toml`、`Cargo.lock`、`gui/native/tauri.conf.json` と設定画面のバージョンをそろえて上げます。同じバージョンの配布物に差し替えても、アプリは更新対象にしません。
+リリースするときに、`package.json`、`package-lock.json`、`gui/native/Cargo.toml`、`core/Cargo.toml`、`cli/Cargo.toml`、`Cargo.lock`、`gui/native/tauri.conf.json` と設定画面のバージョンをそろえて上げます。同じバージョンの配布物に差し替えても、アプリは更新対象にしません。
 
 Mac の例:
 

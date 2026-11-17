@@ -185,6 +185,11 @@ async function fixture(t, options = {}) {
             if (options.dictionaryError) throw options.dictionaryError;
             dictionary = args.entries;
             return dictionary;
+          case 'export_dictionary': return '/home/user/Downloads/anywhere-plamo-dictionary.csv';
+          case 'set_use_gpu':
+            if (options.gpuError) throw options.gpuError;
+            state.useGpu = args.enabled;
+            return { ...state };
           case 'prepare_engine':
             if (options.prepareError) throw options.prepareError;
             return;
@@ -391,6 +396,37 @@ test('model changes are blocked while translating and reflected across windows',
   await until(() => f.byId('translation-model').value === '0.8b-q3');
   assert.equal(f.byId('translation').textContent, '');
   assert.equal(f.byId('download-section').hidden, false);
+});
+
+test('the GPU choice appears only when a GPU was found and defaults to the CPU', async t => {
+  const hidden = await fixture(t);
+  hidden.click('settings-button');
+  await until(() => hidden.calls.filter(call => call.command === 'get_status').length > 1);
+  assert.equal(hidden.byId('gpu-setting').hidden, true);
+
+  const f = await fixture(t, { status: { gpuAvailable: true, useGpu: false } });
+  f.click('settings-button');
+  await until(() => !f.byId('gpu-setting').hidden);
+  assert.equal(f.byId('use-gpu').checked, false);
+  const prepared = f.calls.filter(call => call.command === 'prepare_engine').length;
+  f.byId('use-gpu').checked = true;
+  f.byId('use-gpu').dispatchEvent(new f.window.Event('change'));
+  await until(() => !f.byId('use-gpu').disabled && f.calls.some(call => call.command === 'set_use_gpu'));
+  assert.deepEqual({ ...f.calls.find(call => call.command === 'set_use_gpu').args }, { enabled: true });
+  assert.equal(f.byId('use-gpu').checked, true);
+  // The engine restarts on the GPU, so it is warmed again.
+  await until(() => f.calls.filter(call => call.command === 'prepare_engine').length > prepared);
+});
+
+test('a refused GPU switch keeps the previous choice and explains why', async t => {
+  const f = await fixture(t, { status: { gpuAvailable: true, useGpu: false }, gpuError: '翻訳・モデルの準備が終わってから切り替えてください。' });
+  f.click('settings-button');
+  await until(() => !f.byId('gpu-setting').hidden);
+  f.byId('use-gpu').checked = true;
+  f.byId('use-gpu').dispatchEvent(new f.window.Event('change'));
+  await until(() => !f.byId('use-gpu').disabled && f.byId('download-message').textContent !== '');
+  assert.equal(f.byId('use-gpu').checked, false);
+  assert.equal(f.byId('download-message').textContent, '翻訳・モデルの準備が終わってから切り替えてください。');
 });
 
 test('updates are checked only on request and installed only after the second click', async t => {
@@ -610,6 +646,28 @@ test('the dictionary dialog loads saved entries and persists additions through t
     { term: 'dragon', replacement: 'りゅうきち', enabled: true },
     { term: 'PLaMo', replacement: 'プラモ', enabled: true },
   ]);
+});
+
+test('dictionary CSV imports quoted rows into the draft and exports a file that imports again', async t => {
+  const f = await fixture(t, { dictionary: [{ term: 'dragon', replacement: 'りゅう', enabled: true }] });
+  f.click('dictionary-button');
+  await until(() => f.byId('dictionary-dialog').open);
+  const load = parts => {
+    Object.defineProperty(f.byId('dictionary-csv'), 'files', { configurable: true, value: [new f.window.File(parts, 'dictionary.csv')] });
+    f.byId('dictionary-csv').dispatchEvent(new f.window.Event('change'));
+  };
+  load(['\uFEFF原語,訳語,有効\r\ndragon,ドラゴン,\r\n"New York, NY","ニューヨーク ""NY""",無効\r\n,空\r\nPLaMo,プラモ']);
+  await until(() => f.byId('dictionary-message').textContent.startsWith('CSVから'));
+  assert.equal(f.byId('dictionary-message').textContent, 'CSVから2件追加、1件更新しました。保存すると反映されます。');
+  assert.equal(f.byId('dictionary-entries').children.length, 3);
+  assert.equal(f.calls.some(call => call.command === 'set_dictionary'), false);
+  // Excel's default Japanese CSV: 猫,ねこ in Shift_JIS.
+  load([new Uint8Array([0x94, 0x4c, 0x2c, 0x82, 0xcb, 0x82, 0xb1])]);
+  await until(() => f.byId('dictionary-entries').children.length === 4);
+  f.click('dictionary-export');
+  await until(() => f.byId('dictionary-message').textContent.endsWith('に書き出しました。'));
+  assert.equal(f.calls.findLast(call => call.command === 'export_dictionary').args.csv,
+    '\uFEFF原語,訳語,有効\r\ndragon,ドラゴン,有効\r\n"New York, NY","ニューヨーク ""NY""",無効\r\nPLaMo,プラモ,有効\r\n猫,ねこ,有効\r\n');
 });
 
 test('dictionary drafts reject empty and duplicate terms and deletions only affect the draft', async t => {
@@ -1195,7 +1253,8 @@ test('timing records first visible text and completion separately', async t => {
   f.send({ kind: 'token', text: 'の続き' });
   f.finish({ truncated: false });
   await until(() => f.byId('translation-status').textContent.includes('翻訳完了'));
-  assert.equal(f.byId('translation-status').textContent, '1.9秒 · 翻訳完了');
+  // 3 tokens from 0.3s to 1.9s: (3 - 1) / 1.6s
+  assert.equal(f.byId('translation-status').textContent, '1.9秒 · 1.3 tok/s · 翻訳完了');
   assert.equal(f.byId('translation-status').title, '最初の文字まで 0.7秒 · 処理終了まで 1.9秒');
 });
 
