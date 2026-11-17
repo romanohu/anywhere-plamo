@@ -1,0 +1,82 @@
+export interface AppStatus {
+  modelReady: boolean;
+  modelId: string;
+  models: { id: string; name: string; description: string; size: number; ready: boolean }[];
+  runtimeAvailable: boolean;
+  shortcutAvailable: boolean;
+  shortcut: string;
+  defaultShortcut: string;
+  shortcutSupported: boolean;
+  shortcutPopup: boolean;
+  wayland: boolean;
+  resident: boolean;
+  lensSupported: boolean;
+  ocrAvailable: boolean;
+  lensUsesSelection: boolean;
+  lensShortcut: string;
+  defaultLensShortcut: string;
+  lensShortcutAvailable: boolean;
+  lensOpenShortcut: string;
+  defaultLensOpenShortcut: string;
+  lensOpenShortcutAvailable: boolean;
+  lensPassthrough: boolean;
+}
+
+export type ProgressEvent =
+  | { kind: 'download'; received: number; total: number }
+  | { kind: 'verifying' }
+  | { kind: 'loading' }
+  | { kind: 'reading' }
+  | { kind: 'token'; text: string };
+
+interface NativeChannel<T> { onmessage: (message: T) => void }
+interface TauriBridge {
+  core: {
+    invoke<T>(command: string, args?: Record<string, unknown>): Promise<T>;
+    Channel: new <T>() => NativeChannel<T>;
+  };
+  event: { listen<T>(event: string, handler: (event: { payload: T }) => void): Promise<() => void> };
+}
+
+declare global { interface Window { __TAURI__?: TauriBridge } }
+
+export const isDesktop = !!window.__TAURI__;
+
+export function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  if (!window.__TAURI__) return Promise.reject(new Error('翻訳はアプリで利用できます。この画面はブラウザプレビューです。'));
+  return window.__TAURI__.core.invoke<T>(command, args);
+}
+
+export type BatchEvent =
+  | { kind: 'started' | 'loading'; index: number }
+  | { kind: 'token'; index: number; text: string }
+  | { kind: 'finished'; index: number; text: string; truncated: boolean };
+
+export async function translateBlocks(texts: string[], target: string, document: boolean,
+  current: () => boolean, receive: (event: BatchEvent) => void, continueOnTruncation = false): Promise<void> {
+  if (!texts.length || !current()) return;
+  let accepting = true;
+  try {
+    await invoke('translate_blocks', { texts, target, options: { document, continueOnTruncation },
+      onEvent: progressChannel<BatchEvent>(event => { if (accepting && current()) receive(event); }) });
+  } finally { accepting = false; }
+}
+
+export function progressChannel<T = ProgressEvent>(onmessage: (event: T) => void): NativeChannel<T> {
+  if (!window.__TAURI__) throw new Error('デスクトップアプリから実行してください。');
+  const channel = new window.__TAURI__.core.Channel<T>();
+  channel.onmessage = onmessage;
+  return channel;
+}
+
+export async function onClipboardRequest(handler: () => void): Promise<void> {
+  await window.__TAURI__?.event.listen('clipboard-request', handler);
+}
+
+export async function onShortcutPressed(handler: (shortcut: string) => void): Promise<void> {
+  await window.__TAURI__?.event.listen<string>('shortcut-pressed', event => handler(event.payload));
+}
+
+export async function onWindowHidden(handler: () => void): Promise<void> {
+  await window.__TAURI__?.event.listen('window-hidden', handler);
+}

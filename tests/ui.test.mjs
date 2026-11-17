@@ -150,9 +150,6 @@ async function fixture(t, options = {}) {
             args.onEvent.onmessage({ kind: 'installing' });
             return;
           case 'open_lens': return;
-          case 'start_screen_lens':
-            if (options.screenLensError) throw options.screenLensError;
-            return;
           case 'apply_lens_selection': return !!options.selectedLens;
           case 'confirm_lens_selection': return;
           case 'set_lens_passthrough':
@@ -200,6 +197,18 @@ async function fixture(t, options = {}) {
             if (options.holdPending) return new Promise(resolve => { finishPending = () => resolve(value); });
             return value;
           }
+          case 'translate_blocks':
+            for (const [index, text] of args.texts.entries()) {
+              args.onEvent.onmessage({ kind: 'started', index });
+              let output = '';
+              const result = await native.core.invoke('translate', { text, target: args.target, onEvent: { onmessage(event) {
+                if (event.kind === 'loading') args.onEvent.onmessage({ kind: 'loading', index });
+                if (event.kind === 'token') { output += event.text; args.onEvent.onmessage({ kind: 'token', index, text: event.text }); }
+              } } });
+              args.onEvent.onmessage({ kind: 'finished', index, text: output, truncated: !!result.truncated });
+              if (result.truncated && !args.options.continueOnTruncation) break;
+            }
+            return;
           case 'translate':
             channel = args.onEvent;
             channels.push(channel);
@@ -1383,6 +1392,25 @@ test('copied prefixes stay hidden until translated text arrives and unchanged bl
   assert.equal(f.byId('lens-original').disabled, false);
 });
 
+test('a completed shorter translation is visible even when it is a prefix of the original', async t => {
+  const f = await fixture(t, { lens: true, ocrText: 'Hello world.', translationOutputs: ['Hello'] });
+  f.click('lens-refresh');
+  await until(() => f.byId('lens-status').textContent.startsWith('更新しました'));
+  assert.equal(f.byId('lens-result').hidden, false);
+  assert.equal(f.byId('lens-translation').textContent, 'Hello');
+});
+
+test('identical lens blocks share one batch item while preserving each overlay position', async t => {
+  const blocks = [.1, .5].map(y => ({ text: 'Good morning.', x: .1, y, width: .5, height: .1 }));
+  const f = await fixture(t, { lens: true, captureResults: [{ kind: 'text', text: blocks.map(block => block.text).join('\n\n'), blocks }], translationOutputs: ['おはようございます。'] });
+  f.click('lens-refresh');
+  await until(() => f.byId('lens-status').textContent.startsWith('更新しました'));
+  const batches = f.calls.filter(call => call.command === 'translate_blocks');
+  assert.equal(batches.length, 1);
+  assert.deepEqual(Array.from(batches[0].args.texts), ['Good morning.']);
+  assert.equal(f.byId('lens-translation').textContent, 'おはようございます。おはようございます。');
+});
+
 test('Wayland keeps the captured original accessible even if the model copies every block', async t => {
   const f = await fixture(t, { lens: true, ocrText: 'SOURCE', translationOutputs: ['source'], status: { lensUsesSelection: true, wayland: true } });
   f.click('lens-refresh');
@@ -2070,35 +2098,7 @@ test('camera permission failure stays retryable without invoking OCR', async t =
   assert.equal(f.calls.some(c => c.command === 'recognize_camera'), false);
 });
 
-test('Android camera permission pause keeps the request open, then backgrounding stops the camera', async t => {
-  const f = await fixture(t, { camera: true, holdCamera: true, status: { platform: 'android' } });
-  f.click('camera-button');
-  await until(() => f.cameraRequests.length === 1);
-  f.closeWindow();
-  assert.equal(f.byId('camera-dialog').open, true);
-  Object.defineProperty(f.window.document, 'hidden', { configurable: true, value: true });
-  f.window.document.dispatchEvent(new f.window.Event('visibilitychange'));
-  assert.equal(f.byId('camera-dialog').open, true);
-  Object.defineProperty(f.window.document, 'hidden', { configurable: true, value: false });
-  f.window.document.dispatchEvent(new f.window.Event('visibilitychange'));
-  f.finishCamera();
-  await until(() => !f.byId('camera-capture').disabled);
-  f.closeWindow();
-  assert.equal(f.cameraStreams[0].track.stopped, 1);
-  assert.equal(f.byId('camera-dialog').open, false);
-});
 
-test('Android releases a late camera permission when the app remains in the background', async t => {
-  const f = await fixture(t, { camera: true, holdCamera: true, status: { platform: 'android' } });
-  f.click('camera-button');
-  await until(() => f.cameraRequests.length === 1);
-  Object.defineProperty(f.window.document, 'hidden', { value: true });
-  f.window.document.dispatchEvent(new f.window.Event('visibilitychange'));
-  f.finishCamera();
-  await until(() => f.cameraStreams[0].track.stopped === 1);
-  assert.equal(f.byId('camera-dialog').open, false);
-  assert.equal(f.calls.some(c => c.command === 'recognize_camera'), false);
-});
 
 test('automatic camera waits for stability, avoids unchanged work and cancels stale translations on movement', async t => {
   const f = await fixture(t, { camera: true, autoCamera: true, holdTranslation: true });
@@ -2180,38 +2180,8 @@ test('automatic OCR errors pause instead of retrying indefinitely; empty images 
   }
 });
 
-test('Android hides desktop-only settings while keeping camera, screen lens, clipboard and translation', async t => {
-  const f = await fixture(t, { status: { platform: 'android', lensSupported: true } });
-  assert.equal(f.byId('shortcut-section').hidden, true);
-  assert.equal(f.byId('update-section').hidden, true);
-  assert.equal(f.byId('quit-button').hidden, true);
-  assert.equal(f.byId('lens-button').hidden, false);
-  assert.equal(f.byId('camera-button').hidden, false);
-  f.click('paste-button'); await until(() => f.byId('source').value);
-  f.click('translate-button'); await until(() => f.byId('translation-status').textContent.includes('翻訳完了'));
-  assert.equal(f.calls.some(c => c.command === 'check_update'), false);
-});
 
-test('Android screen lens releases the camera and passes the selected target to the native overlay', async t => {
-  const f = await fixture(t, { camera: true, target: 'en', status: { platform: 'android', lensSupported: true } });
-  f.click('camera-button'); await until(() => !f.byId('camera-capture').disabled);
-  f.click('lens-button');
-  await until(() => f.calls.some(c => c.command === 'start_screen_lens'));
-  assert.equal(f.cameraStreams[0].track.stopped, 1);
-  assert.equal(f.byId('camera-dialog').open, false);
-  assert.equal(f.calls.find(c => c.command === 'start_screen_lens').args.target, 'en');
-  assert.equal(f.calls.some(c => c.command === 'open_lens'), false);
-});
 
-test('Android screen lens permission cancellation permits retry and missing model disables entry', async t => {
-  const f = await fixture(t, { screenLensError: '画面共有をキャンセルしました。', status: { platform: 'android', lensSupported: true } });
-  f.click('lens-button'); await until(() => !f.byId('lens-button').disabled);
-  assert.equal(f.calls.filter(c => c.command === 'start_screen_lens').length, 1);
-  f.click('lens-button'); await until(() => !f.byId('lens-button').disabled);
-  assert.equal(f.calls.filter(c => c.command === 'start_screen_lens').length, 2);
-  const missing = await fixture(t, { modelReady: false, status: { platform: 'android', lensSupported: true } });
-  assert.equal(missing.byId('lens-button').disabled, true);
-});
 
 test('camera rotation swaps capture dimensions and can rotate a frozen image without reopening camera', async t => {
   const f = await fixture(t, { camera: true });
@@ -2345,6 +2315,17 @@ test('camera streaming updates are batched until the next animation frame', asyn
   assert.equal(f.byId('camera-paragraphs').querySelector('span').textContent, '翻訳をまとめて表示');
   f.finish({ truncated: false });
   await until(() => f.byId('camera-status').textContent === '翻訳完了');
+});
+
+test('repeated camera text does not inflate cache size or evict results that still fit', async t => {
+  const blocks = Array.from({ length: 24 }, (_, index) => ({ text: 'Same label.', x: .1, y: index / 24, width: .7, height: .03 }));
+  const f = await fixture(t, { camera: true, cameraBlocks: blocks, translationOutputs: blocks.map(() => '訳文'.repeat(12000)) });
+  f.click('camera-button'); await until(() => !f.byId('camera-capture').disabled);
+  f.click('camera-capture'); await until(() => f.byId('camera-status').textContent === '翻訳完了');
+  const batches = f.calls.filter(call => call.command === 'translate_blocks').length;
+  f.click('camera-retry'); await until(() => !f.byId('camera-capture').disabled);
+  f.click('camera-capture'); await until(() => f.byId('camera-status').textContent === '翻訳完了');
+  assert.equal(f.calls.filter(call => call.command === 'translate_blocks').length, batches);
 });
 
 test('losing the camera device cancels work and allows reopening without stale results', async t => {

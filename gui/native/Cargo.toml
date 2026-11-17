@@ -1,0 +1,53 @@
+[package]
+name = "anywhere-plamo"
+version = "0.2.8"
+description = "A small, local translation app powered by PLaMo"
+edition = "2021"
+rust-version = "1.90"
+license = "MIT"
+
+[lib]
+name = "anywhere_plamo_lib"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+cc = "1"
+
+[dependencies]
+tauri = { version = "2", features = ["image-png", "tray-icon"] }
+tauri-plugin-clipboard-manager = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+tokio = { version = "1", features = ["fs", "io-util", "process", "sync", "time", "macros"] }
+tokio-util = "0.7"
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4"] }
+image = { version = "0.25", default-features = false, features = ["png", "pnm"] }
+base64 = "0.22"
+
+plamo-core = { path = "../../core" }
+tauri-plugin-single-instance = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-updater = "2"
+open = "5"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+arboard = { version = "3.7", default-features = false, features = ["wayland-data-control"] }
+libc = "0.2"
+wl-clipboard-rs = "0.9"
+x11rb = { version = "0.13", features = ["image", "composite"] }
+raw-window-handle = "0.6"
+dbus = "0.9"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSPasteboard", "NSPasteboardItem"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSString", "NSData", "NSEnumerator"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", features = ["Win32_Graphics_Gdi", "Win32_Graphics_Dwm", "Win32_System_Com", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_UI_Accessibility", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
+
+[dev-dependencies]
+tauri = { version = "2", features = ["test"] }

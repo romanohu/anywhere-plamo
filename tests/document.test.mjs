@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { pdfBlocks, readingOrder, splitDocumentText, wrapText } from '../src/document-layout.ts';
+import { pdfBlocks, readingOrder, wrapText } from '../gui/web/document-layout.ts';
 
 const style = { f: { ascent: .8, fontFamily: 'sans-serif' } };
 const item = (str, x, y, width = 100, size = 12) => ({ str, dir: 'ltr', width, height: size, transform: [size, 0, 0, size, x, y], fontName: 'f' });
@@ -43,14 +43,6 @@ test('CJK fragments and hyphenated wraps join without corrupting Hangul spaces',
   assert.equal(blocks[0].text, '文章を読みます。その続きです。');
   assert.equal(pdfBlocks([item('trans-', 40, 700), item('lation works.', 40, 684)], style, viewport, 600, 800)[0].text, 'translation works.');
   assert.equal(pdfBlocks([item('한국어 문장을', 40, 700), item('번역합니다.', 40, 684)], style, viewport, 600, 800)[0].text, '한국어 문장을 번역합니다.');
-});
-
-test('long documents split on sentences and never split a surrogate pair', () => {
-  const text = 'This is a sentence. '.repeat(400) + '😀'.repeat(2000);
-  const chunks = splitDocumentText(text);
-  assert.ok(chunks.length > 3);
-  assert.ok(chunks.every(c => c.length <= 2000 && c.isWellFormed()));
-  assert.equal(chunks.join('').replace(/\s/g, ''), text.replace(/\s/g, ''));
 });
 
 test('replacement lines wrap Korean words and Japanese glyphs within their region', () => {

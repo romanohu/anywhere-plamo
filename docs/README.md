@@ -4,8 +4,8 @@
 
 - [セットアップ](#セットアップ)
 - [ソースから起動・ビルド](#ソースから起動)
-- [Android版](#android開発版)
 - [使い方](#使い方)
+- [開発・構成](development.md)
 - [ライセンス](#ライセンス)
 
 ## セットアップ
@@ -48,26 +48,9 @@ python3 scripts/collect-licenses.py
 npm run tauri build
 ```
 
-成果物は`src-tauri/target/release/bundle/`に生成されます。アプリ内更新用の配布物とMacの継続した署名については[更新の配布手順](updating.md)を参照してください。
+成果物は`target/release/bundle/`に生成されます。アプリ内更新用の配布物とMacの継続した署名については[更新の配布手順](updating.md)を参照してください。
 
 Windowsでは`py -3.12 scripts/collect-licenses.py`の後、`npm run tauri -- build --bundles nsis`でインストーラーを作ります。画面取得・選択翻訳・表示倍率を実機で確認してから配布してください。
-
-### Android（開発版）
-
-Android 9以降のARM64端末向けAPKは[Releases](https://github.com/romanohu/anywhere-plamo/releases)から取得できます。
-
-Android版のビルドには、上記に加えてJDK 17以上、Android SDK（API 36・Build Tools 36.0.0）、NDK r28以上、Ninjaが必要です。`JAVA_HOME`・`ANDROID_HOME`・`NDK_HOME`を設定して実行します。Android 9以降の64bit端末が対象です。実機での動作・発熱は未確認です。
-
-```sh
-rustup target add aarch64-linux-android
-npm ci
-npm run android:prepare
-npm run tauri -- android build --debug --apk --target aarch64
-```
-
-検証用APKは`src-tauri/gen/android/app/build/outputs/apk/universal/debug/`に生成されます。翻訳モデルは初回起動後に取得します。Android版は文章の入力・貼り付け、カメラ翻訳、他のアプリに重ねる画面OCRレンズに対応します。レンズは初回に重ね表示と画面共有を許可して使います。
-
-署名付きAPKの作成は[Android配布手順](android-testing.md#配布用apk)を参照してください。
 
 ## 使い方
 
