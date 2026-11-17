@@ -20,7 +20,7 @@ import urllib.request
 from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument('--app', type=Path, default=ROOT / 'src-tauri/target/debug/anywhere-plamo')
+parser.add_argument('--app', type=Path, default=ROOT / 'target/debug/anywhere-plamo')
 parser.add_argument('--comic', type=Path, help='Optional local PHD comic 156 image for OCR lens regression checks')
 parser.add_argument('--korean-model', type=Path, help='Optional Korean ONNX weight for offline lens tests')
 parser.add_argument('--camera', action='store_true', help='Use fixture video frames with real local OCR and translation')
@@ -475,7 +475,7 @@ def lens_checks():
     js("""window.lensCalls=[]; const nativeInvoke=window.__TAURI__.core.invoke;
       window.__TAURI__.core={...window.__TAURI__.core,invoke:(command,args)=>{
         const entry={command,args,started:performance.now()};
-        if(command==='capture_lens'||command==='translate') window.lensCalls.push(entry);
+        if(['capture_lens','translate','translate_blocks'].includes(command)) window.lensCalls.push(entry);
         if(command==='capture_lens') {
           const receive=args.onEvent.onmessage;
           args.onEvent.onmessage=event=>{
@@ -494,21 +494,21 @@ def lens_checks():
             wait("document.getElementById('lens-status').textContent === '自動更新中'", 30)
             assert 'Local translation' in text('lens-source'), text('lens-source')
             assert re.search('[ぁ-んァ-ン一-龯]', text('lens-translation'))
-            translations = js("return lensCalls.filter(call=>call.command==='translate').length")
+            translations = js("return lensCalls.filter(call=>['translate','translate_blocks'].includes(call.command)).length")
             assert js("return lensCalls.some(call=>call.command==='capture_lens')"), 'The native IPC observer is not attached'
             time.sleep(2.2)
-            assert js("return lensCalls.filter(call=>call.command==='translate').length") == translations
+            assert js("return lensCalls.filter(call=>['translate','translate_blocks'].includes(call.command)).length") == translations
             assert js("return lensCalls.filter(call=>call.command==='capture_lens').slice(-2).every(call=>call.kind==='unchanged')")
             check('automatic mode translates without refresh and leaves unchanged text alone')
 
             source('layout')
             wait("document.getElementById('lens-source').textContent.includes('This paragraph') && document.getElementById('lens-status').textContent === '自動更新中'", 30)
-            after_other_page = js("return lensCalls.filter(call=>call.command==='translate').length")
+            after_other_page = js("return lensCalls.filter(call=>['translate','translate_blocks'].includes(call.command)).length")
             assert after_other_page > translations
             started = time.monotonic()
             source('english')
             wait("document.getElementById('lens-source').textContent.includes('Local translation') && document.getElementById('lens-status').textContent === '自動更新中'", 30)
-            assert js("return lensCalls.filter(call=>call.command==='translate').length") == after_other_page
+            assert js("return lensCalls.filter(call=>['translate','translate_blocks'].includes(call.command)).length") == after_other_page
             check('returning to an earlier image reuses its translation without model inference', {'seconds': round(time.monotonic() - started, 3)})
 
             subprocess.run(['xdotool', 'key', '--clearmodifiers', native_key], env=env, check=True)
@@ -583,7 +583,7 @@ def lens_checks():
     display = Gdk.Display.open(env['DISPLAY'])
     _, origin_x, origin_y = GdkX11.X11Window.foreign_new_for_display(display, int(native_window)).get_origin()
     display.close()
-    translations = js("return lensCalls.filter(call=>call.command==='translate').length")
+    translations = js("return lensCalls.filter(call=>['translate','translate_blocks'].includes(call.command)).length")
     captures = js("return lensCalls.filter(call=>call.command==='capture_lens').length")
     toolbar = js("return document.querySelector('.lens-toolbar').getBoundingClientRect().toJSON()")
     assert toolbar['height'] == 34 and toolbar['bottom'] == layout['region']['y'], toolbar
@@ -593,7 +593,7 @@ def lens_checks():
         subprocess.run(['xdotool', 'mousemove', '--window', native_window, '120', str(y),
                         'click', '--repeat', '8', '--delay', '15', '5', 'click', '4'], env=env, check=True)
     time.sleep(1.5)
-    assert js("return lensCalls.filter(call=>call.command==='translate').length") == translations
+    assert js("return lensCalls.filter(call=>['translate','translate_blocks'].includes(call.command)).length") == translations
     kinds = js("return lensCalls.filter(call=>call.command==='capture_lens').slice(arguments[0]).filter(call=>call.kind).map(call=>call.kind)", captures)
     assert len(kinds) >= 2 and all(kind == 'unchanged' for kind in kinds), kinds
     assert js("return window.scrollX===0 && window.scrollY===0 && document.getElementById('lens-result').scrollTop===0")
@@ -607,7 +607,7 @@ def lens_checks():
     time.sleep(1.5)
     kinds = js("return lensCalls.filter(call=>call.command==='capture_lens').slice(arguments[0]).filter(call=>call.kind).map(call=>call.kind)", captures)
     assert len(kinds) >= 2 and all(kind == 'unchanged' for kind in kinds), kinds
-    assert js("return lensCalls.filter(call=>call.command==='translate').length") == translations
+    assert js("return lensCalls.filter(call=>['translate','translate_blocks'].includes(call.command)).length") == translations
     assert js("return lensCalls.filter(call=>call.command==='capture_lens').at(-1).args.region.bottomInset") == 19
     check('the 18px footer excludes changes behind it from OCR and automatic updates', footer)
     source('layout-bottom', bar=[origin_x + 10, origin_y + round(footer['y']) - 30])
@@ -713,7 +713,7 @@ def lens_checks():
         assert any('STILL HERE' in b['text'] and 'TELL' not in b['text'] for b in blocks), blocks
         assert any('TELL' in b['text'] and 'STILL HERE' not in b['text'] for b in blocks), blocks
         rendered = js("return [...document.querySelectorAll('.lens-block')].slice(0,5).map(n=>n.textContent)")
-        (WORK / 'comic-capture.json').write_text(json.dumps({'capture': capture, 'rendered': rendered, 'requests': js("return lensCalls.filter(c=>c.command==='translate').map(c=>c.args.text)")}, ensure_ascii=False, indent=2))
+        (WORK / 'comic-capture.json').write_text(json.dumps({'capture': capture, 'rendered': rendered, 'requests': js("return lensCalls.filter(c=>['translate','translate_blocks'].includes(c.command)).flatMap(c=>c.args.texts??[c.args.text])")}, ensure_ascii=False, indent=2))
         assert len(rendered) == 5 and all(re.search('[ぁ-んァ-ン一-龯]', t) for t in rendered), rendered
         check('PaddleOCR keeps five comic speech regions separate and translates every region',
               {'ocr': [b['text'] for b in blocks], 'translation': rendered})

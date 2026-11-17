@@ -44,7 +44,7 @@ def manifest(config, target, name, signature, previous=None):
 
 
 def sign_runtime(identity):
-    runtime = ROOT / 'src-tauri/resources/runtime'
+    runtime = ROOT / 'gui/native/resources/runtime'
     # Sign native resources inside out; do not use --deep to create signatures.
     magic = {bytes.fromhex(value) for value in ['feedface', 'cefaedfe', 'feedfacf', 'cffaedfe', 'cafebabe', 'bebafeca', 'cafebabf', 'bfbafeca']}
     for file in sorted(runtime.rglob('*'), key=lambda p: len(p.parts), reverse=True):
@@ -63,7 +63,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--merge', type=pathlib.Path, help='Same-version latest.json from another platform')
     options = parser.parse_args()
-    config = json.loads((ROOT / 'src-tauri/tauri.conf.json').read_text())
+    config = json.loads((ROOT / 'gui/native/tauri.conf.json').read_text())
     system = platform.system()
     architecture = {'arm64': 'aarch64', 'aarch64': 'aarch64', 'x86_64': 'x86_64', 'amd64': 'x86_64'}.get(platform.machine().lower())
     if not architecture or system not in {'Darwin', 'Linux', 'Windows'}:
@@ -89,14 +89,14 @@ def main():
     if system == 'Linux':
         # PyInstaller sets this when running its worker. linuxdeploy also needs
         # the private library paths while inspecting the frozen OCR resources.
-        libraries = sorted({str(file.parent) for file in (ROOT / 'src-tauri/resources/runtime/ocr').rglob('*.so*')})
+        libraries = sorted({str(file.parent) for file in (ROOT / 'gui/native/resources/runtime/ocr').rglob('*.so*')})
         build_env['LD_LIBRARY_PATH'] = os.pathsep.join(filter(None, [build_env.get('LD_LIBRARY_PATH'), *libraries]))
     subprocess.run([shutil.which('npm') or 'npm', 'run', 'tauri', '--', 'build', '--bundles', bundles,
                     '--config', json.dumps({'bundle': {'createUpdaterArtifacts': True}})], cwd=ROOT, env=build_env, check=True)
-    artifacts = [file for file in (ROOT / 'src-tauri/target/release/bundle').glob(pattern)
+    artifacts = [file for file in (ROOT / 'target/release/bundle').glob(pattern)
                  if pathlib.Path(str(file) + '.sig').is_file() and pathlib.Path(str(file) + '.sig').stat().st_mtime >= started]
     if len(artifacts) != 1:
-        raise SystemExit('Expected one newly signed updater file in src-tauri/target/release/bundle.')
+        raise SystemExit('Expected one newly signed updater file in target/release/bundle.')
     artifact = artifacts[0]
     signature = pathlib.Path(str(artifact) + '.sig').read_text().strip()
     target = {'Darwin': 'darwin', 'Linux': 'linux', 'Windows': 'windows'}[system] + '-' + architecture

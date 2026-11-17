@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { cameraMotion } from '../src/camera-motion.ts';
-import { cameraLayout } from '../src/camera-layout.ts';
+import { cameraMotion } from '../gui/web/camera-motion.ts';
+import { cameraLayout } from '../gui/web/camera-layout.ts';
 
 function frame(dx = 0, dy = 0, brightness = 0, noise = 0) {
   const pixels = new Uint8ClampedArray(64 * 48 * 4);

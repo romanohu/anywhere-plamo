@@ -1,6 +1,6 @@
 # Anywhere Plamo
 
-文章・画面・カメラの文字を翻訳する非公式PLaMoクライアントです。Linux・macOSに対応し、Windows・Android版は開発中です。PLaMo 3 Translateを端末上で動かし、モデル取得後はオフラインで翻訳できます。
+文章・画面・カメラの文字を翻訳する非公式PLaMoクライアントです。Linux・macOSに対応し、Windows版は開発中です。PLaMo 3 Translateを端末上で動かし、モデル取得後はオフラインで翻訳できます。
 
 <table>
   <tr><th>OCRレンズ</th><th>選択した文章の翻訳</th></tr>

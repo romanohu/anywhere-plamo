@@ -42,7 +42,7 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(set(merged['platforms']), {'darwin-aarch64', 'linux-x86_64'})
 
     def test_rejects_mismatched_key_version_or_release(self):
-        production = json.loads((ROOT / 'src-tauri/tauri.conf.json').read_text())
+        production = json.loads((ROOT / 'gui/native/tauri.conf.json').read_text())
         with self.assertRaisesRegex(ValueError, 'key does not match'):
             release.check_signature(self.signature, production['plugins']['updater']['pubkey'], '0.2.2')
         with self.assertRaisesRegex(ValueError, 'signed version'):
