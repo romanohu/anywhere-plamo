@@ -131,9 +131,11 @@ fn read_platform() -> Result<String, String> {
 #[cfg(target_os = "macos")]
 mod macos {
     use core_foundation::{
+        array::CFArray,
         base::{Boolean, CFType, CFTypeID, CFTypeRef, TCFType},
         boolean::CFBoolean,
         dictionary::{CFDictionary, CFDictionaryRef},
+        number::CFNumber,
         string::{CFString, CFStringRef},
     };
 
@@ -142,6 +144,7 @@ mod macos {
     extern "C" {
         fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> Boolean;
         fn AXUIElementCreateSystemWide() -> CFTypeRef;
+        fn AXUIElementCreateApplication(pid: i32) -> CFTypeRef;
         fn AXUIElementGetTypeID() -> CFTypeID;
         fn AXUIElementGetPid(element: CFTypeRef, pid: *mut i32) -> i32;
         fn AXUIElementSetMessagingTimeout(element: CFTypeRef, timeout: f32) -> i32;
@@ -156,6 +159,7 @@ mod macos {
             parameter: CFTypeRef,
             value: *mut CFTypeRef,
         ) -> i32;
+        fn AXUIElementPerformAction(element: CFTypeRef, action: CFStringRef) -> i32;
     }
 
     fn attribute(element: &CFType, name: &str) -> Result<CFType, String> {
@@ -220,6 +224,70 @@ mod macos {
         Ok(pid)
     }
 
+    pub(super) fn copy_menu_item(pid: i32) -> Option<CFType> {
+        use std::{
+            collections::VecDeque,
+            time::{Duration, Instant},
+        };
+
+        let raw = unsafe { AXUIElementCreateApplication(pid) };
+        if raw.is_null() {
+            return None;
+        }
+        let app = unsafe { CFType::wrap_under_create_rule(raw) };
+        // Menu lookup must not strand selection translation in an unresponsive app.
+        unsafe { AXUIElementSetMessagingTimeout(app.as_CFTypeRef(), 0.15) };
+        let deadline = Instant::now() + Duration::from_millis(500);
+        let menu = attribute(&app, "AXMenuBar").ok()?;
+        let mut pending = VecDeque::from([(menu, 0)]);
+        let mut remaining = 256;
+        while let Some((element, depth)) = pending.pop_front() {
+            if Instant::now() >= deadline {
+                break;
+            }
+            // AX menu modifiers are not CGEvent flags: zero means Command only.
+            // Match the shortcut, so localized Copy titles work as well.
+            let command = attribute(&element, "AXMenuItemCmdChar")
+                .ok()
+                .and_then(|value| value.downcast::<CFString>());
+            if command.is_some_and(|value| value.to_string().eq_ignore_ascii_case("c")) {
+                let modifiers = attribute(&element, "AXMenuItemCmdModifiers")
+                    .ok()
+                    .and_then(|value| value.downcast::<CFNumber>())
+                    .and_then(|value| value.to_i64());
+                let enabled = attribute(&element, "AXEnabled")
+                    .ok()
+                    .and_then(|value| value.downcast::<CFBoolean>());
+                if modifiers == Some(0) && enabled.is_some_and(bool::from) {
+                    return Some(element);
+                }
+            }
+            if depth >= 4 || remaining == 0 {
+                continue;
+            }
+            if let Some(children) = attribute(&element, "AXChildren")
+                .ok()
+                .and_then(|value| value.downcast::<CFArray>())
+            {
+                for child in children.iter().take(remaining) {
+                    // AXChildren contains retained AX elements; the queue must
+                    // keep its own reference after the array is released.
+                    let child = unsafe { CFType::wrap_under_get_rule(*child) };
+                    if child.type_of() == unsafe { AXUIElementGetTypeID() } {
+                        pending.push_back((child, depth + 1));
+                        remaining -= 1;
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    pub(super) fn press_copy_menu(item: &CFType) -> bool {
+        let action = CFString::new("AXPress");
+        unsafe { AXUIElementPerformAction(item.as_CFTypeRef(), action.as_concrete_TypeRef()) == 0 }
+    }
+
     pub fn read() -> Result<String, String> {
         let options = CFDictionary::from_CFType_pairs(&[(
             CFString::new("AXTrustedCheckOptionPrompt"),
@@ -246,8 +314,8 @@ mod macos {
                 }
             }
         }
-        // PDF viewers may support Copy without exposing their selected text
-        // through accessibility. Keep the original app focused until it copies.
+        // Terminals and PDF viewers may support Copy without exposing selected
+        // text through accessibility. Keep the original app focused until it copies.
         super::copy::read(source_pid, || focused_pid(&system) == Ok(source_pid))
     }
 }

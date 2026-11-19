@@ -1,4 +1,4 @@
-//! Copy fallback for apps whose accessibility tree omits selected PDF text.
+//! Copy fallback for terminals and viewers whose accessibility tree omits selections.
 
 use core_foundation::base::{CFType, CFTypeRef, TCFType};
 use objc2::{
@@ -145,18 +145,43 @@ pub fn read(source_pid: i32, source_is_focused: impl Fn() -> bool) -> Result<Str
     if source_pid <= 0 {
         return Err(super::UNAVAILABLE.into());
     }
-    // The shortcut fires on key-down. Do not send Command+C while its physical
-    // modifiers are still held (Control, Option, Shift, Command, or Fn).
-    let deadline = Instant::now() + Duration::from_secs(1);
-    while unsafe { CGEventSourceFlagsState(1) } & 0x009e_0000 != 0 {
-        if !source_is_focused() || Instant::now() >= deadline {
-            return Err(super::UNAVAILABLE.into());
-        }
-        sleep(POLL_INTERVAL);
-    }
+    let menu = super::macos::copy_menu_item(source_pid);
     autoreleasepool(|_| {
+        let board = NSPasteboard::generalPasteboard();
+        if let Some(item) = &menu {
+            let generation = board.changeCount();
+            let mut pressed = false;
+            let result = capture(
+                &board,
+                || {
+                    // Invoke Copy without sending input into the shell/editor.
+                    pressed = super::macos::press_copy_menu(item);
+                    if pressed {
+                        Ok(())
+                    } else {
+                        Err(super::UNAVAILABLE.into())
+                    }
+                },
+                &source_is_focused,
+                Duration::from_secs(1),
+            );
+            // Retry only a rejected action with an untouched clipboard and
+            // focus. An accepted but slow Copy must not race a second attempt.
+            if pressed || board.changeCount() != generation || !source_is_focused() {
+                return result;
+            }
+        }
+        // Apps without a usable Copy menu retain the keyboard fallback.
+        // Wait before snapshotting so a real copy while keys are held is saved.
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while unsafe { CGEventSourceFlagsState(1) } & 0x009e_0000 != 0 {
+            if !source_is_focused() || Instant::now() >= deadline {
+                return Err(super::UNAVAILABLE.into());
+            }
+            sleep(POLL_INTERVAL);
+        }
         capture(
-            &NSPasteboard::generalPasteboard(),
+            &board,
             || {
                 // Allocate both events before posting either, so allocation
                 // failure cannot leave a synthetic key-down without a key-up.

@@ -26,6 +26,7 @@ parser.add_argument('--korean-model', type=Path, help='Optional Korean ONNX weig
 parser.add_argument('--camera', action='store_true', help='Use fixture video frames with real local OCR and translation')
 parser.add_argument('--document', action='store_true', help='Test local PDF/image loading, replacement, OCR and cancellation')
 parser.add_argument('--lens', action='store_true', help='Test manual and automatic OCR with the bundled runtime and a prepared model')
+parser.add_argument('--terminal', action='store_true', help='Test mouse selections in xterm and WezTerm, including Vim (requires xterm, wezterm and vi)')
 parser.add_argument('--work-dir', type=Path, default=ROOT / '.runtime-build/desktop-test')
 args = parser.parse_args()
 if sys.platform != 'linux':
@@ -158,6 +159,83 @@ def translated():
     output = text('translation')
     assert output.strip(), output
     return output
+
+def terminal_checks():
+    global selection_source
+    for program in ('xterm', 'wezterm', 'vi'):
+        assert shutil.which(program), f'{program} is required for --terminal'
+    assert invoke('get_status')['shortcutAvailable']
+    invoke('set_shortcut', {'shortcut': 'Ctrl+Alt+KeyT'})
+    invoke('set_shortcut_popup', {'enabled': False})
+    sentence = 'Please open the window.'
+    fixture = WORK / 'terminal-source.txt'
+    fixture.write_text(sentence + '\nThe meeting starts at ten.\n')
+    original = fixture.read_bytes()
+    sentinel = 'Clipboard contents must survive selection translation.'
+    for terminal in ('xterm', 'wezterm'):
+        for editor in (False, True):
+            title = 'PlamoTerminalTest'
+            if editor:
+                # Mouse reporting deliberately enabled: Shift-drag must select
+                # terminal text instead of changing Vim's visual selection.
+                command = ['vi', '-u', 'NONE', '-i', 'NONE', '-n', '-c', 'set mouse=a noswapfile', fixture.name]
+            else:
+                command = ['bash', '--noprofile', '--norc', '-c',
+                           "printf '\033[2J\033[HPlease open the window.\n'; exec bash --noprofile --norc -i"]
+            if terminal == 'xterm':
+                launch = ['xterm', '-class', title, '-fa', 'monospace', '-fs', '16', '-geometry', '90x14+20+30', '-e']
+            else:
+                launch = ['wezterm', '--skip-config', '--config', 'enable_tab_bar=false',
+                          '--config', 'enable_wayland=false', '--config', 'check_for_updates=false',
+                          '--config', 'front_end="Software"', '--config', 'font_size=16',
+                          '--config', 'window_padding={left=0,right=0,top=0,bottom=0}',
+                          'start', '--always-new-process', '--class', title, '--position', '20,30', '--cwd', str(WORK), '--']
+            terminal_env = {**env, 'PS1': '$ ', 'PROMPT_COMMAND': '', 'TERM': 'xterm-256color'}
+            terminal_env.pop('WEZTERM_UNIX_SOCKET', None)
+            selection_source = subprocess.Popen(launch + command, cwd=WORK, env=terminal_env, stdout=log, stderr=log)
+            window = ''
+            for _ in range(100):
+                found = subprocess.run(['xdotool', 'search', '--onlyvisible', '--class', '^' + title + '$'], env=env, capture_output=True, text=True)
+                if found.returncode == 0:
+                    window = found.stdout.splitlines()[-1]
+                    break
+                assert selection_source.poll() is None, (WORK / 'desktop.log').read_text()[-2000:]
+                time.sleep(0.1)
+            assert window, terminal
+            time.sleep(0.5)
+            fill('Waiting for terminal selection.', 'ja')
+            drag = ['xdotool', 'windowactivate', '--sync', window, 'mousemove', '--window', window, '4', '12']
+            if editor:
+                drag += ['keydown', 'Shift_L']
+            drag += ['mousedown', '1', 'sleep', '0.1', 'mousemove', '--window', window, '650', '12', 'sleep', '0.1', 'mouseup', '1']
+            if editor:
+                drag += ['keyup', 'Shift_L']
+            subprocess.run(drag, env=env, check=True)
+            screenshot(f'terminal-{terminal}-' + ('vim' if editor else 'shell') + '-selection.png', desktop=True)
+            subprocess.run(['xdotool', 'windowactivate', '--sync', window], env=env, check=True)
+            # WezTerm itself copies on mouse-up. Set a different clipboard after
+            # selection to prove the shortcut reads PRIMARY, not that old copy.
+            invoke('write_clipboard', {'text': sentinel})
+            subprocess.run(['xdotool', 'key', '--clearmodifiers', 'ctrl+alt+t'], env=env, check=True)
+            wait("document.getElementById('source').value.trim() === " + json.dumps(sentence))
+            output = translated()
+            assert invoke('read_clipboard') == sentinel
+            assert re.search('[ぁ-んァ-ヶ一-龠]', output), output
+            check(f'{terminal}: mouse selection in ' + ('Vim with mouse reporting' if editor else 'shell') + ' translates without changing the clipboard', output)
+            screenshot(f'terminal-{terminal}-' + ('vim' if editor else 'shell') + '.png', desktop=True)
+            subprocess.run(['xdotool', 'windowactivate', '--sync', window], env=env, check=True)
+            if editor:
+                subprocess.run(['xdotool', 'key', 'Escape'], env=env, check=True)
+            # Normal :q refuses modified Vim buffers. A clean exit proves the
+            # shortcut did not insert keys into the editor or alter the file.
+            subprocess.run(['xdotool', 'type', '--clearmodifiers', ':q' if editor else 'exit'], env=env, check=True)
+            subprocess.run(['xdotool', 'key', 'Return'], env=env, check=True)
+            assert selection_source.wait(timeout=10) == 0
+            selection_source = None
+            assert fixture.read_bytes() == original
+            check(f'{terminal}: ' + ('Vim buffer and file' if editor else 'shell') + ' remain intact')
+    print('TERMINAL NATIVE CHECKS PASSED', flush=True)
+
 def lens_checks():
     global selection_source
     status = invoke('get_status')
@@ -880,7 +958,7 @@ try:
             if driver.poll() is not None:
                 raise RuntimeError('Driver stopped: ' + (WORK / 'desktop.log').read_text())
             time.sleep(0.1)
-    value = request('POST', '/session', {'capabilities': {'alwaysMatch': {'browserName': 'wry', 'tauri:options': {'application': str(APP), 'args': [] if args.lens or args.camera or args.document else ['--background']}}}})
+    value = request('POST', '/session', {'capabilities': {'alwaysMatch': {'browserName': 'wry', 'tauri:options': {'application': str(APP), 'args': [] if args.lens or args.camera or args.document or args.terminal else ['--background']}}}})
     SESSION = value['sessionId']
     request('POST', f'/session/{SESSION}/timeouts', {'script': 30000})
     select_window('main')
@@ -888,6 +966,9 @@ try:
     wait("document.getElementById('model-tag').textContent === " + json.dumps('準備完了' if status['modelReady'] else '未準備'))
     assert status['runtimeAvailable'], status
     check('native application startup', status)
+    if args.terminal:
+        terminal_checks()
+        sys.exit(0)
     if args.document:
         document_checks()
         sys.exit(0)
