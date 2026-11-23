@@ -1,6 +1,6 @@
 [package]
 name = "anyplm-core"
-version = "0.2.8"
+version = "0.2.9"
 description = "PLaMo translation core shared by the Anywhere Plamo app and the plm CLI"
 edition = "2021"
 rust-version = "1.90"

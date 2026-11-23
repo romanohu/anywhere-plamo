@@ -1,6 +1,6 @@
 [package]
 name = "anyplm-cli"
-version = "0.2.8"
+version = "0.2.9"
 description = "Command-line PLaMo translation sharing the Anywhere Plamo app's models and dictionary"
 edition = "2021"
 rust-version = "1.90"
